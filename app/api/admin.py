@@ -1,0 +1,136 @@
+"""账号、审计与备份（设计大纲 3、9.2）。"""
+from __future__ import annotations
+
+import os
+import sqlite3
+import tempfile
+
+from .. import db, security, access
+from ..errors import bad_request, conflict
+from ..http_server import Response, route
+from .common import get_or_404
+
+ADMIN = ("admin",)
+
+
+@route("GET", r"/api/users", roles=ADMIN, scope="registry")
+def list_users(ctx):
+    rows = db.q(ctx.conn, "SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id")
+    out = []
+    for r in rows:
+        item = dict(r)
+        item["role_name"] = security.ROLE_NAMES.get(r["role"], r["role"])
+        item['event_ids'] = access.event_ids(ctx.conn, r)
+        sync = db.q1(ctx.conn, "SELECT COUNT(*) AS pending,MAX(last_error) AS error FROM user_snapshot_outbox WHERE user_id=?", (r['id'],))
+        item['snapshot_sync_pending'] = sync['pending']
+        item['snapshot_sync_error'] = sync['error'] or ''
+        out.append(item)
+    return {"users": out, "roles": security.ROLE_NAMES}
+
+
+@route("POST", r"/api/users", roles=ADMIN, scope="registry")
+def create_user(ctx):
+    username = (ctx.body.get("username") or "").strip()
+    password = ctx.body.get("password") or ""
+    role = ctx.body.get("role") or "recorder"
+    if role not in security.ROLES:
+        raise bad_request('角色不合法')
+    if not username or len(password) < 6:
+        raise bad_request("请填写用户名，密码至少 6 位")
+    if db.q1(ctx.conn, "SELECT id FROM users WHERE username = ?", (username,)):
+        raise conflict("用户名已存在", code="duplicate")
+    uid = security.create_user(ctx.conn, username, password, role,
+                               ctx.body.get("display_name") or username)
+    access.set_events(ctx.conn, uid, ctx.body.get('event_ids', []))
+    db.sync_user_to_event_databases(ctx.conn, uid)
+    security.audit(ctx.conn, ctx.user, "create_user", "user", uid, {"role": role})
+    return {"user_id": uid, "snapshot_sync_pending": True}
+
+
+@route("POST", r"/api/users/(?P<user_id>\d+)/password", roles=ADMIN, scope="registry")
+def reset_password(ctx):
+    user_id = int(ctx.params["user_id"])
+    get_or_404(ctx.conn, "users", user_id, "账号")
+    password = ctx.body.get("password") or ""
+    if len(password) < 6:
+        raise bad_request("密码至少 6 位")
+    security.set_password(ctx.conn, user_id, password)
+    db.sync_user_to_event_databases(ctx.conn, user_id)
+    db.run(ctx.conn, "DELETE FROM tokens WHERE user_id = ?", (user_id,))
+    security.audit(ctx.conn, ctx.user, "reset_password", "user", user_id)
+    return {"message": "密码已重置，该账号需重新登录", "snapshot_sync_pending": True}
+
+
+@route("PUT", r"/api/users/(?P<user_id>\d+)", roles=ADMIN, scope="registry")
+def update_user(ctx):
+    user_id = int(ctx.params["user_id"])
+    get_or_404(ctx.conn, "users", user_id, "账号")
+    fields = {}
+    if "display_name" in ctx.body:
+        fields["display_name"] = ctx.body["display_name"]
+    if "role" in ctx.body:
+        if ctx.body["role"] not in security.ROLES:
+            raise bad_request("角色不合法")
+        fields["role"] = ctx.body["role"]
+    if "active" in ctx.body:
+        fields["active"] = 1 if ctx.body["active"] else 0
+    if 'event_ids' in ctx.body:
+        access.set_events(ctx.conn, user_id, ctx.body['event_ids'])
+        security.audit(ctx.conn, ctx.user, 'set_event_access', 'user', user_id, {'event_ids': ctx.body['event_ids']})
+    if fields:
+        db.update(ctx.conn, "users", user_id, fields)
+        db.sync_user_to_event_databases(ctx.conn, user_id)
+        security.audit(ctx.conn, ctx.user, "update_user", "user", user_id, fields)
+    return {"message": "已更新", "snapshot_sync_pending": bool(fields)}
+
+
+@route("GET", r"/api/audit-logs", roles=ADMIN)
+def audit_logs(ctx):
+    args: list = []
+    where = ["1=1"]
+    if ctx.arg("entity_type"):
+        where.append("a.entity_type = ?")
+        args.append(ctx.arg("entity_type"))
+    if ctx.arg("entity_id"):
+        where.append("a.entity_id = ?")
+        args.append(int(ctx.arg("entity_id")))
+    if ctx.arg("action"):
+        where.append("a.action = ?")
+        args.append(ctx.arg("action"))
+    limit = int(ctx.arg("limit") or 200)
+    rows = db.q(ctx.conn,
+                f"""SELECT a.*, u.display_name AS user_name FROM audit_logs a
+                      LEFT JOIN users u ON u.id = a.user_id
+                     WHERE {' AND '.join(where)} ORDER BY a.id DESC LIMIT ?""",
+                args + [limit])
+    return {"logs": db.rows_to_dicts(rows)}
+
+
+@route("GET", r"/api/admin/backup", roles=ADMIN)
+def backup(ctx):
+    """下载数据库备份（SQLite）。
+
+    使用 sqlite3 的在线备份接口生成一致快照：直接复制数据库文件会漏掉 WAL 中
+    尚未合并的写入，得到损坏或过期的副本。迁移到 PostgreSQL 后改用 pg_dump 定期备份。
+    """
+    stamp = db.now(ctx.conn).replace(":", "").replace(" ", "_").replace("-", "")
+    event_id = ctx.headers.get("X-Event-ID") or "current"
+    with tempfile.TemporaryDirectory(prefix="stss_backup_") as tmp:
+        snapshot = os.path.join(tmp, f"event_{event_id}_backup_{stamp}.db")
+        dest = sqlite3.connect(snapshot)
+        source_path = ctx.conn.execute("PRAGMA database_list").fetchone()[2]
+        source = db.connect(source_path, existing=True) if source_path else ctx.conn
+        try:
+            source.backup(dest)
+        finally:
+            dest.close()
+            if source is not ctx.conn:
+                source.close()
+        with open(snapshot, "rb") as fh:
+            data = fh.read()
+    with db.tx(ctx.conn):
+        if ctx.conn is not db.get_conn():
+            db.ensure_user_snapshot(ctx.conn, ctx.user)
+        security.audit(ctx.conn, ctx.user, "backup", "database", None, {"size": len(data)})
+    return Response(data, 200, "application/octet-stream",
+                    {"Content-Disposition": f'attachment; filename="event_{event_id}_backup_{stamp}.db"'})

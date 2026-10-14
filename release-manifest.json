@@ -1,0 +1,937 @@
+{
+  "name": "NEW-PROJIECT",
+  "version": "1.1.0",
+  "created_at": "2026-10-14T12:00:31.339782+08:00",
+  "type": "clean-distribution",
+  "data_migrated": false,
+  "startup": "start.cmd",
+  "copied_files": [
+    {
+      "path": "CHANGELOG.md",
+      "source": "sepak-takraw-scoring-system/CHANGELOG.md",
+      "sha256": "982d166d2bea4ca0823684f7940f5c19743e302ef28f909289806b0048d0eac8",
+      "bytes": 14982
+    },
+    {
+      "path": "README.md",
+      "source": "sepak-takraw-scoring-system/README.md",
+      "sha256": "8ba7e13df379d577f25400f6552d3795cf95b35021ade81d020fb299744e3371",
+      "bytes": 30696
+    },
+    {
+      "path": "app/__init__.py",
+      "source": "sepak-takraw-scoring-system/app/__init__.py",
+      "sha256": "35218dea539e3eb08ce013934c33e037678ce96884bd59b4b109d0fb9ca4e559",
+      "bytes": 43
+    },
+    {
+      "path": "app/access.py",
+      "source": "sepak-takraw-scoring-system/app/access.py",
+      "sha256": "4979747d5e78391dce9ae35020de0264efe4844bb725175193151d01ee619128",
+      "bytes": 8787
+    },
+    {
+      "path": "app/api/__init__.py",
+      "source": "sepak-takraw-scoring-system/app/api/__init__.py",
+      "sha256": "d57b2af3cfd79f779483a5cccda8a6b944287eafc63b095b69c0cac01ce613bf",
+      "bytes": 19
+    },
+    {
+      "path": "app/api/admin.py",
+      "source": "sepak-takraw-scoring-system/app/api/admin.py",
+      "sha256": "872e3d1819ff99b10da172497e3045119158ab30ec0025a37a8185cd8ec83fac",
+      "bytes": 5988
+    },
+    {
+      "path": "app/api/auth.py",
+      "source": "sepak-takraw-scoring-system/app/api/auth.py",
+      "sha256": "f07d67a3acec55a1a72a19bd97efc6cff379966d7935f1a814534a07f54f5a07",
+      "bytes": 3089
+    },
+    {
+      "path": "app/api/batch_matches.py",
+      "source": "sepak-takraw-scoring-system/app/api/batch_matches.py",
+      "sha256": "84eef6ed179323496fa794778e8b77940c89e63aa91086dc78e8a047f33a9bfb",
+      "bytes": 6784
+    },
+    {
+      "path": "app/api/catalog.py",
+      "source": "sepak-takraw-scoring-system/app/api/catalog.py",
+      "sha256": "c1a02ca5242e9bbbe1bdee4f3fb20c21bc3f07e4a5e4c4fa6d71032dac5ab136",
+      "bytes": 84603
+    },
+    {
+      "path": "app/api/common.py",
+      "source": "sepak-takraw-scoring-system/app/api/common.py",
+      "sha256": "946f7a1f2d2e313ac6a738bc3cb28ed6067ed2e230d4024c44a75f45221562e5",
+      "bytes": 12461
+    },
+    {
+      "path": "app/api/exports.py",
+      "source": "sepak-takraw-scoring-system/app/api/exports.py",
+      "sha256": "d9d2a9fad4be72703fe0ac2830a560cb4c94a2b7dd7e950fd598cc5bef33cd4d",
+      "bytes": 20578
+    },
+    {
+      "path": "app/api/group_draw.py",
+      "source": "sepak-takraw-scoring-system/app/api/group_draw.py",
+      "sha256": "ca6c04e885c92cb5ff68fcf2259497487f78baa9e91be119128ec63d19b8098b",
+      "bytes": 12427
+    },
+    {
+      "path": "app/api/imports.py",
+      "source": "sepak-takraw-scoring-system/app/api/imports.py",
+      "sha256": "011bc953381446fcf2ff958be201312587b7d921e4aa82520f299d7fe3ff8a3d",
+      "bytes": 14495
+    },
+    {
+      "path": "app/api/matches.py",
+      "source": "sepak-takraw-scoring-system/app/api/matches.py",
+      "sha256": "e57487d5e3f7f189cbcfff128812474190cdd8159904b6a7d648afd6288ee169",
+      "bytes": 21362
+    },
+    {
+      "path": "app/api/scheduling.py",
+      "source": "sepak-takraw-scoring-system/app/api/scheduling.py",
+      "sha256": "f84c1ee518f9f9237d235f6e0cbd41bb18cd4c8cf5a69fe27fcc7e4c1e94f328",
+      "bytes": 32193
+    },
+    {
+      "path": "app/api/school_import.py",
+      "source": "sepak-takraw-scoring-system/app/api/school_import.py",
+      "sha256": "7b062b247537e8c35aa5c3764eb142889e743d5486356e7a33967f8ad8c49306",
+      "bytes": 3303
+    },
+    {
+      "path": "app/api/school_registration.py",
+      "source": "sepak-takraw-scoring-system/app/api/school_registration.py",
+      "sha256": "6ccc5e92a27cf8743ee4323afa64cd78685d4be0d8cdaf5acca37475aa178316",
+      "bytes": 19011
+    },
+    {
+      "path": "app/api/scoring.py",
+      "source": "sepak-takraw-scoring-system/app/api/scoring.py",
+      "sha256": "935da651be399fdbb09d62cb220617d7c98ca12c71ba43423eae69e88d60552f",
+      "bytes": 44347
+    },
+    {
+      "path": "app/api/standings.py",
+      "source": "sepak-takraw-scoring-system/app/api/standings.py",
+      "sha256": "f7b930926bdf32b7525f3dd1d25646ca30ba0f8b5193800bfa38633e87d0541d",
+      "bytes": 43183
+    },
+    {
+      "path": "app/config.py",
+      "source": "sepak-takraw-scoring-system/app/config.py",
+      "sha256": "bad3e7c25d5308066a6d270938cd847cdfcf332c170545b610ff4f8c825ed184",
+      "bytes": 2060
+    },
+    {
+      "path": "app/db.py",
+      "source": "sepak-takraw-scoring-system/app/db.py",
+      "sha256": "7a1b741502e11fa9a92bfb0692166e5ad0523023c7dba7c60c4fb3aadfd08fae",
+      "bytes": 13301
+    },
+    {
+      "path": "app/domain/__init__.py",
+      "source": "sepak-takraw-scoring-system/app/domain/__init__.py",
+      "sha256": "69e9954c1f1b7f1cb68a8f329f5e6f514f9445b12cab95968c2b2b08dab10ba0",
+      "bytes": 97
+    },
+    {
+      "path": "app/domain/advancement.py",
+      "source": "sepak-takraw-scoring-system/app/domain/advancement.py",
+      "sha256": "a6c1e62a659b9bf5e1340c79984e4b8442c6ef9c8ceb575e8fd9f7bb160346f0",
+      "bytes": 11216
+    },
+    {
+      "path": "app/domain/formats.py",
+      "source": "sepak-takraw-scoring-system/app/domain/formats.py",
+      "sha256": "27f8c54837d53d9a51eb4bb0139bf93b130ff5c6d0dfbba6fd46faa227028db7",
+      "bytes": 19278
+    },
+    {
+      "path": "app/domain/group_draw.py",
+      "source": "sepak-takraw-scoring-system/app/domain/group_draw.py",
+      "sha256": "ba6b02d4875a0bb3f34771bdd8e25a1cb01d0926ce8908ceffc0c977316b7772",
+      "bytes": 2115
+    },
+    {
+      "path": "app/domain/points.py",
+      "source": "sepak-takraw-scoring-system/app/domain/points.py",
+      "sha256": "0b365695404aa178cb4845d468fc208514c5c891aa78c35a1666bdb47a683b9b",
+      "bytes": 5358
+    },
+    {
+      "path": "app/domain/printouts.py",
+      "source": "sepak-takraw-scoring-system/app/domain/printouts.py",
+      "sha256": "f95edb034aa8cbbebff37d8623d220b502fe7bdfe1b2d4091a1d02d6354dfd17",
+      "bytes": 3306
+    },
+    {
+      "path": "app/domain/ranking.py",
+      "source": "sepak-takraw-scoring-system/app/domain/ranking.py",
+      "sha256": "54c1fe3382e34e6630fe8f84de9237bfa0474eaa23ddd97e10b76628e2bab864",
+      "bytes": 10360
+    },
+    {
+      "path": "app/domain/schedule.py",
+      "source": "sepak-takraw-scoring-system/app/domain/schedule.py",
+      "sha256": "77d07faf618d1e8b375dd888d4d36a002c1eb9515aac8c8c62a0b4424c3d37aa",
+      "bytes": 4776
+    },
+    {
+      "path": "app/domain/slots.py",
+      "source": "sepak-takraw-scoring-system/app/domain/slots.py",
+      "sha256": "601124a7571bd32d1d92b576f23a10a83768e0240aa9d2513d78413857d6ac29",
+      "bytes": 6766
+    },
+    {
+      "path": "app/domain/validation.py",
+      "source": "sepak-takraw-scoring-system/app/domain/validation.py",
+      "sha256": "d8471e1c605d4d32e16ea02f17464b3c63edb83100a5aab7e99e49bc338daccd",
+      "bytes": 10510
+    },
+    {
+      "path": "app/errors.py",
+      "source": "sepak-takraw-scoring-system/app/errors.py",
+      "sha256": "b71eb4cb4843a65a8199471fd05e86bdf481b4f2dc9ae63021164f573b47d4d2",
+      "bytes": 1847
+    },
+    {
+      "path": "app/http_server.py",
+      "source": "sepak-takraw-scoring-system/app/http_server.py",
+      "sha256": "7374fdd1c10969abb8bcba5c9c0bbaffa9f278552b101880e8a48af192474c89",
+      "bytes": 23992
+    },
+    {
+      "path": "app/idempotency.py",
+      "source": "sepak-takraw-scoring-system/app/idempotency.py",
+      "sha256": "221e722c18221d38a88be42e2d872f1ff5b386e7be55e242f059c69a91b11c78",
+      "bytes": 2528
+    },
+    {
+      "path": "app/list_revision.py",
+      "source": "sepak-takraw-scoring-system/app/list_revision.py",
+      "sha256": "aeb73191440d4390060bd02846b28361c363e85d7e0f7cfb39f19c4fe9a64e2a",
+      "bytes": 3082
+    },
+    {
+      "path": "app/match_listing.py",
+      "source": "sepak-takraw-scoring-system/app/match_listing.py",
+      "sha256": "406f669fc47f796c0e3db90a898957f7ddf2063d492db6d65f766062bc806d8c",
+      "bytes": 5500
+    },
+    {
+      "path": "app/registration.py",
+      "source": "sepak-takraw-scoring-system/app/registration.py",
+      "sha256": "e379f19ca133077bfb07ff7b058e4d1bb07cb9ab4f0ee8a985c8ea5ceabd284f",
+      "bytes": 7479
+    },
+    {
+      "path": "app/result_migrations.py",
+      "source": "sepak-takraw-scoring-system/app/result_migrations.py",
+      "sha256": "9dc34e276e93068018049e85fc7d6a5de2f554720f7e0f229cfbeee419fcc533",
+      "bytes": 5743
+    },
+    {
+      "path": "app/result_safety.py",
+      "source": "sepak-takraw-scoring-system/app/result_safety.py",
+      "sha256": "df6c752ed422e17ba217246d60bd783df44c2273f55a29a25ed43cb660e51aed",
+      "bytes": 3590
+    },
+    {
+      "path": "app/schema.sql",
+      "source": "sepak-takraw-scoring-system/app/schema.sql",
+      "sha256": "9b05ffb15d27ad61aeddd99d0ea82d5e5220581809cdd3044600708674b6ac98",
+      "bytes": 20627
+    },
+    {
+      "path": "app/school_import.py",
+      "source": "sepak-takraw-scoring-system/app/school_import.py",
+      "sha256": "2e007c9612b847a8279a00659a12cdbbdd3ad8081e67f2704ceec71fe2809701",
+      "bytes": 17725
+    },
+    {
+      "path": "app/security.py",
+      "source": "sepak-takraw-scoring-system/app/security.py",
+      "sha256": "9d5b875222b48db36a984e39cf6d66fc997dbb7137ac78c0058c4f3087b82166",
+      "bytes": 4156
+    },
+    {
+      "path": "app/seed.py",
+      "source": "sepak-takraw-scoring-system/app/seed.py",
+      "sha256": "db18cea10f16cf402d273162e75fe06b0ff6e36bb543225581638ab772f94080",
+      "bytes": 11302
+    },
+    {
+      "path": "app/transport.py",
+      "source": "sepak-takraw-scoring-system/app/transport.py",
+      "sha256": "b9951cceb23d974666b47722915e428a6780b051fafbbe04bb750ade1296ffbb",
+      "bytes": 8951
+    },
+    {
+      "path": "app/user_sync.py",
+      "source": "sepak-takraw-scoring-system/app/user_sync.py",
+      "sha256": "bf2249874a5be6bf2322e97dad1f981a91bcecd6f1cf22b06177bebd0278c0b7",
+      "bytes": 4610
+    },
+    {
+      "path": "app/workspace.py",
+      "source": "sepak-takraw-scoring-system/app/workspace.py",
+      "sha256": "86be0c495c0c1b46eb531b721ae37703e1a9ba53def1f0892ee5323e43936e9d",
+      "bytes": 14040
+    },
+    {
+      "path": "docs/启动闪退修复-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/启动闪退修复-20261011.md",
+      "sha256": "91f8acca9d9a76b196ad8162de3f048eb9eb24a4d4439494629fde8c05ab515f",
+      "bytes": 2468
+    },
+    {
+      "path": "docs/学校删除操作说明-20261014.md",
+      "source": "sepak-takraw-scoring-system/docs/学校删除操作说明-20261014.md",
+      "sha256": "d078b3e621c1320cd03d41056874e92ca30ebacd0e772a3175247fa3a4d8a887",
+      "bytes": 1743
+    },
+    {
+      "path": "docs/学校小组抽签说明.md",
+      "source": "sepak-takraw-scoring-system/docs/学校小组抽签说明.md",
+      "sha256": "975f884c6a81cca1afc3974e2785c54cb49e98c090a040dfc4c3826a771172c5",
+      "bytes": 5083
+    },
+    {
+      "path": "docs/学校报名工作台实施记录.md",
+      "source": "sepak-takraw-scoring-system/docs/学校报名工作台实施记录.md",
+      "sha256": "131610d34512ccb011131a9b863f96bc538c12f5e63488cdf4132636fbf6046a",
+      "bytes": 9311
+    },
+    {
+      "path": "docs/报名流程重构建议.md",
+      "source": "sepak-takraw-scoring-system/docs/报名流程重构建议.md",
+      "sha256": "bb6f8adb54800639184e819f730e24529478b10b3399b5b401b607055b3f0586",
+      "bytes": 15867
+    },
+    {
+      "path": "docs/界面与赛事设置优化-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/界面与赛事设置优化-20261011.md",
+      "sha256": "5d01c405b0819223449d5b448c9f27a76e37a472969f390ad1945c6f3fea3f44",
+      "bytes": 4725
+    },
+    {
+      "path": "docs/赛事管理设计参考-20261010.md",
+      "source": "sepak-takraw-scoring-system/docs/赛事管理设计参考-20261010.md",
+      "sha256": "d6af145ca93394e9e6947e6309b964be7215ce327d2c584a4beeeced12dc26c7",
+      "bytes": 7183
+    },
+    {
+      "path": "docs/赛事设置同页整合-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/赛事设置同页整合-20261011.md",
+      "sha256": "e4731dc974acb3bfb150f235768ac85884a3e376942bfec7545cb8ee5dff9753",
+      "bytes": 3684
+    },
+    {
+      "path": "docs/赛事设置易用性改造-20261013.md",
+      "source": "sepak-takraw-scoring-system/docs/赛事设置易用性改造-20261013.md",
+      "sha256": "b9b8341f56b16372269a569f2f5c51a7a6821a715996a4ac28395729670e063b",
+      "bytes": 3552
+    },
+    {
+      "path": "docs/赛事设置视觉优化-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/赛事设置视觉优化-20261011.md",
+      "sha256": "f03d603e6d9b58d4a077ff5bdc089558e8ab5d9d14e707df181a91ae521391c2",
+      "bytes": 2600
+    },
+    {
+      "path": "docs/通讯与系统缺陷修复方案-三轮迭代-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/通讯与系统缺陷修复方案-三轮迭代-20261011.md",
+      "sha256": "45d5f0e54f04993937a421bc7e651afeed0c700898f7e72952869596647f96df",
+      "bytes": 30156
+    },
+    {
+      "path": "docs/通讯与系统缺陷修复验收-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/通讯与系统缺陷修复验收-20261011.md",
+      "sha256": "1a70c1c7c12c8b31bbba60bc71953280590b2e970d94e4982bd9857786caef17",
+      "bytes": 9207
+    },
+    {
+      "path": "docs/通讯负载与严重缺陷审计-20261011.md",
+      "source": "sepak-takraw-scoring-system/docs/通讯负载与严重缺陷审计-20261011.md",
+      "sha256": "639ca7b1fd29596d17be9793ae734066f0239653a863919e6101528c546e64b8",
+      "bytes": 19056
+    },
+    {
+      "path": "package.json",
+      "source": "sepak-takraw-scoring-system/package.json",
+      "sha256": "923f8ac92793030832e642225d46e56cfb0c4597146ec5f666c1637efc117087",
+      "bytes": 351
+    },
+    {
+      "path": "run.py",
+      "source": "sepak-takraw-scoring-system/run.py",
+      "sha256": "488ff9f85c5adbd2d19193ffcef1adce29f8fa0e0854b0461e2043373635a20e",
+      "bytes": 4700
+    },
+    {
+      "path": "start.cmd",
+      "source": "sepak-takraw-scoring-system/start.cmd",
+      "sha256": "98b8a74a83deeb76cce61d059addc69fd4eb41fd7d30f41f34ba7dfad3b9ff7e",
+      "bytes": 784
+    },
+    {
+      "path": "tests/bracket_layout.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/bracket_layout.test.mjs",
+      "sha256": "d3a6dcd3ef0698ed247f8ae171e1f3d168f217a80e367c27da6b3a617df288c1",
+      "bytes": 3963
+    },
+    {
+      "path": "tests/browser_interactions.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/browser_interactions.test.mjs",
+      "sha256": "cd77ff094e366bfad54458f401be1f72e6b15b14cd5aa51518f190b0374b5389",
+      "bytes": 29614
+    },
+    {
+      "path": "tests/category_labels.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/category_labels.test.mjs",
+      "sha256": "656ea66d00175ed2f2bcc3a4f9feb0e6d5c878dfe1e5576f37e973985117e23a",
+      "bytes": 725
+    },
+    {
+      "path": "tests/client_rules.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/client_rules.test.mjs",
+      "sha256": "c799731d623c2ce91404be4bb7465598cc5e99be9e59902aff3f3c36bf195da2",
+      "bytes": 5174
+    },
+    {
+      "path": "tests/client_transport.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/client_transport.test.mjs",
+      "sha256": "11d8085b303c6dfd39629f5e394c6897eb991f2623dc9687a30e599bdf867869",
+      "bytes": 4891
+    },
+    {
+      "path": "tests/communication_storage.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/communication_storage.browser.test.mjs",
+      "sha256": "eb319f76ba213948e5341f1902ea090d815c31a9ee98e956a95329deeddf4a9a",
+      "bytes": 9090
+    },
+    {
+      "path": "tests/date_time.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/date_time.test.mjs",
+      "sha256": "52b872dcc5a75a3e1e9dd307d5b6fab0e8b93504609ea1b25d9e6a107fcdd7e4",
+      "bytes": 1395
+    },
+    {
+      "path": "tests/event_hierarchy.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/event_hierarchy.test.mjs",
+      "sha256": "73995032df3ec47ecfe75e306ffdfece15fafa31b52ad642fa95b668b0974c2a",
+      "bytes": 1307
+    },
+    {
+      "path": "tests/group_draw.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/group_draw.browser.test.mjs",
+      "sha256": "24e50f62b22fda23fe3f5d0b79dbd8e39156f02b34594439e817fc4f5ab47b14",
+      "bytes": 16989
+    },
+    {
+      "path": "tests/individual_enrollment.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/individual_enrollment.browser.test.mjs",
+      "sha256": "ae8f9ffc1a247f4d8cb8d2985123cc472b72f5a05644535a77f5fcc2796489d7",
+      "bytes": 14379
+    },
+    {
+      "path": "tests/permissions.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/permissions.browser.test.mjs",
+      "sha256": "5a9366ddc26817dff4b8bdb91b8908e587ff384754f2f65ebe4cd4a825ec79b4",
+      "bytes": 23870
+    },
+    {
+      "path": "tests/project_workspace.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/project_workspace.browser.test.mjs",
+      "sha256": "6e1c054c9168091d4825df8d7f0581b7bb3ec9cfc722d90bb18ecd82a41dccb3",
+      "bytes": 14594
+    },
+    {
+      "path": "tests/responsive_dialog.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/responsive_dialog.browser.test.mjs",
+      "sha256": "92b6781470cb1480170ec9567540c823ae085bf96ada8dd4b41aa99eef3d9949",
+      "bytes": 9317
+    },
+    {
+      "path": "tests/results_refresh.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/results_refresh.browser.test.mjs",
+      "sha256": "54f546e9c6534aa8009bb95b3ea6ea1ae07430614794e5504de2a72cdb3c54b5",
+      "bytes": 8251
+    },
+    {
+      "path": "tests/roster_after_schedule_lock.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/roster_after_schedule_lock.browser.test.mjs",
+      "sha256": "02ebe8c875c6d21a5b2372d96802da7c9ddb8f3836cada2a363dc6fd11b35734",
+      "bytes": 9768
+    },
+    {
+      "path": "tests/scheduling_fields.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/scheduling_fields.browser.test.mjs",
+      "sha256": "030be1baa7dbb0624702a9a5c22a3a8348988c8dbf3d34dc1ce7f65cc4942d42",
+      "bytes": 6275
+    },
+    {
+      "path": "tests/scheduling_flow.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/scheduling_flow.browser.test.mjs",
+      "sha256": "5291a027bf297b33558d5f29dd5d8afb6e71676165c9f719e385d2b552705e53",
+      "bytes": 7605
+    },
+    {
+      "path": "tests/scheduling_flow.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/scheduling_flow.test.mjs",
+      "sha256": "0daef53a194a7d76a3a64aff79a3bb8ec3c61791ddaff89305c864d549840737",
+      "bytes": 3734
+    },
+    {
+      "path": "tests/school_deletion.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/school_deletion.browser.test.mjs",
+      "sha256": "5952c18388dab09d472825fef875652bae109b9f109fda3bd83d9eeae0df2a14",
+      "bytes": 34900
+    },
+    {
+      "path": "tests/school_enrollment.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/school_enrollment.browser.test.mjs",
+      "sha256": "f1863d596af95ebc5328e2d55a8a2d065c5ae6469bff5205183eec182d871f2b",
+      "bytes": 9903
+    },
+    {
+      "path": "tests/school_registration_model.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/school_registration_model.test.mjs",
+      "sha256": "34287b6187f9148b3e37cf98d2eafa375edc5a0c58f07fb47ad95ed7858b4f2f",
+      "bytes": 7103
+    },
+    {
+      "path": "tests/school_registration_phase2.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/school_registration_phase2.browser.test.mjs",
+      "sha256": "adb74b6fd32c1cd4b0d695ce8e958044d5c8eb046d4fdfc34b7495be0c90c27e",
+      "bytes": 11551
+    },
+    {
+      "path": "tests/school_registration_workspace.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/school_registration_workspace.browser.test.mjs",
+      "sha256": "72cab07737df1d650e07ab381998d068606affa72d24b58e3c933da11fbe2975",
+      "bytes": 17321
+    },
+    {
+      "path": "tests/setup_model.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/setup_model.test.mjs",
+      "sha256": "42f1e54bded655541990e75a9783ca0435db6422bda5540baa8d4c4eb9b3f2c3",
+      "bytes": 2894
+    },
+    {
+      "path": "tests/setup_usability.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/setup_usability.browser.test.mjs",
+      "sha256": "165e367ca22e6006d49b6986ae70aa9c16e64bd94302989d69338fd74311c65d",
+      "bytes": 38102
+    },
+    {
+      "path": "tests/submission_recovery.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/submission_recovery.test.mjs",
+      "sha256": "4fb9ac05d0f5699a2397f429e677f7f525b616b887bc2d6f2639a1ab04f11b4a",
+      "bytes": 1997
+    },
+    {
+      "path": "tests/test_api.py",
+      "source": "sepak-takraw-scoring-system/tests/test_api.py",
+      "sha256": "20057c345e447bb15510acf9b3774acf1955b837d30f18b1b0ea0544a9ace38a",
+      "bytes": 131416
+    },
+    {
+      "path": "tests/test_domain.py",
+      "source": "sepak-takraw-scoring-system/tests/test_domain.py",
+      "sha256": "4f458e01a1f83f6a48eb989d42031b708ec4db0aff5c62951a9bd1f06cc599a3",
+      "bytes": 22189
+    },
+    {
+      "path": "tests/test_event_databases.py",
+      "source": "sepak-takraw-scoring-system/tests/test_event_databases.py",
+      "sha256": "ff4ec691326265d38d12f06709ad35c4a5e4edae3be5a886c61cc34537780c5f",
+      "bytes": 2006
+    },
+    {
+      "path": "tests/test_formats_simulation.py",
+      "source": "sepak-takraw-scoring-system/tests/test_formats_simulation.py",
+      "sha256": "c485ca178027679f3656eea81518d45c6cdc196a3a1839e431cb8403784498d8",
+      "bytes": 6557
+    },
+    {
+      "path": "tests/test_frontend_guardrails.py",
+      "source": "sepak-takraw-scoring-system/tests/test_frontend_guardrails.py",
+      "sha256": "74544a6bbb586e27c8c0efc5c8cf4e91a192b9210a787382981c43f08864fca7",
+      "bytes": 4403
+    },
+    {
+      "path": "tests/test_group_draw.py",
+      "source": "sepak-takraw-scoring-system/tests/test_group_draw.py",
+      "sha256": "28ebdf671afc0bda84a0815aceb8a4b7ee167f6bfcf493e04d5d2a4738cedb19",
+      "bytes": 16163
+    },
+    {
+      "path": "tests/test_imports_exports.py",
+      "source": "sepak-takraw-scoring-system/tests/test_imports_exports.py",
+      "sha256": "e17492c0f480a7083b1167824c66aac8d3d60ef15170c52fcfd0304448bfd9c3",
+      "bytes": 21964
+    },
+    {
+      "path": "tests/test_interaction_recovery.py",
+      "source": "sepak-takraw-scoring-system/tests/test_interaction_recovery.py",
+      "sha256": "926b563ea31c083f97798376d1e1eb8a7b5385dec2a5455001f121fed966357c",
+      "bytes": 7187
+    },
+    {
+      "path": "tests/test_pagination_fixes.py",
+      "source": "sepak-takraw-scoring-system/tests/test_pagination_fixes.py",
+      "sha256": "7e06c2d2569b947eb79f6ec1933da4263e7d9599ad9575e69e94d35535997f3c",
+      "bytes": 6862
+    },
+    {
+      "path": "tests/test_registration_rules.py",
+      "source": "sepak-takraw-scoring-system/tests/test_registration_rules.py",
+      "sha256": "f8cddfb6a40e3489dc60b0a982f7732c2b1e81f55626eb988c299a9ea6c57c8d",
+      "bytes": 3048
+    },
+    {
+      "path": "tests/test_result_safety_fixes.py",
+      "source": "sepak-takraw-scoring-system/tests/test_result_safety_fixes.py",
+      "sha256": "243eed8e229f88558177f6d28cc81ef0eb318e49d5cd4a8454b99c9135b6b780",
+      "bytes": 22304
+    },
+    {
+      "path": "tests/test_school_registration.py",
+      "source": "sepak-takraw-scoring-system/tests/test_school_registration.py",
+      "sha256": "3fd33bb3333cdab7fe4cb4fb73d6a7bb9dcf765f4ff1dab51feb9c88afb616eb",
+      "bytes": 22025
+    },
+    {
+      "path": "tests/test_school_registration_phase2.py",
+      "source": "sepak-takraw-scoring-system/tests/test_school_registration_phase2.py",
+      "sha256": "1df0d9c813b9be63e8bcf5861548992a339d4891e1ff7ea3967f5918140d8c74",
+      "bytes": 8719
+    },
+    {
+      "path": "tests/test_startup_fixes.py",
+      "source": "sepak-takraw-scoring-system/tests/test_startup_fixes.py",
+      "sha256": "98b11383d88cb46898736a808f49061543c990b9fcb2d0d9c40149a6d022a860",
+      "bytes": 6987
+    },
+    {
+      "path": "tests/test_transport_sync_fixes.py",
+      "source": "sepak-takraw-scoring-system/tests/test_transport_sync_fixes.py",
+      "sha256": "8d6f929e6d3330f294ebf7a4d9e88b20284e2067bc9abb6a360ffa3659ab0fed",
+      "bytes": 19321
+    },
+    {
+      "path": "tests/ui_layout.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/ui_layout.browser.test.mjs",
+      "sha256": "0a2c1c61af5c965a87084ba088dfd0405828898607a625a635a60f63ddaf8f72",
+      "bytes": 12961
+    },
+    {
+      "path": "tests/ui_settings.browser.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/ui_settings.browser.test.mjs",
+      "sha256": "2da26fbb1cfec8ba2f98a5de52758ff17f7dacb3455a26116c4498aafd0a916f",
+      "bytes": 41401
+    },
+    {
+      "path": "tests/workspace_context.test.mjs",
+      "source": "sepak-takraw-scoring-system/tests/workspace_context.test.mjs",
+      "sha256": "9112ae9a51ae8554f948fb7409e08f596018ee775e8dd2ad32c6cbecc14671f4",
+      "bytes": 1279
+    },
+    {
+      "path": "web/css/app.css",
+      "source": "sepak-takraw-scoring-system/web/css/app.css",
+      "sha256": "d3365ab0b2baf82bd2d8a3faa37abfedaaf0a73e9d525e632228beec8789982d",
+      "bytes": 68382
+    },
+    {
+      "path": "web/index.html",
+      "source": "sepak-takraw-scoring-system/web/index.html",
+      "sha256": "914dd4d34c0dd548511124a536616a5c657647d3a6064bb2a39a803f42741b72",
+      "bytes": 1428
+    },
+    {
+      "path": "web/js/api.js",
+      "source": "sepak-takraw-scoring-system/web/js/api.js",
+      "sha256": "43a521286f31373604c4dee612dabde47f272adbb06c6ffb10e5943204ac8848",
+      "bytes": 11540
+    },
+    {
+      "path": "web/js/athletePicker.js",
+      "source": "sepak-takraw-scoring-system/web/js/athletePicker.js",
+      "sha256": "92fb3c6b7353c0e226b687bbe236f75b91b1977271420b65e50f3e93f2cccf70",
+      "bytes": 7540
+    },
+    {
+      "path": "web/js/bracketLayout.js",
+      "source": "sepak-takraw-scoring-system/web/js/bracketLayout.js",
+      "sha256": "37f7bee228d16f4309687675a2705aa75003f3a81408980392dfbce9448ec373",
+      "bytes": 2086
+    },
+    {
+      "path": "web/js/dateTime.js",
+      "source": "sepak-takraw-scoring-system/web/js/dateTime.js",
+      "sha256": "459c8cd5ba2b5899ba7b38c4f5169a1a3353dd0dc7f3733968620ed9426e7282",
+      "bytes": 949
+    },
+    {
+      "path": "web/js/enrollmentImport.js",
+      "source": "sepak-takraw-scoring-system/web/js/enrollmentImport.js",
+      "sha256": "ffcff58cb6b9f37a35db7111701b3223830d379b8f76d544b4bc1c499a6e3729",
+      "bytes": 7452
+    },
+    {
+      "path": "web/js/groupDraw.js",
+      "source": "sepak-takraw-scoring-system/web/js/groupDraw.js",
+      "sha256": "44fa60a50132ffb1b90399cac340000841df0e7214f119613bcc0d6c658d2523",
+      "bytes": 12087
+    },
+    {
+      "path": "web/js/labels.js",
+      "source": "sepak-takraw-scoring-system/web/js/labels.js",
+      "sha256": "842b79bc16c43bd3daccd75c1374e23bbe75560df45fc92b1245f3f0827a3975",
+      "bytes": 607
+    },
+    {
+      "path": "web/js/main.js",
+      "source": "sepak-takraw-scoring-system/web/js/main.js",
+      "sha256": "5fd25d947ffcfd338a8acd3df7c9b24085c4bb74e886b127e2422ceac9aff49a",
+      "bytes": 19383
+    },
+    {
+      "path": "web/js/pendingRequests.js",
+      "source": "sepak-takraw-scoring-system/web/js/pendingRequests.js",
+      "sha256": "ddb47a582c2a69f67409c5f0cd7f6e63bbcd1349ca5fbe583657310e412416f4",
+      "bytes": 3091
+    },
+    {
+      "path": "web/js/permissions.js",
+      "source": "sepak-takraw-scoring-system/web/js/permissions.js",
+      "sha256": "501e9083e01d4fcc517b46d22a9b19e839ac5a588f2b2e3b82716f838efd81c1",
+      "bytes": 849
+    },
+    {
+      "path": "web/js/recordingOwner.js",
+      "source": "sepak-takraw-scoring-system/web/js/recordingOwner.js",
+      "sha256": "22924dd91a9c7de841d51c4b3df4c62bf79b408b3d4dbcbfa377ef57ef4bb8e7",
+      "bytes": 1244
+    },
+    {
+      "path": "web/js/schedulingFlow.js",
+      "source": "sepak-takraw-scoring-system/web/js/schedulingFlow.js",
+      "sha256": "c0076a152c673ac92b389f6fbf6f3e2ce941950979bf72e0dfd42d98b2d2693e",
+      "bytes": 6908
+    },
+    {
+      "path": "web/js/schoolRegistrationImport.js",
+      "source": "sepak-takraw-scoring-system/web/js/schoolRegistrationImport.js",
+      "sha256": "b15c13da55b7eb5e0f35440501be162b61bd458f80df54964cb9fef34de6e273",
+      "bytes": 5954
+    },
+    {
+      "path": "web/js/schoolRegistrationModel.js",
+      "source": "sepak-takraw-scoring-system/web/js/schoolRegistrationModel.js",
+      "sha256": "ca0d189ec48a54298a57bc4c1e5031c14722a5309e731833a4fb31581dd5ca7b",
+      "bytes": 3052
+    },
+    {
+      "path": "web/js/scoring.js",
+      "source": "sepak-takraw-scoring-system/web/js/scoring.js",
+      "sha256": "04b920e11ff853ed4528b027925bc0776284548b1f6d6d5141c51fe2dfaff3d2",
+      "bytes": 4152
+    },
+    {
+      "path": "web/js/setupModel.js",
+      "source": "sepak-takraw-scoring-system/web/js/setupModel.js",
+      "sha256": "be4cbf50690b58e51534979ead479dcc7d73c99376b45a9c7cdec3e5d48fe8cb",
+      "bytes": 2316
+    },
+    {
+      "path": "web/js/store.js",
+      "source": "sepak-takraw-scoring-system/web/js/store.js",
+      "sha256": "00aaa9c6590696f13f51340c7c0fd25bd797cfcb66b43b1660aab8a71873dd56",
+      "bytes": 11912
+    },
+    {
+      "path": "web/js/submit.js",
+      "source": "sepak-takraw-scoring-system/web/js/submit.js",
+      "sha256": "5ec90e22fde102e36c6c97777635e943cc7850f7a1390d946b6d4009cab7f560",
+      "bytes": 1919
+    },
+    {
+      "path": "web/js/ui.js",
+      "source": "sepak-takraw-scoring-system/web/js/ui.js",
+      "sha256": "b96eced437b9b3d4c150fbfe37050b5090b97015821840b222a6ea2544a0ef61",
+      "bytes": 27300
+    },
+    {
+      "path": "web/js/views/admin.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/admin.js",
+      "sha256": "47c3a241e396131594d8e448f1cb550c9bf896eb5f259ad94f57a9d34112c20e",
+      "bytes": 37064
+    },
+    {
+      "path": "web/js/views/bracket.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/bracket.js",
+      "sha256": "01f6fe49e6ec51f5f82c30fa3569afb14ed7566097a6f93929f2f5b76a70cf98",
+      "bytes": 9929
+    },
+    {
+      "path": "web/js/views/catalog.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/catalog.js",
+      "sha256": "970e195227ade524d9f498ea7f4a4c6d96be4c7c4cb7e5b5c6062d4f4b5fcd3d",
+      "bytes": 59602
+    },
+    {
+      "path": "web/js/views/dashboard.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/dashboard.js",
+      "sha256": "f505176d2676832aa8bb8508b57a96958cde8c33e9e28240d407494c5a754893",
+      "bytes": 8663
+    },
+    {
+      "path": "web/js/views/field.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/field.js",
+      "sha256": "85c651a38a3c3e10b1bdd4e9552ee2a2c2b05dfe8ebc6cb65a99bec6d9ae3a1e",
+      "bytes": 1793
+    },
+    {
+      "path": "web/js/views/individual.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/individual.js",
+      "sha256": "b0ef24a2fca5326bc09f042b8be214a518b1f301674782f1dbe0c5c01a0752c2",
+      "bytes": 20279
+    },
+    {
+      "path": "web/js/views/matchAdmin.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/matchAdmin.js",
+      "sha256": "b6ee0e5cf71824b12575d94c99461decdfae1496e5210e4b195179dfe3065eac",
+      "bytes": 19275
+    },
+    {
+      "path": "web/js/views/results.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/results.js",
+      "sha256": "fd28cd465c497cdf4b8ddca7ecc61d6723ce33a589e1b87db97268d37aab2c4a",
+      "bytes": 22488
+    },
+    {
+      "path": "web/js/views/review.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/review.js",
+      "sha256": "f603ad60ab9dc9790734514db6bb802f9f4b91e75b1ed9121aef226fe0c5d1e8",
+      "bytes": 9724
+    },
+    {
+      "path": "web/js/views/scheduling.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/scheduling.js",
+      "sha256": "c20e4a48f557a68ed7c8ae73c233a31645df4400a21fe1de0bddf8791a4d27b0",
+      "bytes": 32792
+    },
+    {
+      "path": "web/js/views/school.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/school.js",
+      "sha256": "d5dbaaa49ebf9b9fffceba49cc0d311c2953989d22fbb09a2643299e5f0425a8",
+      "bytes": 7213
+    },
+    {
+      "path": "web/js/views/schoolRegistration.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/schoolRegistration.js",
+      "sha256": "927bd731736a7d9fae466c092884d9e4afad0ca7c41ee86ee7212a708c8437a7",
+      "bytes": 34984
+    },
+    {
+      "path": "web/js/views/scoring.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/scoring.js",
+      "sha256": "90bb25e65d4b499c473cdd800754f3b219bfcbeab85c76acc0599ee6b12840cd",
+      "bytes": 35198
+    },
+    {
+      "path": "web/js/views/setup.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/setup.js",
+      "sha256": "2add433933d3c24ec6557267e4669bef63d3ff59a348a44db52e99be272c1989",
+      "bytes": 51406
+    },
+    {
+      "path": "web/js/views/workspace.js",
+      "source": "sepak-takraw-scoring-system/web/js/views/workspace.js",
+      "sha256": "039a1abb59d08eeae9969fe9ffeeb22e0be3a2d1160d16c21dbf531ac53c548a",
+      "bytes": 18473
+    },
+    {
+      "path": "web/js/workspaceContext.js",
+      "source": "sepak-takraw-scoring-system/web/js/workspaceContext.js",
+      "sha256": "e5249641efbb71507184d2b36dc490929479eccde1022c3d77ff66b5b5f70b56",
+      "bytes": 622
+    },
+    {
+      "path": "web/manifest.webmanifest",
+      "source": "sepak-takraw-scoring-system/web/manifest.webmanifest",
+      "sha256": "772ffd5b73f9b15bfd668ea7abab166c9221b121d22ddc188584ee2f075026eb",
+      "bytes": 215
+    },
+    {
+      "path": "web/sw.js",
+      "source": "sepak-takraw-scoring-system/web/sw.js",
+      "sha256": "70cbd89c638a0eddea2fc66fef15850288579b340b24a40d0f0d96cccea22ee9",
+      "bytes": 2310
+    },
+    {
+      "path": "web/vendor/tom-select/LICENSE",
+      "source": "sepak-takraw-scoring-system/web/vendor/tom-select/LICENSE",
+      "sha256": "f15dc64ea1f373c8af0ee7c020064360497addf335c9c2bcf27c3a6f56a6f0bd",
+      "bytes": 11350
+    },
+    {
+      "path": "web/vendor/tom-select/README.md",
+      "source": "sepak-takraw-scoring-system/web/vendor/tom-select/README.md",
+      "sha256": "1f47650eec80bce6a2207f7d83ffe9961eb505c83096d60d4ab6b3ee57bcdd15",
+      "bytes": 470
+    },
+    {
+      "path": "web/vendor/tom-select/tom-select.base.min.js",
+      "source": "sepak-takraw-scoring-system/web/vendor/tom-select/tom-select.base.min.js",
+      "sha256": "75fd733a8dcbeda6fc258e341b234561fd0be3ec850f65cf3f035277980d2cc7",
+      "bytes": 41802
+    },
+    {
+      "path": "web/vendor/tom-select/tom-select.default.min.css",
+      "source": "sepak-takraw-scoring-system/web/vendor/tom-select/tom-select.default.min.css",
+      "sha256": "f1d39d120d83e42f08a4f0fbc33f99e92333079e05fecfecd3c22da37b8427c8",
+      "bytes": 9817
+    }
+  ],
+  "generated_files": [
+    ".gitignore",
+    "data/.gitkeep",
+    "全新版本说明.md",
+    "release-manifest.json"
+  ],
+  "excluded": [
+    "data/**",
+    "__pycache__/**",
+    "*.pyc",
+    "docs historical audit directories and exports",
+    "project workflow state",
+    "tmp/**"
+  ],
+  "updated_at": "2026-10-14T18:59:58.475408+08:00",
+  "source_shell_cache": "stss-shell-v49",
+  "latest_sync": {
+    "source": "sepak-takraw-scoring-system",
+    "feature": "学校详情删除入口",
+    "files": [
+      "README.md",
+      "docs/学校删除操作说明-20261014.md",
+      "tests/school_deletion.browser.test.mjs",
+      "web/css/app.css",
+      "web/js/ui.js",
+      "web/js/views/schoolRegistration.js",
+      "web/sw.js"
+    ],
+    "current_data_backup_created": false,
+    "runtime_data_copied": false
+  },
+  "data_state": "empty; initialized on first start",
+  "current_data_backup_created": false
+}

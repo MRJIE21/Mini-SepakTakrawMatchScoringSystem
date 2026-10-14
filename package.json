@@ -1,0 +1,10 @@
+{
+  "name": "sepak-takraw-scoring-system",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "前端为无构建步骤的原生 ES 模块，不需要 npm install；本文件仅用于声明模块类型，便于用 Node 运行前端规则测试。",
+  "scripts": {
+    "test:client": "node tests/client_rules.test.mjs"
+  }
+}

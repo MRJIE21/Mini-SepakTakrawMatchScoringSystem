@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>藤球比赛计分系统</title>
+<link rel="stylesheet" href="/vendor/tom-select/tom-select.default.min.css">
+<link rel="stylesheet" href="/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">藤</span>
+      <div>
+        <div class="title">藤球比赛计分系统</div>
+        <div class="subtitle" id="event-line">—</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <label class="event-switcher">
+        <span>当前赛事</span>
+        <select id="event-select" class="select" title="当前赛事"></select>
+      </label>
+      <button class="btn btn-ghost" id="btn-new-event">新建赛事</button>
+      <span id="net-badge" class="badge badge-ok">在线</span>
+      <span id="user-line" class="user-line"></span>
+      <button class="btn btn-ghost" id="btn-logout">退出</button>
+    </div>
+  </header>
+  <div class="layout">
+    <nav class="sidenav" id="sidenav"></nav>
+    <main class="content" id="content"></main>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/vendor/tom-select/tom-select.base.min.js"></script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

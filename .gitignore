@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+data/*
+!data/.gitkeep
+数据副本/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+.env
+.env.*
