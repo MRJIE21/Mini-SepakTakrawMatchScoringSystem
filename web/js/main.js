@@ -1,6 +1,6 @@
 /* 应用入口：登录、导航、路由与全局状态。 */
 import { api, ApiError, getToken, setToken, setApiEventContext, setApiUser, setApiReadScope, captureRequestContext, validateReceipt } from './api.js';
-import { clear, h, toast, prepareNavigation, setPageLeaveGuard } from './ui.js';
+import { clear, h, toast, prepareNavigation, setPageLeaveGuard, markPageLeaveGuardPending, settlePageLeaveGuard } from './ui.js';
 import { canView } from './permissions.js';
 import { setStoreUser } from './store.js';
 import { setPendingRequestScope } from './pendingRequests.js';
@@ -16,10 +16,11 @@ export const state = {
   offline: false,      // 本次会话是否正在使用本机缓存运行
 };
 
-/* 一级导航（改进方案 §3.1）：日常项目任务统一进入工作台，维护类靠后。 */
+/* 一级导航（改进方案 §3.1）：日常项目任务统一进入工作台，维护类靠后。
+   学校报名不在侧栏重复出现，统一从工作台的“报名名单”进入。 */
 const NAV = [
-  { group: '赛事管理', items: ['dashboard', 'setup'] },
-  { group: '比赛管理', items: ['schoolRegistration', 'workspace'] },
+  { group: '赛事管理', items: ['dashboard', 'setup', 'teamRules'] },
+  { group: '比赛管理', items: ['workspace'] },
   { group: '比赛执行', items: ['field', 'scoring'] },
   { group: '成绩', items: ['school'] },
   { group: '系统维护', items: ['admin', 'users'] },
@@ -88,13 +89,14 @@ function renderShell() {
   setStoreUser(state.user);
   const nav = document.getElementById('sidenav');
   clear(nav);
+  const activeView = location.hash.replace(/^#\/?/, '').split('?')[0];
   for (const group of NAV) {
     const items = group.items.map((name) => state.views[name]).filter(Boolean)
       .filter((v) => canView(state.user.role, v.name) && !(state.user.role === 'recorder' && ['workspace','scoring'].includes(v.name)));
     if (!items.length) continue;
     nav.append(h('div.nav-group', group.group));
     for (const view of items) {
-      nav.append(h('a', { href: `#/${view.name}`, dataset: { view: view.name } }, view.label));
+      nav.append(h('a', { href: `#/${view.name}`, dataset: { view: view.name }, class: view.name === activeView ? 'active' : '' }, view.label));
     }
   }
   const select = document.getElementById('event-select');
@@ -105,7 +107,8 @@ function renderShell() {
   if (!state.events.length) select.append(h('option', { value: '' }, '（尚未创建赛事）'));
   select.onchange = async () => {
     const nextEventId = Number(select.value);
-    location.hash = `#/workspace?event=${nextEventId}`;
+    const currentView = location.hash.replace(/^#\/?/, '').split('?')[0];
+    location.hash = `#/${currentView === 'teamRules' ? 'teamRules' : 'workspace'}?event=${nextEventId}`;
   };
   const newEvent = document.getElementById('btn-new-event');
   const canCreateEvent = state.user.role === 'admin';
@@ -172,40 +175,49 @@ async function route(force = false) {
 
 async function renderRoute(force = false, scope = null) {
   if (force && !await prepareNavigation()) return;
-  setPageLeaveGuard(null);
-  const raw = (scope?.hash || location.hash).replace(/^#\/?/, '') || 'dashboard';
-  const [name, query] = raw.split('?');
-  const params = Object.fromEntries(new URLSearchParams(query || ''));
-  const view = state.views[name] || state.views.dashboard;
-  if (!canView(state.user.role, view.name)) { location.hash = roleHome(); return; }
-  document.querySelectorAll('.sidenav a').forEach((a) => {
-    a.classList.toggle('active', a.dataset.view === view.name);
-  });
-  const host = document.getElementById('content');
-  const content = h('div.route-content');
-  clear(host); host.append(content);
-  if (!state.events.length && state.user.role !== 'admin' && view.name !== 'account') {
-    content.append(h('div.panel', h('h3', '尚未分配赛事'),
-      h('p', '请联系管理员在“账号管理 → 角色与赛事”中分配所属赛事。')));
-    return;
-  }
+  markPageLeaveGuardPending();
+  /* 无论渲染成功、报错还是被更新的导航取代，都必须结束这次换页：
+     否则旧守卫会冻结，用户再点离开时既没人拦、也没人清。 */
   try {
-    await view.render({ el: content, params, state, refresh: () => scopeCurrent(scope) && route(true), force,
-      signal: scope?.signal, requestContext: scope?.context, isCurrent: () => scopeCurrent(scope) });
-  } catch (err) {
-    if (err.cancelled || !scopeCurrent(scope)) return;
-    clear(content);
-    content.append(h('div.panel',
-      h('h3', '页面加载失败'),
-      h('div', err.message),
-      err instanceof ApiError && err.status === 401
-        ? h('button.btn.btn-primary.mt', { onclick: () => location.reload() }, '重新登录')
-        : err.offline
-          ? h('div.warn-box.mt', '当前离线：本页需要联网读取数据。三人赛与个人赛记录页可用本机缓存继续记录。')
-          : null,
-      h('button.btn.mt', { onclick: () => route(true) }, '重试')));
+    const raw = (scope?.hash || location.hash).replace(/^#\/?/, '') || 'dashboard';
+    const [name, query] = raw.split('?');
+    const params = Object.fromEntries(new URLSearchParams(query || ''));
+    const view = state.views[name] || state.views.dashboard;
+    if (!canView(state.user.role, view.name)) { location.hash = roleHome(); return; }
+    document.querySelectorAll('.sidenav a').forEach((a) => {
+      a.classList.toggle('active', a.dataset.view === view.name);
+    });
+    const host = document.getElementById('content');
+    const content = h('div.route-content');
+    /* 旧页面在这里才真正退场，此时清空守卫不会留下“界面未保存、守卫已失效”的空窗。 */
+    clear(host); host.append(content);
+    // The old DOM is now gone: release its guard before awaiting the new view.
+    settlePageLeaveGuard();
+    if (!state.events.length && state.user.role !== 'admin' && view.name !== 'account') {
+      content.append(h('div.panel', h('h3', '尚未分配赛事'),
+        h('p', '请联系管理员在“账号管理 → 角色与赛事”中分配所属赛事。')));
+      return;
+    }
+    try {
+      await view.render({ el: content, params, state, refresh: () => scopeCurrent(scope) && route(true), force,
+        signal: scope?.signal, requestContext: scope?.context, isCurrent: () => scopeCurrent(scope) });
+    } catch (err) {
+      if (err.cancelled || !scopeCurrent(scope)) return;
+      clear(content);
+      content.append(h('div.panel',
+        h('h3', '页面加载失败'),
+        h('div', err.message),
+        err instanceof ApiError && err.status === 401
+          ? h('button.btn.btn-primary.mt', { onclick: () => location.reload() }, '重新登录')
+          : err.offline
+            ? h('div.warn-box.mt', '当前离线：本页需要联网读取数据。三人赛与个人赛记录页可用本机缓存继续记录。')
+            : null,
+        h('button.btn.mt', { onclick: () => route(true) }, '重试')));
+    }
+    if (scopeCurrent(scope)) renderedHash = location.hash;
+  } finally {
+    settlePageLeaveGuard();
   }
-  if (scopeCurrent(scope)) renderedHash = location.hash;
 }
 
 /* ------------------------------------------------------------------ 启动 */
@@ -237,10 +249,17 @@ export async function loadStructure() {
   const scope = activeReadScope;
   const selected = state.eventId;
   if (!state.eventId) { state.structure = null; return null; }
+  // reloadShell may select a newly created event while the creating view still
+  // owns the read scope. Read its business DB with the new identity, retaining
+  // the scope's cancellation and generation checks.
+  const context = captureRequestContext();
   try {
-    const structure = await api.get(`/api/events/${selected}/structure`);
+    const structure = await api.get(`/api/events/${selected}/structure`, { context, signal: scope?.signal });
     assertScope(scope);
     if (state.eventId !== selected) return state.structure;
+    if (structure.event?.id !== selected || structure.event.uuid !== context.identity?.event_uuid) {
+      throw new Error('赛事结构与目标赛事不一致，请重新读取');
+    }
     state.structure = structure;
     writeContextCache();
   } catch (err) {
@@ -416,7 +435,7 @@ async function loadViews() {
     import('./views/workspace.js'),
     import('./views/schoolRegistration.js'),
     import('./views/field.js'),
-    import('./views/scheduling.js'),
+    import('./views/schedule.js'),
     import('./views/scoring.js'),
     import('./views/matchAdmin.js'),
     import('./views/individual.js'),
@@ -435,7 +454,10 @@ async function loadViews() {
   window.addEventListener('hashchange', async () => {
     if (skipNextHashRoute) { skipNextHashRoute = false; return; }
     if (!await prepareNavigation()) {
-      if (renderedHash) history.replaceState(null, '', renderedHash);
+      /* 用户选择留在当前页：hash 已经变了，必须把地址改回真正渲染的那一页，
+         否则刷新、复制链接或后退都会跑到“看起来没进去”的目标页。 */
+      const restore = renderedHash || `#/${roleHome().replace(/^#\/?/, '')}`;
+      if (location.hash !== restore) history.replaceState(null, '', restore);
       const select = document.getElementById('event-select');
       if (select) select.value = state.eventId ?? '';
       return;

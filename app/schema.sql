@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS events (
   end_date   TEXT NOT NULL DEFAULT '',
   location   TEXT NOT NULL DEFAULT '',
   status     TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','running','finished')),
+  team_rules_json TEXT,
+  team_rules_revision INTEGER NOT NULL DEFAULT 1,
+  team_rules_state TEXT NOT NULL DEFAULT 'unified',
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
@@ -69,6 +72,8 @@ CREATE TABLE IF NOT EXISTS categories (
   kind     TEXT NOT NULL CHECK (kind IN ('team','individual')),
   name     TEXT NOT NULL,
   seq      INTEGER NOT NULL DEFAULT 0,
+  team_rules_json TEXT,
+  rules_revision INTEGER NOT NULL DEFAULT 1,
   UNIQUE (group_id, gender, kind)
 );
 
@@ -306,6 +311,10 @@ CREATE TABLE IF NOT EXISTS matches (
   seq           INTEGER NOT NULL DEFAULT 0,
   round_no      INTEGER NOT NULL DEFAULT 0,
   round_label   TEXT NOT NULL DEFAULT '',
+  schedule_role TEXT NOT NULL DEFAULT '',
+  schedule_revision INTEGER NOT NULL DEFAULT 1,
+  winner_rank   INTEGER,
+  loser_rank    INTEGER,
   venue_id      INTEGER REFERENCES venues(id),
   scheduled_at  TEXT NOT NULL DEFAULT '',
   home_source_type   TEXT NOT NULL CHECK (home_source_type IN
@@ -330,6 +339,9 @@ CREATE TABLE IF NOT EXISTS matches (
   reset_parent_id INTEGER REFERENCES matches(id),
   reset_state TEXT NOT NULL DEFAULT 'none' CHECK (reset_state IN ('none','active','inactive','review')),
   reset_parent_version INTEGER,
+  rules_snapshot_json TEXT,
+  rules_revision INTEGER,
+  rules_hash TEXT,
   note          TEXT NOT NULL DEFAULT '',
   updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -458,4 +470,19 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
+);
+
+-- 预计时间与休息独立于计分规则，旧比赛保持原数据。
+CREATE TABLE IF NOT EXISTS schedule_policies (
+  category_id INTEGER PRIMARY KEY REFERENCES categories(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL DEFAULT 1,
+  settings_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS match_schedule_meta (
+  match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+  duration_minutes INTEGER NOT NULL CHECK(duration_minutes > 0),
+  rest_minutes INTEGER NOT NULL CHECK(rest_minutes > 0),
+  policy_json TEXT NOT NULL,
+  batch_uid TEXT NOT NULL
 );

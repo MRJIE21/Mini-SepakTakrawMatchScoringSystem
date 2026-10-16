@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from itertools import groupby
 
-from .. import db, security, access, idempotency
+from .. import db, security, access, idempotency, team_rules_store
 from ..domain import advancement, validation
 from ..errors import ApiError, bad_request, conflict, forbidden, not_found
 from ..http_server import route
@@ -126,7 +126,10 @@ def submit_match(ctx):
     sets = payload.get("sets") or []
     events = payload.get("events") or []
     result_status = payload.get("result_status") or "normal"
-    errors = validation.validate_team_package(sets=sets, events=events, result_status=result_status)
+    rule_info = team_rules_store.freeze(ctx.conn, match)
+    team_rules_store.check_payload(payload, rule_info)
+    errors = validation.validate_team_package(sets=sets, events=events, result_status=result_status,
+                                              rules=rule_info['rules'])
     if errors:
         raise ApiError(422, "invalid_package", "提交数据未通过校验，请核对后重试",
                        detail={"errors": errors})
@@ -164,13 +167,14 @@ def submit_match(ctx):
 def _write_match_result(conn, match, sets: list[dict], events: list, result_status: str,
                         payload: dict, keep_events: bool = False) -> None:
     match_id = match["id"]
+    rules = team_rules_store.match_rules(conn, db.q1(conn, 'SELECT * FROM matches WHERE id=?', (match_id,)))['rules']
     db.run(conn, "DELETE FROM match_sets WHERE match_id = ?", (match_id,))
     for s in sorted(sets, key=lambda x: int(x.get("set_no") or 0)):
         hp, ap = int(s.get("home_points") or 0), int(s.get("away_points") or 0)
         db.insert(conn, "match_sets", {
             "match_id": match_id, "set_no": int(s["set_no"]), "home_points": hp,
             "away_points": ap,
-            "winner_side": s.get("winner_side") or validation.set_winner(hp, ap) or ""})
+            "winner_side": s.get("winner_side") or validation.set_winner(hp, ap, rules=rules, set_no=int(s['set_no'])) or ""})
     if not keep_events:
         db.run(conn, "DELETE FROM score_events WHERE match_id = ?", (match_id,))
         for e in sorted(events, key=lambda x: int(x.get("seq") or 0)):
@@ -264,6 +268,7 @@ def _maybe_create_reset_match(conn, match, resolutions=None, user=None) -> bool:
             new_state = "active"
         updates = {"reset_state": new_state, "reset_parent_version": match["result_version"]}
         if row["reset_state"] != new_state:
+            team_rules_store.freeze(conn, row)
             updates["result_version"] = row["result_version"] + 1
             updates["updated_at"] = db.now(conn)
         db.update(conn, "matches", row["id"], updates)
@@ -648,8 +653,10 @@ def _correct_match(ctx):
     events = ctx.body.get("events") or []
     result_status = ctx.body.get("result_status") or match["result_status"] or "normal"
     keep_events = not events
+    rule_info = team_rules_store.freeze(ctx.conn, match)
+    team_rules_store.check_payload(ctx.body, rule_info)
     errors = validation.validate_team_package(sets=sets, events=events, result_status=result_status,
-                                              require_events=not keep_events)
+                                              require_events=not keep_events, rules=rule_info['rules'])
     if errors:
         raise ApiError(422, "invalid_package", "更正数据未通过校验", detail={"errors": errors})
     before = _current_result(ctx.conn, match_id)
@@ -690,6 +697,7 @@ def _cancel_match(ctx):
     if status not in ("cancelled", "unfinished"):
         raise bad_request("只能标记为已取消或未完成")
     with db.tx(ctx.conn):
+        team_rules_store.freeze(ctx.conn, match)
         db.update(ctx.conn, "matches", match_id, {
             "status": "finished", "result_status": status,
             "result_version": match["result_version"] + 1,
@@ -719,6 +727,7 @@ def _review_reset_match(ctx):
     if not parent_id and ctx.body.get("action") == "deactivate":
         if not str(ctx.body.get("reason") or "").strip():
             raise bad_request("请填写显式复核原因")
+        team_rules_store.freeze(ctx.conn, match)
         db.update(ctx.conn, "matches", match_id, {"reset_state": "inactive",
                   "result_version": match["result_version"] + 1, "updated_at": db.now(ctx.conn)})
         security.audit(ctx.conn, ctx.user, "review_reset_match", "match", match_id,

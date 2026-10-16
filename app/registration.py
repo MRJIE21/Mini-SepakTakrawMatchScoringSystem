@@ -4,6 +4,10 @@ from .errors import conflict, invalid_fields
 
 
 def guard_change(conn, category_id):
+    if db.q1(conn, """SELECT s.id FROM stages s JOIN plans p ON p.id=s.plan_id WHERE p.category_id=?
+        AND json_extract(s.params_json,'$.schedule_meta.state')='confirmed'
+        AND json_extract(s.params_json,'$.schedule_meta.definition.purpose')<>'manual' LIMIT 1""", (category_id,)):
+        raise conflict('项目阶段已确认，变更参赛学校、报名状态或种子须先处理阶段与下游引用', code='plan_locked')
     locked = db.q1(conn, """SELECT id FROM plans WHERE category_id=?
         AND status IN ('locked','running') LIMIT 1""", (category_id,))
     if locked and db.q1(conn, 'SELECT id FROM matches WHERE category_id=? LIMIT 1', (category_id,)):

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 
-from .. import db, security
+from .. import db, security, team_rules_store
+from ..domain import team_rules
 from ..domain import advancement, points, ranking
 from ..domain.validation import payload_hash
 from ..errors import bad_request, conflict, forbidden, not_found
@@ -50,6 +51,7 @@ def pool_standings_payload(conn, pool, include_excluded: bool = True) -> dict:
     for m in match_rows:
         sets = db.q(conn, "SELECT * FROM match_sets WHERE match_id = ? ORDER BY set_no", (m["id"],))
         match_list.append({
+            "rules": team_rules_store.match_rules(conn, m)['rules'],
             "id": m["id"], "home_participation": m["home_actual"], "away_participation": m["away_actual"],
             "status": m["status"], "result_status": m["result_status"],
             "round_label": m["round_label"], "round_no": m["round_no"],
@@ -60,6 +62,9 @@ def pool_standings_payload(conn, pool, include_excluded: bool = True) -> dict:
             for suffix in ("source_type", "source_pool", "source_rank", "source_match", "participation"):
                 source[f"{side}_{suffix}"] = m[f"{side}_{suffix}"]
         if m["result_version"]:
+            rule_info = team_rules_store.match_rules(conn, m)
+            if rule_info['rules_hash'] != team_rules.fingerprint(None):
+                source['rules_hash'] = rule_info['rules_hash']
             source.update({"result_version": m["result_version"], "result_status": m["result_status"],
                            "recorded": [m["home_actual"], m["away_actual"]],
                            "sets": [{k: s[k] for k in ("set_no", "home_points", "away_points", "winner_side")}
@@ -329,6 +334,21 @@ def derive_placements(conn, category_id: int, plan) -> tuple[list[dict], list[st
     for stage in stages:
         params = _loads(stage["params_json"])
         pools = db.q(conn, "SELECT * FROM pools WHERE stage_id = ? ORDER BY seq", (stage["id"],))
+        managed = params.get('schedule_meta')
+        if managed:
+            if managed['state'] != 'confirmed':
+                continue
+            for match in db.q(conn, 'SELECT * FROM matches WHERE stage_id=? ORDER BY seq,id', (stage['id'],)):
+                winner = advancement.result_winner_side(conn, match)
+                if winner and match['winner_rank'] and match['loser_rank']:
+                    _assign(derived, match, winner, match['winner_rank'], match['loser_rank'], stage['name'] + ' · ' + match['round_label'])
+            from .schedule import slot_columns
+            for award in managed.get('awards', []):
+                columns = slot_columns(award['source'], 'home', {})
+                pid, is_bye, reason = advancement.resolve_slot(conn, columns, 'home')
+                if pid and not is_bye and not reason:
+                    derived.append({'participation_id': pid, 'rank_no': award['rank'], 'source': 'auto', 'note': stage['name']})
+            continue
         if stage["kind"] == "placement":
             fmt = params.get("format", "round_robin")
             for pool in pools:

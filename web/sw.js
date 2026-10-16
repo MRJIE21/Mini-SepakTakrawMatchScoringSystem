@@ -1,21 +1,23 @@
 /* 离线页面资源：在线时优先取最新页面，断网时回退到已缓存副本（设计大纲 9.1、9.2）。
    比赛数据不在这里缓存：提交结果以服务器为准，未提交记录保存在 IndexedDB。 */
-const CACHE = 'stss-shell-v49';
+const CACHE = 'stss-shell-v61';
 const SHELL = [
   '/', '/index.html', '/css/app.css', '/manifest.webmanifest',
   '/js/main.js', '/js/api.js', '/js/store.js', '/js/ui.js', '/js/labels.js', '/js/scoring.js',
   '/js/dateTime.js',
   '/js/workspaceContext.js',
+  '/js/autoSchedule.js',
   '/js/bracketLayout.js', '/js/submit.js', '/js/pendingRequests.js',
   '/js/enrollmentImport.js',
   '/js/schoolRegistrationModel.js', '/js/views/schoolRegistration.js',
   '/js/schoolRegistrationImport.js',
   '/js/athletePicker.js', '/vendor/tom-select/tom-select.base.min.js',
   '/vendor/tom-select/tom-select.default.min.css',
-  '/js/permissions.js', '/js/recordingOwner.js', '/js/schedulingFlow.js',
+  '/js/permissions.js', '/js/recordingOwner.js', '/js/scheduleStageModel.js', '/js/groupNames.js',
   '/js/groupDraw.js',
   '/js/setupModel.js',
-  '/js/views/dashboard.js', '/js/views/setup.js', '/js/views/catalog.js', '/js/views/scheduling.js',
+  '/js/teamRules.js', '/js/teamRulesEditor.js',
+  '/js/views/dashboard.js', '/js/views/setup.js', '/js/views/catalog.js', '/js/views/schedule.js',
   '/js/views/workspace.js',
   '/js/views/field.js',
   '/js/views/scoring.js', '/js/views/matchAdmin.js', '/js/views/individual.js',

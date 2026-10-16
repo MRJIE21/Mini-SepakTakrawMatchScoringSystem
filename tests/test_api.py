@@ -5,6 +5,7 @@
 以及幂等提交、版本冲突、15 分制校验、轮空/待定区分、甲乙丙隔离。
 """
 from __future__ import annotations
+from helpers.historical_schedule import fixture_schedule
 
 import json
 import os
@@ -36,6 +37,7 @@ load_routes()
 
 
 class ApiTest(unittest.TestCase):
+    fixture_schedule = fixture_schedule
     @classmethod
     def setUpClass(cls):
         if config.DB_PATH.exists():
@@ -204,11 +206,11 @@ class ApiTest(unittest.TestCase):
                  {"type": "pool_rank", "stage": 1, "pool": 0, "rank": 3},
                  {"type": "pool_rank", "stage": 1, "pool": 1, "rank": 3}]}},
         ]
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"name": "甲组男三测试方案", "stages": stages})
         plan_id = plan["plan_id"]
-        result = self.ok("POST", f"/api/plans/{plan_id}/generate")
-        self.ok("POST", f"/api/plans/{plan_id}/lock")
+        result = self.fixture_schedule("POST", f"/api/plans/{plan_id}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan_id}/lock")
         return plan_id, result
 
     # ------------------------------------------------------------ 计分工具
@@ -276,7 +278,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(team["category"]["kind"], "team")
         self.assertEqual(team["counts"]["enrolled"], 2)
         self.assertEqual(team["counts"]["profiles_incomplete"], 2)
-        self.assertEqual(team["primary_action"]["tab"], "schedule")
+        self.assertEqual(team["primary_action"]["tab"], "groups")
+        self.assertEqual([step["tab"] for step in team["steps"]],
+                         ["registration", "groups", "schedule", "matches", "results"])
         self.assertEqual(team["blockers"], [])
         self.assertEqual(team["reminders"][0]["code"], "profiles_incomplete")
         self.assertEqual(len(team["reminders"][0]["items"]), 2)
@@ -293,29 +297,6 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(empty["primary_action"]["tab"], "registration")
         self.assertEqual(empty["blockers"][0]["code"], "no_entries")
 
-    def test_workspace_distinguishes_configuration_preview_and_recordable_schedule(self):
-        fx = self.build_event(team_count=2, individual_count=0)
-        url = f"/api/categories/{fx['team_cat']}/workspace"
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan", {
-            "stages": [{"kind": "round_robin", "name": "循环赛", "params": {"pool_count": 1}}],
-        })["plan_id"]
-        draft = self.ok("GET", url)
-        self.assertEqual(draft["primary_action"]["view"], "planning")
-        self.assertEqual(draft["counts"]["matches_scoreable"], 0)
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        preview = self.ok("GET", url)
-        self.assertEqual(preview["primary_action"]["tab"], "schedule")
-        self.assertEqual(preview["primary_action"]["view"], "planning")
-        self.assertEqual(preview["counts"]["matches_ready"], 1)
-        self.assertEqual(preview["counts"]["matches_scoreable"], 0)
-        self.assertEqual(preview["upcoming_matches"], [])
-        self.ok("POST", f"/api/plans/{plan}/lock")
-        locked = self.ok("GET", url)
-        self.assertEqual(locked["primary_action"]["tab"], "matches")
-        self.assertEqual(locked["primary_action"]["status"], "ready")
-        self.assertEqual(locked["counts"]["matches_scoreable"], 1)
-        self.assertIsNone(locked["upcoming_matches"][0]["recorder_id"], "读取概况不领取记录任务")
-        self.assertEqual([s["tab"] for s in locked["steps"]], ["registration", "schedule", "matches", "results"])
 
     def test_workspace_manual_matches_are_recordable_without_auto_plan_confirmation(self):
         fx = self.build_event(team_count=2, individual_count=0)
@@ -357,11 +338,11 @@ class ApiTest(unittest.TestCase):
 
     def test_workspace_excludes_byes_from_unfinished_match_count(self):
         fx = self.build_event(team_count=3, individual_count=0)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan", {
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan", {
             "stages": [{"kind": "swiss", "name": "一轮瑞士赛", "params": {"rounds": 1, "bye_award": "none"}}],
         })["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         while True:
             ready = [m for m in self.match_list(category_id=fx["team_cat"]) if m["status"] == "ready"]
             if not ready:
@@ -415,28 +396,6 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(workspace["blockers"], [])
         self.assertIn("不足 3 人", workspace["reminders"][0]["items"][0]["gaps"][0])
 
-    def test_workspace_swiss_requires_all_planned_rounds_before_final_rankings(self):
-        fx = self.build_event(team_count=4, individual_count=0)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan", {
-            "stages": [{"kind": "swiss", "name": "两轮瑞士赛", "params": {"rounds": 2}}],
-        })["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
-        for match in self.match_list(category_id=fx["team_cat"], status="ready"):
-            self.play(match["id"], [(15, 9), (15, 8)])
-        url = f"/api/categories/{fx['team_cat']}/workspace"
-        current = self.ok("GET", url)
-        self.assertEqual(current["counts"]["stages_next_round"], 1)
-        self.assertEqual(current["counts"]["pools_to_confirm"], 0)
-        self.assertEqual(current["primary_action"]["tab"], "schedule")
-        self.assertNotEqual(current["steps"][2]["state"], "complete")
-        self.ok("POST", f"/api/stages/{current['primary_action']['stage']}/next-round")
-        for match in self.match_list(category_id=fx["team_cat"], status="ready"):
-            self.play(match["id"], [(15, 9), (15, 8)])
-        final = self.ok("GET", url)
-        self.assertEqual(final["counts"]["stages_next_round"], 0)
-        self.assertEqual(final["counts"]["pools_to_confirm"], 1)
-        self.assertEqual(final["primary_action"]["tab"], "results")
 
     def test_full_flow(self):
         fx = self.build_event()
@@ -578,7 +537,8 @@ class ApiTest(unittest.TestCase):
         status, payload = self.request("GET", f"/api/exports/record-sheet.html?match_id={final['id']}",
                                        expect=200, raw=True)
         text = payload.decode("utf-8")
-        self.assertIn("15 分制", text)
+        self.assertIn("3局2胜", text)
+        self.assertIn("15分", text)
         self.assertNotIn("11分", text)
 
         # 正式更正：改变决赛结果会提示受影响场次
@@ -609,10 +569,10 @@ class ApiTest(unittest.TestCase):
     def test_standings_c_z_and_lot(self):
         fx = self.build_event(team_count=3)
         stages = [{"kind": "round_robin", "name": "单循环", "params": {"legs": 1}}]
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": stages})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         matches = self.match_list(category_id=fx["team_cat"])
         self.assertEqual(len(matches), 3)
         # 三队形成 2:1 的循环胜负（A 胜 C、C 胜 B、B 胜 A）：
@@ -647,10 +607,10 @@ class ApiTest(unittest.TestCase):
     def test_full_tie_needs_lots(self):
         """积分、C 值、Z 值全部相同时，必须先录入抽签结果才能确认名次。"""
         fx = self.build_event(team_count=3)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         matches = self.match_list(category_id=fx["team_cat"])
         index = {pid: i for i, pid in enumerate(fx["team_parts"])}
         cycle = {(0, 2), (2, 1), (1, 0)}
@@ -683,11 +643,11 @@ class ApiTest(unittest.TestCase):
     def test_two_tie_groups_keep_each_others_lot_results(self):
         fx = self.build_event(team_count=4, individual_count=0)
         cat = fx["team_cat"]
-        plan = self.ok("POST", f"/api/categories/{cat}/plan", {
+        plan = self.fixture_schedule("POST", f"/api/categories/{cat}/plan", {
             "stages": [{"kind": "round_robin", "name": "单循环",
                         "params": {"pool_count": 1}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         index = {pid: i for i, pid in enumerate(fx["team_parts"])}
         winners = {(0, 1): 0, (0, 2): 0, (0, 3): 3,
                    (1, 2): 1, (1, 3): 1, (2, 3): 2}
@@ -721,10 +681,10 @@ class ApiTest(unittest.TestCase):
 
     def test_tie_requires_lot(self):
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=fx["team_cat"])[0]
         # 1:2 负，两队积分 2:1，但 C 值 1/2 对 2/1 不同 → 无需抽签
         self.play(match["id"], [(15, 10), (10, 15), (10, 15)])
@@ -733,10 +693,10 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(all(r["rank"] for r in standings["rows"]))
         # 弃权：一方 0 分，另一方 2 分，不补造局分
         fx2 = self.build_event(team_count=2)
-        plan2 = self.ok("POST", f"/api/categories/{fx2['team_cat']}/plan",
+        plan2 = self.fixture_schedule("POST", f"/api/categories/{fx2['team_cat']}/plan",
                         {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan2}/generate")
-        self.ok("POST", f"/api/plans/{plan2}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan2}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan2}/lock")
         match2 = self.match_list(category_id=fx2["team_cat"])[0]
         self.play(match2["id"], [], result_status="home_forfeit", uid="uid-forfeit")
         pool2 = self.ok("GET", f"/api/categories/{fx2['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
@@ -745,10 +705,10 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(points_map, {0, 2})
         # 未完成的比赛不计入排名
         fx3 = self.build_event(team_count=2)
-        plan3 = self.ok("POST", f"/api/categories/{fx3['team_cat']}/plan",
+        plan3 = self.fixture_schedule("POST", f"/api/categories/{fx3['team_cat']}/plan",
                         {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan3}/generate")
-        self.ok("POST", f"/api/plans/{plan3}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan3}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan3}/lock")
         match3 = self.match_list(category_id=fx3["team_cat"])[0]
         self.play(match3["id"], [], result_status="unfinished")
         pool3 = self.ok("GET", f"/api/categories/{fx3['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
@@ -799,32 +759,12 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(found["found"])
         self.assertFalse(self.ok("GET", "/api/submissions/not-exist")["found"])
 
-    def test_plan_lock_and_unlock(self):
-        fx = self.build_event(team_count=4)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
-                       {"stages": [{"kind": "round_robin", "name": "小组赛",
-                                    "params": {"pool_count": 2}}]})["plan_id"]
-        # 未生成预览不能锁定
-        self.err("POST", f"/api/plans/{plan}/lock", {}, expect=400)
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
-        matches = self.match_list(category_id=fx["team_cat"])
-        self.play(matches[0]["id"], [(15, 5), (15, 5)])
-        # 有结果时解锁需要 force 与原因
-        self.err("POST", f"/api/plans/{plan}/unlock", {}, expect=409, code="has_results")
-        self.err("POST", f"/api/plans/{plan}/unlock", {"force": True}, expect=400)
-        unlocked = self.ok("POST", f"/api/plans/{plan}/unlock",
-                           {"force": True, "reason": "分组需要调整"})
-        self.assertEqual(unlocked["version"], 2)
-        # 解锁后有结果，重新生成被拒绝
-        self.err("POST", f"/api/plans/{plan}/generate", {}, expect=409, code="has_results")
-        self.ok("POST", f"/api/plans/{plan}/lock")
 
     def test_roles(self):
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "小组赛", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
         viewer = self.make_user("viewer")
         recorder = self.make_user("recorder")
         organizer = self.make_user("organizer")
@@ -836,7 +776,7 @@ class ApiTest(unittest.TestCase):
         self.err("POST", f"/api/plans/{plan}/lock", {}, token=recorder, expect=403)
         # 编排人员可以在管理员之外执行锁定以外的编排工作，但锁定必须由管理员完成
         self.err("POST", f"/api/plans/{plan}/lock", {}, token=organizer, expect=403)
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=fx["team_cat"])[0]
         # 记录员可以提交成绩
         self.play(match["id"], [(15, 9), (15, 9)], uid="u2")
@@ -849,10 +789,10 @@ class ApiTest(unittest.TestCase):
     def test_selection_and_bye_rules(self):
         """四队淘汰：轮空不计为比赛，小组人数为奇数时轮次空闲。"""
         fx = self.build_event(team_count=5)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "single_elim", "name": "淘汰赛", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         matches = self.match_list(category_id=fx["team_cat"])
         self.assertEqual(len(matches), 4)        # 5 队 → 8 签位，3 场轮空 → 4 场比赛
         first_round = [m for m in matches if m["round_no"] == 1]
@@ -863,35 +803,13 @@ class ApiTest(unittest.TestCase):
             self.assertNotIn("bye", labels, "轮空不应生成场次")
         # 奇数人数循环
         fx2 = self.build_event(team_count=5)
-        plan2 = self.ok("POST", f"/api/categories/{fx2['team_cat']}/plan",
+        plan2 = self.fixture_schedule("POST", f"/api/categories/{fx2['team_cat']}/plan",
                         {"stages": [{"kind": "round_robin", "name": "小组赛", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan2}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan2}/generate")
         matches2 = self.match_list(category_id=fx2["team_cat"])
         self.assertEqual(len(matches2), 10)      # C(5,2)，轮次空闲不生成比赛
         self.assertEqual(len({m["round_no"] for m in matches2}), 5)
 
-    def test_swiss_rounds(self):
-        fx = self.build_event(team_count=6)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
-                       {"stages": [{"kind": "swiss", "name": "瑞士制",
-                                    "params": {"rounds": 3, "bye_award": "none"}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
-        first = self.match_list(category_id=fx["team_cat"])
-        self.assertEqual(len(first), 3)
-        for m in first:
-            self.play(m["id"], [(15, 9), (15, 9)])
-        stage_id = self.ok("GET", f"/api/plans/{plan}")["plan"]["stages"][0]["id"]
-        # 未打完就生成下一轮会被拒绝（都已确认，因此可以生成）
-        nxt = self.ok("POST", f"/api/stages/{stage_id}/next-round")
-        self.assertEqual(nxt["round"], 2)
-        second = [m for m in self.match_list(category_id=fx["team_cat"]) if m["round_no"] == 2]
-        self.assertEqual(len(second), 3)
-        pairs = {tuple(sorted((m["home"]["participation_id"], m["away"]["participation_id"])))
-                 for m in second}
-        first_pairs = {tuple(sorted((m["home"]["participation_id"], m["away"]["participation_id"])))
-                       for m in first}
-        self.assertFalse(pairs & first_pairs, "第二轮不应重复第一轮对阵")
 
     def test_full_event_creation_is_atomic_and_uses_event_database(self):
         """向导最终确认后，赛事结构一次写入独立赛事库。"""
@@ -948,7 +866,7 @@ class ApiTest(unittest.TestCase):
                                 {"team_id": team["team_id"], "seed_no": i + 1})["participation_id"])
 
         # 阶段配置：手动分组 + 自定义积分（胜 3 负 1 弃权 0）
-        plan = self.ok("POST", f"/api/categories/{cat_id}/plan", {"stages": []})
+        plan = self.fixture_schedule("POST", f"/api/categories/{cat_id}/plan", {"stages": []})
         stages_cfg = [{
             "kind": "round_robin", "name": "预赛小组",
             "params": {"legs": 1, "assign": "manual",
@@ -956,8 +874,8 @@ class ApiTest(unittest.TestCase):
                        "pools": [{"name": "东区", "members": [pids[0], pids[1]]},
                                  {"name": "西区", "members": [pids[2], pids[3]]}]},
         }]
-        self.ok("PUT", f"/api/plans/{plan['plan_id']}/stages", {"stages": stages_cfg})
-        self.ok("POST", f"/api/plans/{plan['plan_id']}/generate")
+        self.fixture_schedule("PUT", f"/api/plans/{plan['plan_id']}/stages", {"stages": stages_cfg})
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/generate")
 
         detail = self.ok("GET", f"/api/categories/{cat_id}/plan")["plan"]
         pools = detail["stages"][0]["pools"]
@@ -966,14 +884,14 @@ class ApiTest(unittest.TestCase):
 
         # 已生成比赛后不能直接改分组
         self.err("PUT", f"/api/pools/{pools[0]['id']}/members",
-                 {"participation_ids": [pids[0], pids[2]]}, expect=409, code="has_matches")
+                 {"participation_ids": [pids[0], pids[2]]}, expect=410, code="planner_retired")
 
         # 小组自定义命名
-        self.ok("PUT", f"/api/pools/{pools[0]['id']}", {"name": "东区A"})
+        self.err("PUT", f"/api/pools/{pools[0]['id']}", {"name": "东区A"}, expect=410, code="planner_retired")
         detail = self.ok("GET", f"/api/categories/{cat_id}/plan")["plan"]
-        self.assertEqual(detail["stages"][0]["pools"][0]["name"], "东区A")
+        self.assertEqual(detail["stages"][0]["pools"][0]["name"], "东区")
 
-        self.ok("POST", f"/api/plans/{plan['plan_id']}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/lock")
 
         # 自定义积分生效：胜一场 3 分
         matches = [m for m in self.match_list(category_id=cat_id) if m["pool_id"] == pools[0]["id"]]
@@ -1087,10 +1005,10 @@ class ApiTest(unittest.TestCase):
     def test_gauntlet_ranks_are_complete(self):
         """阶梯淘汰：4 队必须得到 1、2、3、4 四个不同名次。"""
         fx = self.build_event(team_count=4)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "gauntlet", "name": "阶梯淘汰", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         matches = self.match_list(category_id=fx["team_cat"])
         self.assertEqual(len(matches), 3)
         played = self.play_all_ready(fx["team_cat"])
@@ -1102,11 +1020,11 @@ class ApiTest(unittest.TestCase):
     def test_double_elim_grand_final_reset(self):
         """双淘汰开启决赛重置：败者区队伍赢下决赛后必须生成可用的重置场次。"""
         fx = self.build_event(team_count=4)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "double_elim", "name": "双淘汰",
                                     "params": {"grand_final_reset": True}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         # 先打完胜者区与败者区，留下决赛
         for _ in range(20):
             ready = [m for m in self.match_list(category_id=fx["team_cat"], status="ready")]
@@ -1132,41 +1050,6 @@ class ApiTest(unittest.TestCase):
         notes = " ".join(p["note"] for p in auto["placements"])
         self.assertIn("重置", notes)
 
-    def test_swiss_first_round_bye_is_saved(self):
-        """瑞士制首轮奇数队伍：轮空必须落库，否则轮空积分与避免重复轮空都会失效。"""
-        fx = self.build_event(team_count=5)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
-                       {"stages": [{"kind": "swiss", "name": "瑞士制",
-                                    "params": {"rounds": 3, "bye_award": "none"}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
-        matches = self.match_list(category_id=fx["team_cat"])
-        self.assertEqual(len(matches), 3, "5 队首轮应有 2 场比赛 + 1 条轮空记录")
-        byes = [m for m in matches if m["status"] == "void"]
-        self.assertEqual(len(byes), 1, "应保存一条轮空记录")
-        self.assertTrue(byes[0]["home"]["participation_id"], "轮空记录应指向轮空的队伍")
-        pool = self.ok("GET", f"/api/categories/{fx['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
-        standings = self.ok("GET", f"/api/pools/{pool['id']}/standings")
-        bye_rows = [r for r in standings["rows"] if r["byes"]]
-        self.assertEqual(len(bye_rows), 1, "轮空次数应体现在小组排名中")
-        self.assertEqual(bye_rows[0]["points"], 0, "默认不授予轮空积分")
-
-        """瑞士制奇数队伍：首轮轮空要有记录，后续轮次生成不受影响。"""
-        fx2 = self.build_event(team_count=5)
-        plan2 = self.ok("POST", f"/api/categories/{fx2['team_cat']}/plan",
-                        {"stages": [{"kind": "swiss", "name": "瑞士制",
-                                     "params": {"rounds": 3, "bye_award": "win"}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan2}/generate")
-        self.ok("POST", f"/api/plans/{plan2}/lock")
-        stage_id = self.ok("GET", f"/api/plans/{plan2}")["plan"]["stages"][0]["id"]
-        self.play_all_ready(fx2["team_cat"])
-        nxt = self.ok("POST", f"/api/stages/{stage_id}/next-round")
-        self.assertEqual(nxt["round"], 2)
-        pool2 = self.ok("GET", f"/api/categories/{fx2['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
-        standings2 = self.ok("GET", f"/api/pools/{pool2['id']}/standings")
-        bye_rows2 = [r for r in standings2["rows"] if r["byes"]]
-        self.assertTrue(bye_rows2, "第二轮同样应有轮空记录")
-        self.assertTrue(any(r["points"] >= 2 for r in bye_rows2), "轮空按方案授予积分时应记 2 分")
 
     def test_result_change_updates_placements_and_points(self):
         """成绩变更必须联动名次与学校积分：个人赛取消成绩、三人赛决赛更正。"""
@@ -1198,13 +1081,13 @@ class ApiTest(unittest.TestCase):
 
         # ② 三人赛：更正决赛胜负后，1、2 名与积分必须翻转
         fx2 = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx2['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx2['team_cat']}/plan",
                        {"stages": [{"kind": "single_elim", "name": "决赛",
                                     "params": {"sources": [
                                         {"type": "participations"}]}}]})["plan_id"]
         # 两支队伍直接打一场决赛
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         final = self.match_list(category_id=fx2["team_cat"])[0]
         self.play(final["id"], [(15, 5), (15, 6)], uid="final-1")
         auto = self.ok("POST", f"/api/categories/{fx2['team_cat']}/placements/auto", {})
@@ -1233,10 +1116,10 @@ class ApiTest(unittest.TestCase):
     def test_stale_pool_requires_reconfirm_after_correction(self):
         """小组名次确认后若成绩被更正，快照必须退回待确认，下游签位随之等待。"""
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "小组赛", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=fx["team_cat"])[0]
         self.play(match["id"], [(15, 5), (15, 6)], uid="rr-1")
         pool = self.ok("GET", f"/api/categories/{fx['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
@@ -1260,10 +1143,10 @@ class ApiTest(unittest.TestCase):
                 {"type": "pool_rank", "stage": 1, "pool": 0, "rank": 1},
                 {"type": "pool_rank", "stage": 1, "pool": 0, "rank": 2}]}},
         ]
-        plan_id = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan_id = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                           {"stages": stages})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan_id}/generate")
-        self.ok("POST", f"/api/plans/{plan_id}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan_id}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan_id}/lock")
         plan = self.ok("GET", f"/api/plans/{plan_id}")["plan"]
         pool_id = plan["stages"][0]["pools"][0]["id"]
         stage_ids = [s["id"] for s in plan["stages"]]
@@ -1311,10 +1194,10 @@ class ApiTest(unittest.TestCase):
     def test_pool_confirmation_blocks_on_tie(self):
         """并列未抽签时不能确认名次。"""
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=fx["team_cat"])[0]
         self.play(match["id"], [], result_status="unfinished")
         pool = self.ok("GET", f"/api/categories/{fx['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
@@ -1331,10 +1214,10 @@ class ApiTest(unittest.TestCase):
         """方案锁定后：编排人员不能删改自动生成的场次，管理员删除必须写原因。"""
         self.use_event_database = True
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=fx["team_cat"])[0]
         organizer = self.make_user("organizer")
         self.err("DELETE", f"/api/matches/{match['id']}", {}, token=organizer, expect=403)
@@ -1357,10 +1240,10 @@ class ApiTest(unittest.TestCase):
         self.err("POST", f"/api/categories/{fx['team_cat']}/placements",
                  {"participation_id": 999999, "rank_no": 1}, expect=404)
         # 已生成对阵的参赛主体不能直接删除（含尚未解析的签位来源）
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         pid = fx["team_parts"][0]
         self.err("DELETE", f"/api/participations/{pid}", {}, expect=409, code="in_use")
         # 报名重构后，锁定赛程内的退出也必须先解锁并重新核对，不能绕过变更保护。
@@ -1384,10 +1267,10 @@ class ApiTest(unittest.TestCase):
     def test_pool_confirm_requires_finished_matches(self):
         """小组还有未打场次时不能确认名次；强制确认必须写原因并记入审计。"""
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环", "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         pool = self.ok("GET", f"/api/categories/{fx['team_cat']}/plan")["plan"]["stages"][0]["pools"][0]
         self.err("POST", f"/api/pools/{pool['id']}/confirm", {}, expect=409, code="matches_incomplete")
         self.err("POST", f"/api/pools/{pool['id']}/confirm", {"force": True},
@@ -1443,11 +1326,11 @@ class ApiTest(unittest.TestCase):
                            {"school_id": sch["school_id"], "name": name})
             self.ok("POST", f"/api/categories/{cat['id']}/participations",
                     {"team_id": team["team_id"]})
-        plan = self.ok("POST", f"/api/categories/{cat['id']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{cat['id']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环",
                                     "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
-        self.ok("POST", f"/api/plans/{plan}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=cat["id"])[0]
 
         status, body = self.request("GET",
@@ -1467,10 +1350,10 @@ class ApiTest(unittest.TestCase):
     def test_backup_is_consistent_snapshot(self):
         """备份必须是可读的一致性快照：刚写入、仍在 WAL 中的数据也要能读到。"""
         fx = self.build_event(team_count=2)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan",
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan",
                        {"stages": [{"kind": "round_robin", "name": "单循环",
                                     "params": {}}]})["plan_id"]
-        self.ok("POST", f"/api/plans/{plan}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan}/generate")
         status, body = self.request("GET", "/api/admin/backup", raw=True)
         self.assertEqual(status, 200)
         with tempfile.TemporaryDirectory() as tmp:
@@ -1864,11 +1747,11 @@ class ApiTest(unittest.TestCase):
     def test_phase1_plan_locked_blocks_new_enrollment(self):
         """§15.3：方案锁定并已生成赛程后，不接受静默新增报名。"""
         fx = self.build_event(team_count=6, individual_count=0)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan", {"stages": [
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan", {"stages": [
             {"kind": "round_robin", "name": "小组赛",
              "params": {"legs": 1, "pool_count": 2, "assign": "snake"}}]})
-        self.ok("POST", f"/api/plans/{plan['plan_id']}/generate")
-        self.ok("POST", f"/api/plans/{plan['plan_id']}/lock")
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/lock")
         parsed = self.err("POST", f"/api/categories/{fx['team_cat']}/enrollments", {
             "school": {"name": "锁定后想插队的学校"},
         }, expect=409)
@@ -1877,10 +1760,10 @@ class ApiTest(unittest.TestCase):
     def test_phase1_team_impact_lists_references(self):
         """§15.2：修改影响预检查只读地列出受影响场次与名次。"""
         fx = self.build_event(team_count=6, individual_count=0)
-        plan = self.ok("POST", f"/api/categories/{fx['team_cat']}/plan", {"stages": [
+        plan = self.fixture_schedule("POST", f"/api/categories/{fx['team_cat']}/plan", {"stages": [
             {"kind": "round_robin", "name": "小组赛",
              "params": {"legs": 1, "pool_count": 2, "assign": "snake"}}]})
-        self.ok("POST", f"/api/plans/{plan['plan_id']}/generate")
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/generate")
         teams = self.ok("GET", f"/api/categories/{fx['team_cat']}/teams")["teams"]
         impact = self.ok("GET", f"/api/teams/{teams[0]['id']}/impact")
         self.assertEqual(impact["participation_id"], fx["team_parts"][0])
@@ -1941,13 +1824,13 @@ class ApiTest(unittest.TestCase):
 
     def test_organizer_preview_cannot_claim_or_start_recording(self):
         fx = self.build_event(team_count=2, individual_count=0)
-        plan = self.ok('POST', f"/api/categories/{fx['team_cat']}/plan", {
+        plan = self.fixture_schedule('POST', f"/api/categories/{fx['team_cat']}/plan", {
             'stages': [{'kind': 'round_robin', 'name': '小组赛', 'params': {'pool_count': 1}}]})
-        self.ok('POST', f"/api/plans/{plan['plan_id']}/generate")
+        self.fixture_schedule('POST', f"/api/plans/{plan['plan_id']}/generate")
         mid = self.match_list(category_id=fx['team_cat'])[0]['id']
         package = self.ok('GET', f'/api/scoring/match/{mid}')['match']
         self.assertFalse(package['can_score'])
-        self.assertIn('锁定', package['blocked_reason'])
+        self.assertIn('确认', package['blocked_reason'])
         self.assertFalse(self.match_list(category_id=fx['team_cat'])[0]['scoreable'])
         self.err('POST', f'/api/recording/match/{mid}/claim', {}, expect=409, code='plan_not_locked')
         manual = self.ok('POST', '/api/matches', {'category_id': fx['team_cat'],
@@ -1959,7 +1842,7 @@ class ApiTest(unittest.TestCase):
         self.err('POST', f'/api/recording/match/{mid}/claim', {}, expect=409, code='plan_not_locked')
         rejected = self.play(mid, [(15, 0), (15, 0)], expect=409)
         self.assertEqual(rejected['code'], 'plan_not_locked')
-        self.ok('POST', f"/api/plans/{plan['plan_id']}/lock")
+        self.fixture_schedule('POST', f"/api/plans/{plan['plan_id']}/lock")
         self.ok('POST', f'/api/recording/match/{mid}/claim', {})
         self.assertTrue(self.ok('GET', f'/api/scoring/match/{mid}')['match']['can_score'])
 
@@ -2000,12 +1883,12 @@ class ApiTest(unittest.TestCase):
 
     def test_organizer_knockout_and_dependency_schedule(self):
         fx = self.build_event(team_count=4, individual_count=0)
-        plan = self.ok('POST', f"/api/categories/{fx['team_cat']}/plan", {'stages': [
+        plan = self.fixture_schedule('POST', f"/api/categories/{fx['team_cat']}/plan", {'stages': [
             {'kind': 'round_robin', 'name': '小组赛', 'params': {'pool_count': 2}},
             {'kind': 'single_elim', 'name': '淘汰赛', 'params': {'third_place': True, 'sources': [
                 {'type': 'pool_rank', 'stage': 1, 'pool': p, 'rank': r} for r in (1, 2) for p in (0, 1)]}}]})
-        self.ok('POST', f"/api/plans/{plan['plan_id']}/generate")
-        self.ok('POST', f"/api/plans/{plan['plan_id']}/lock")
+        self.fixture_schedule('POST', f"/api/plans/{plan['plan_id']}/generate")
+        self.fixture_schedule('POST', f"/api/plans/{plan['plan_id']}/lock")
         full = self.ok('GET', f"/api/plans/{plan['plan_id']}")['plan']
         bracket = full['stages'][1]['pools'][0]['id']
         self.err('GET', f'/api/pools/{bracket}/standings', code='not_standings_pool')

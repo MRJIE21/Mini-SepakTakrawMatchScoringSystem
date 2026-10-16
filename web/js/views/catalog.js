@@ -685,7 +685,9 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
           /* 行内直接给“编辑报名”；档案编辑与危险操作进更多菜单（§6.1、Q13） */
           canWrite() ? h('button.btn.small', { onclick: () => openRosterEditor(cat, r, reload) }, '编辑') : null,
           canWrite() ? moreMenu([
-            { label: '学校报名工作台', onClick: () => go('schoolRegistration', { event: state.eventId, school: r.school_id }) },
+            { label: '学校报名工作台', onClick: () => go('workspace', {
+              event: state.eventId, group: cat.group_id, tab: 'registration', school: r.school_id,
+            }) },
             cat.kind === 'team' && r.team_id ? {
               label: '编辑项目名单', onClick: () => openTeamProfile(cat, r, reload),
             } : null,

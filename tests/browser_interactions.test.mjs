@@ -248,7 +248,7 @@ try {
     localStorage.setItem(`stss_draft:admin:${identity.deployment_id}:${identity.event_uuid}:enroll:individual:${cat}`, JSON.stringify({ values: { name: '仅在本机的报名' } }));
   }, individual.id);
   await page.goto(`${base}/#/workspace?event=${identity.event_id}&group=${group.id}&category=${individual.id}&tab=registration`);
-  await page.getByRole('heading', { name: '报名名单', exact: true }).waitFor();
+  await page.getByRole('heading', { name: '学校名单', exact: true }).waitFor();
   assert.equal(await page.getByRole('heading', { name: /未完成添加/ }).count(), 0);
   assert.ok(!(await page.locator('main').textContent()).includes('仅在本机的报名'));
   await page.goto(`${base}/#/individual?category=${individual.id}`);
@@ -358,6 +358,7 @@ try {
   await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
   await dialog.locator('.form-errors:not(.hidden)').waitFor();
   const originalPacket = (await drafts()).find(d => d.kind === 'individual' && d.participation_id === people[1]).payload;
+  assert.equal(originalPacket.result_value, 57);
   await page.unroute('**/api/scoring/individual');
   await page.reload();
   row2 = page.getByRole('row').filter({ hasText: '选手2' });
@@ -365,7 +366,14 @@ try {
   await row2.getByRole('button', { name: '修改正式成绩', exact: true }).click();
   await page.getByRole('dialog', { name: '上次提交结果待核实', exact: true }).waitFor();
   assert.equal((await drafts()).find(d => d.kind === 'individual' && d.participation_id === people[1]).payload.submission_uid, originalPacket.submission_uid);
+  const retryConfirmed = page.waitForResponse(response => response.url().endsWith('/api/scoring/individual')
+    && response.request().method() === 'POST'
+    && response.request().postDataJSON()?.submission_uid === originalPacket.submission_uid);
   await page.getByRole('dialog', { name: '上次提交结果待核实', exact: true }).getByRole('button', { name: '重试提交', exact: true }).click();
+  const retryResponse = await retryConfirmed;
+  assert.equal(retryResponse.status(), 200);
+  assert.equal((await retryResponse.json()).receipt.uid, originalPacket.submission_uid);
+  await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
   await page.waitForFunction(async pid => !(await (await import('/js/store.js')).localStore.all()).some(d => d.kind === 'individual' && d.participation_id === pid), people[1]);
   assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r => r.participation_id === people[1]).result_value, 57);
   assert.equal((await api('GET', `/api/submissions/${originalPacket.submission_uid}`)).found, true);

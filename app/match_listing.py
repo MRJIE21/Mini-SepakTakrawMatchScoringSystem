@@ -40,7 +40,7 @@ def list_page(ctx, queue=False):
     where, args = [], []
     for name, col in (('category_id', 'm.category_id'), ('group_id', 'g.id'),
                       ('event_id', 'g.event_id'), ('stage_id', 'm.stage_id'),
-                      ('pool_id', 'm.pool_id'), ('venue_id', 'm.venue_id')):
+                      ('pool_id', 'm.pool_id'), ('venue_id', 'm.venue_id'), ('round_no', 'm.round_no')):
         if ctx.arg(name):
             where.append(col + '=?')
             args.append(_integer(ctx, name, minimum=1))
@@ -54,10 +54,11 @@ def list_page(ctx, queue=False):
     if queue:
         where.append("m.status IN ('ready','finished') AND m.reset_state IN ('none','active')")
     if (ctx.user or {}).get('role') == 'viewer':
-        where.append("m.status IN ('ready','finished') AND pl.status IN ('locked','running','archived')")
+        where.append("""(m.status IN ('pending','ready','finished') AND json_extract(st.params_json,'$.schedule_meta.state')='confirmed' OR
+             m.status IN ('ready','finished') AND json_extract(st.params_json,'$.schedule_meta') IS NULL AND pl.status IN ('locked','running','archived'))""")
     joins = '''FROM matches m JOIN categories c ON c.id=m.category_id
         JOIN groups g ON g.id=c.group_id JOIN plans pl ON pl.id=m.plan_id
-        LEFT JOIN venues v ON v.id=m.venue_id'''
+        LEFT JOIN venues v ON v.id=m.venue_id LEFT JOIN stages st ON st.id=m.stage_id'''
     if ctx.arg('q'):
         joins += ''' LEFT JOIN participations hp ON hp.id=COALESCE(m.home_actual,m.home_participation)
             LEFT JOIN teams ht ON ht.id=hp.team_id LEFT JOIN athletes ha ON ha.id=hp.athlete_id
@@ -72,11 +73,13 @@ def list_page(ctx, queue=False):
         args.extend([search] * len(cols))
     predicate = ' WHERE ' + ' AND '.join(where) if where else ''
     sort = ctx.arg('sort') or ('queue' if queue else 'schedule')
-    if sort not in ('queue', 'schedule', 'recent'):
+    if sort not in ('queue', 'schedule', 'recent', 'round'):
         raise bad_request('排序方式无效')
     order = "g.seq,c.seq,NULLIF(TRIM(m.scheduled_at),'') IS NULL,NULLIF(TRIM(m.scheduled_at),''),m.stage_id,m.round_no,m.seq,m.id"
     if sort == 'queue':
         order = "CASE m.status WHEN 'ready' THEN 0 ELSE 1 END," + order
+    elif sort == 'round':
+        order = 'g.seq,c.seq,st.seq,m.round_no,m.seq,m.id'
     elif sort == 'recent':
         if offset:
             raise bad_request('最近成绩只支持单页查询')

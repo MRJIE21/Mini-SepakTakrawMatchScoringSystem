@@ -241,6 +241,8 @@ def init_db(db_path: Path | str | None = None) -> None:
     schema = (Path(__file__).resolve().parent / "schema.sql").read_text(encoding="utf-8")
     conn = connect(db_path)
     try:
+        from . import team_rules_store
+        team_rules_store.backup_before_upgrade(conn)
         conn.executescript(schema)
         _migrate(conn)
     finally:
@@ -263,7 +265,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "participations": ["rev INTEGER NOT NULL DEFAULT 1"],
         "individual_results": ["error_count INTEGER", "violation_count INTEGER"],
         "pools": ["confirmation_basis TEXT NOT NULL DEFAULT ''", "confirmation_resolutions TEXT NOT NULL DEFAULT '[]'"],
-        "matches": ["reset_parent_id INTEGER REFERENCES matches(id)",
+        "matches": ["schedule_role TEXT NOT NULL DEFAULT ''", "schedule_revision INTEGER NOT NULL DEFAULT 1", "winner_rank INTEGER", "loser_rank INTEGER",
+                    "reset_parent_id INTEGER REFERENCES matches(id)",
                     "reset_state TEXT NOT NULL DEFAULT 'none'", "reset_parent_version INTEGER"],
     }
     for table, columns in migrations.items():
@@ -281,6 +284,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     from . import result_migrations, list_revision
     result_migrations.install(conn)
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_active_reset ON matches(reset_parent_id) WHERE reset_state='active'")
+    from . import team_rules_store
+    team_rules_store.install(conn)
     list_revision.install(conn)
 
 

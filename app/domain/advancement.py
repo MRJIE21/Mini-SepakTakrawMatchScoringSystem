@@ -11,6 +11,7 @@ import re
 
 from . import ranking
 from .slots import SlotSpec
+from .. import team_rules_store
 
 FINISHED_RESULTS = ("normal", "home_forfeit", "away_forfeit")
 
@@ -94,6 +95,7 @@ def resolve_slot(conn, row, prefix: str, _seen=frozenset()) -> tuple[int | None,
     sets = conn.execute(
         "SELECT * FROM match_sets WHERE match_id = ? ORDER BY set_no", (ref,)).fetchall()
     winner = ranking.match_winner_side({"result_status": m["result_status"],
+                                        "rules": team_rules_store.match_rules(conn, m)['rules'],
                                         "sets": [dict(s) for s in sets]})
     if winner is None:
         return None, False, "前序场次结果不明确"
@@ -115,6 +117,7 @@ def result_winner_side(conn, row):
     sets = conn.execute("SELECT * FROM match_sets WHERE match_id = ? ORDER BY set_no",
                         (row["id"],)).fetchall()
     return ranking.match_winner_side({"status": row["status"], "result_status": row["result_status"],
+                                      "rules": team_rules_store.match_rules(conn, row)['rules'],
                                       "sets": [dict(s) for s in sets]})
 
 

@@ -117,13 +117,13 @@ async function drawTeamStandings(container, cat, reload, params, client = scoped
   container.append(panel);
   if (!plan) {
     panel.append(emptyState({
-      text: '该项目尚未编排方案',
-      hint: '小组排名来自编排生成的小组。请先到“分组与编排”保存配置并生成预览。',
+      text: '该项目尚未建立小组赛',
+      hint: '在“分组”完成抽签，再在“赛程”核对并确认小组赛阶段。',
       action: canWrite() ? h('button.btn.btn-primary', {
         onclick: () => params.embedded === 'workspace'
-          ? (location.hash = workspaceLink({ ...cat, event_id: state.eventId }, 'schedule', { view: 'planning' }))
-          : go('scheduling', { category: cat.id }),
-      }, '前往分组与编排') : null,
+          ? (location.hash = workspaceLink({ ...cat, event_id: state.eventId }, 'groups'))
+          : go('workspace', { event: state.eventId, category: cat.id, tab: 'groups' }),
+      }, '前往分组') : null,
     }));
     return;
   }

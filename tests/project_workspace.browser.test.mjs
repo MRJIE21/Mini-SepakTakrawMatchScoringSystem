@@ -1,3 +1,4 @@
+import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 工作台的真实浏览器流程；服务与数据均为独立临时实例。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -81,14 +82,7 @@ try {
     });
   }
   const venue = (await api('POST', `/api/events/${identity.event_id}/venues`, { name: '主馆一号场' })).venue_id;
-  const plan = (await api('POST', `/api/categories/${team.id}/plan`, { name: '小组循环与交叉淘汰', stages: [
-    { kind: 'round_robin', name: '小组赛', params: { pool_count: 2, assign: 'snake' } },
-    { kind: 'single_elim', name: '淘汰赛', params: { third_place: true, sources: [
-      { type: 'pool_rank', stage: 1, pool: 0, rank: 1 }, { type: 'pool_rank', stage: 1, pool: 1, rank: 1 },
-      { type: 'pool_rank', stage: 1, pool: 0, rank: 2 }, { type: 'pool_rank', stage: 1, pool: 1, rank: 2 },
-    ] } },
-  ] })).plan_id;
-  await api('POST', `/api/plans/${plan}/generate`, {});
+  const plan = (await scheduleFixture(api, identity, team.id, { groupCount: 2, knockout: true })).plan_id;
   browser = await chromium.launch({ headless: true, executablePath: process.env.STSS_BROWSER_PATH });
   const context = await browser.newContext({ viewport: { width: 1365, height: 900 } });
   await context.addInitScript(({ token, event }) => {
@@ -100,22 +94,15 @@ try {
     group: category.group_id, category: category.id, tab, ...extra })}`;
   const navigation = () => page.getByRole('navigation', { name: '项目工作台导航', exact: true });
   await page.goto(workspace(team));
-  await page.getByRole('button', { name: '核对并确认赛程', exact: true }).waitFor();
-  assert.equal(await page.locator('.project-step').count(), 4);
-  assert.equal(await page.getByRole('button', { name: '进入记录', exact: true }).count(), 0, '预览不能作为正式记录入口');
-  await page.getByRole('button', { name: '核对并确认赛程', exact: true }).click();
-  await page.getByRole('button', { name: '锁定方案', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '锁定方案', exact: true });
-  const lockResponse = page.waitForResponse(r => r.url().endsWith(`/plans/${plan}/lock`) && r.request().method() === 'POST');
-  await dialog.getByRole('button', { name: '锁定方案', exact: true }).click();
-  assert.equal((await lockResponse).ok(), true);
-  await page.getByRole('button', { name: '解锁 / 变更影响', exact: true }).waitFor();
-  assert.equal(await navigation().isVisible(), true, '确认赛程后保留工作台导航');
-  assert.equal(await page.getByRole('navigation', { name: '赛程操作' }).isVisible(), true);
+  await page.locator('.workspace-match').first().waitFor();
+  assert.equal(await page.locator('.project-step').count(), 5);
+  assert.equal(await navigation().isVisible(), true);
   const first = (await api('GET', `/api/matches?category_id=${team.id}&status=ready`)).matches[0];
+  await navigation().getByRole('link', { name: '赛程', exact: true }).click();
+  await page.getByRole('heading', { name: '比赛赛程', exact: true }).waitFor();
   await api('PUT', `/api/matches/${first.id}`, { venue_id: venue, scheduled_at: '2026-10-11 09:00' });
   const before = await api('GET', `/api/plans/${plan}`);
-  await navigation().getByRole('link', { name: '概况与待办', exact: true }).click();
+  await navigation().getByRole('link', { name: '概况', exact: true }).click();
   await page.locator('.workspace-match').first().waitFor();
   assert.match(await page.locator('.workspace-match').first().innerText(), /主馆一号场/);
   assert.equal(await page.locator('.workspace-match').count(), 5);
@@ -132,11 +119,11 @@ try {
   await page.getByRole('button', { name: '返回列表', exact: true }).click();
   await navigation().waitFor();
   assert.match(page.url(), new RegExp(`category=${team.id}.*tab=matches`));
-  await navigation().getByRole('link', { name: '分组与赛程', exact: true }).click();
-  await page.getByRole('navigation', { name: '赛程操作' }).getByRole('link', { name: '抽签与编排', exact: true }).click();
-  await page.getByRole('button', { name: '解锁 / 变更影响', exact: true }).waitFor();
+  await navigation().getByRole('link', { name: '赛程', exact: true }).click();
+  await page.getByRole('navigation', { name: '项目工作台导航', exact: true }).getByRole('link', { name: '分组', exact: true }).click();
+  await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
   assert.equal(await navigation().isVisible(), true);
-  await navigation().getByRole('link', { name: '概况与待办', exact: true }).click();
+  await navigation().getByRole('link', { name: '概况', exact: true }).click();
   await page.getByLabel('比赛项目').selectOption(String(female.id));
   await page.getByRole('heading', { name: `${group.name} · 女子三人赛`, exact: true }).waitFor();
   await page.getByLabel('大组别').selectOption(String(structure.groups[1].id));
@@ -175,28 +162,10 @@ try {
   await page.locator('.workspace-match').first().waitFor();
   assert.equal(await page.getByRole('button', { name: '核对小组排名', exact: true }).count(), 0);
   assert.equal((await api('GET', `/api/categories/${team.id}/workspace`)).counts.pools_to_confirm, 0);
-  // 动态赛制不能把首轮完成当成全部比赛完成；下一轮在同一工作台生成。
-  for (let i = 1; i <= 4; i++) await api('POST', `/api/categories/${female.id}/enrollments`, {
-    school: { name: `瑞士赛验证${i}校` }, captain_index: 0,
-    members: [1, 2, 3].map(n => ({ name: `女子验证${i}-${n}`, gender: 'female', jersey_no: String(n) })),
-  });
-  const swissPlan = (await api('POST', `/api/categories/${female.id}/plan`, { stages: [
-    { kind: 'swiss', name: '两轮瑞士赛', params: { rounds: 2 } },
-  ] })).plan_id;
-  await api('POST', `/api/plans/${swissPlan}/generate`, {});
-  await api('POST', `/api/plans/${swissPlan}/lock`, {});
-  for (const match of (await api('GET', `/api/matches?category_id=${female.id}&status=ready`)).matches) await play(match);
-  await page.goto(workspace(female));
-  await page.getByRole('button', { name: '生成下一轮对阵', exact: true }).click();
-  await page.getByRole('button', { name: '生成第 2 轮对阵', exact: true }).click();
-  const next = page.waitForResponse(r => /\/stages\/\d+\/next-round$/.test(r.url()) && r.request().method() === 'POST');
-  await page.getByRole('dialog', { name: '生成下一轮对阵', exact: true }).getByRole('button', { name: '生成对阵', exact: true }).click();
-  assert.equal((await next).ok(), true);
-  await page.getByRole('heading', { name: /两轮瑞士赛$/ }).waitFor();
-  assert.equal(await navigation().isVisible(), true);
-  assert.equal((await api('GET', `/api/categories/${female.id}/workspace`)).counts.matches_scoreable, 2);
+  // Removed next-round generation has no workbench action.
+  assert.equal(await page.getByRole('button', { name: '生成下一轮对阵', exact: true }).count(), 0);
   assert.deepEqual(errors, []);
-  console.log('PASS: 预览确认、导航保留、实际队列、记录返回、排名待办定位、瑞士赛下一轮、跨组保留女子项目、后台更新及五种屏幕宽度');
+  console.log('PASS: 阶段赛程、导航保留、实际队列、记录返回、排名待办定位、无旧编排动作、跨组保留女子项目、后台更新及五种屏幕宽度');
 } catch (error) {
   if (page && !page.isClosed()) {
     await page.screenshot({ path: path.join(artifacts, 'workspace-failure.png'), fullPage: true });

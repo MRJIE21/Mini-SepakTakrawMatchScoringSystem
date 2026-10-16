@@ -56,6 +56,9 @@ def ensure_editable(conn, category_id):
     cat = category_context(conn, category_id)
     if cat['kind'] != 'team':
         raise bad_request('小组抽签仅用于以学校为单位的三人赛项目')
+    if db.q1(conn, """SELECT po.id FROM pools po JOIN stages s ON s.id=po.stage_id
+        JOIN plans p ON p.id=s.plan_id WHERE p.category_id=? LIMIT 1""", (category_id,)):
+        raise conflict('分组已用于正式赛程，请先处理后续引用并撤回小组赛阶段确认', code='draw_in_use')
     if db.q1(conn, "SELECT id FROM plans WHERE category_id=? AND status IN ('locked','running')", (category_id,)):
         raise forbidden('方案已锁定，请先由管理员解锁后再调整抽签')
     if db.q1(conn, "SELECT id FROM matches WHERE category_id=? AND status='finished' LIMIT 1", (category_id,)):
@@ -69,37 +72,6 @@ def confirmed_draw(conn, category_id, draw_id):
     if draw_stale(conn, draw):
         raise conflict('参赛学校或种子序号已变化，请撤销旧抽签并重新抽签', code='draw_roster_changed')
     return draw
-
-
-def validate_draw_stages(conn, category_id, stages):
-    """保存、生成及锁定都重复校验抽签身份；固定成员不从客户端接收。"""
-    for index, stage in enumerate(stages):
-        params = stage.get('params') or {}
-        if params.get('draw_id') is None:
-            continue
-        if index != 0 or stage['kind'] != 'round_robin' or params.get('sources'):
-            raise bad_request('学校抽签只能用于首个由本项目报名学校组成的循环赛阶段')
-        if type(params['draw_id']) is not int:
-            raise bad_request('抽签编号无效')
-        draw = confirmed_draw(conn, category_id, params['draw_id'])
-        capacities = json.loads(draw['capacities_json'])
-        if params.get('pool_count') != len(capacities):
-            raise conflict('小组数量与已确认抽签不一致，请使用抽签分组', code='draw_groups_changed')
-        if params.get('pools') or params.get('members_text'):
-            raise bad_request('已确认抽签分组不能同时指定另一份自定义成员')
-        params['draw_sizes'] = capacities
-        stage['params'] = params
-
-
-def guard_group_generation(conn, category_id, stages):
-    if not stages or stages[0]['kind'] != 'round_robin':
-        return
-    params = stages[0].get('params') or {}
-    draw = latest_draw(conn, category_id)
-    if draw and draw['status'] in ('drawing', 'complete'):
-        raise conflict('请先完成并确认小组抽签，再生成或锁定赛程', code='draw_not_confirmed')
-    if draw and draw['status'] == 'confirmed' and params.get('draw_id') != draw['id']:
-        raise conflict('请将已确认的抽签分组保存到编排方案后再生成赛程', code='draw_groups_changed')
 
 
 def fixed_pools(conn, category_id, params):
@@ -129,6 +101,9 @@ def get_draw(ctx):
     history = db.q(ctx.conn, "SELECT * FROM group_draws WHERE category_id=? ORDER BY id DESC LIMIT 20", (category_id,))
     plan = active_plan(ctx.conn, category_id)
     blocked = '方案已锁定，请由管理员解锁后调整' if plan and plan['status'] in ('locked', 'running') else ''
+    if db.q1(ctx.conn, """SELECT po.id FROM pools po JOIN stages s ON s.id=po.stage_id
+        JOIN plans p ON p.id=s.plan_id WHERE p.category_id=? LIMIT 1""", (category_id,)):
+        blocked = '分组已用于正式赛程，调整前须处理后续引用并撤回小组赛阶段确认'
     if db.q1(ctx.conn, "SELECT id FROM matches WHERE category_id=? AND status='finished' LIMIT 1", (category_id,)):
         blocked = '已有比赛成绩，不能改变抽签分组'
     roster = roster_for(ctx.conn, category_id)

@@ -21,6 +21,8 @@ def validate_schedule(conn, changes):
     """按整批变更后的状态校验，失败时由调用者的事务回滚。"""
     if not changes:
         return
+    from ..auto_schedule_store import validate_manual
+    validate_manual(conn, changes)
     event_ids = {conn.execute(
         "SELECT g.event_id FROM categories c JOIN groups g ON g.id=c.group_id WHERE c.id=?",
         (row["category_id"],)).fetchone()[0] for row in changes.values()}

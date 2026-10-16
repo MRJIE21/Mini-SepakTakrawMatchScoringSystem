@@ -1,3 +1,4 @@
+from helpers.historical_schedule import fixture_schedule
 """Real HTTP tests of school projections, concurrency, rollback and replay."""
 from copy import deepcopy
 import unittest
@@ -6,6 +7,7 @@ import test_imports_exports as fixtures
 
 
 class SchoolRegistrationTest(unittest.TestCase):
+    fixture_schedule = fixture_schedule
     setUpClass = classmethod(fixtures.ImportExportsTest.setUpClass.__func__)
     tearDownClass = classmethod(fixtures.ImportExportsTest.tearDownClass.__func__)
     req = fixtures.ImportExportsTest.req
@@ -134,9 +136,9 @@ class SchoolRegistrationTest(unittest.TestCase):
     def test_locked_schedule_protects_school_and_old_entry_points(self):
         self.req('POST', f"/api/categories/{self.cat['team']['id']}/enrollments", {'school_id': self.sid, 'members': [{'athlete_id': self.a}]})
         self.req('POST', f"/api/categories/{self.cat['team']['id']}/enrollments", {'school': {'name': '另一大学'}, 'members': [{'name': '对手', 'gender': 'male'}]})
-        plan = self.req('POST', f"/api/categories/{self.cat['team']['id']}/plan", {'stages': [{'kind': 'round_robin', 'name': '循环', 'params': {}}]})['plan_id']
-        self.req('POST', f'/api/plans/{plan}/generate')
-        self.req('POST', f'/api/plans/{plan}/lock')
+        plan = self.fixture_schedule('POST', f"/api/categories/{self.cat['team']['id']}/plan", {'stages': [{'kind': 'round_robin', 'name': '循环', 'params': {}}]})['plan_id']
+        self.fixture_schedule('POST', f'/api/plans/{plan}/generate')
+        self.fixture_schedule('POST', f'/api/plans/{plan}/lock')
         payload = self.payload(); payload['projects'] = [dict(category_id=self.cat['team']['id'], choice='withdrawn')]
         self.assertEqual(self.req('POST', self.path+'preview', payload, expected=409)['code'], 'plan_locked')
         team = next(t for t in self.req('GET', f"/api/categories/{self.cat['team']['id']}/teams")['teams'] if t['school_id'] == self.sid)
@@ -162,10 +164,10 @@ class SchoolRegistrationTest(unittest.TestCase):
             for action in ('complete', 'confirm'):
                 draw = self.req('POST', path+'/'+action, {'draw_id': draw['id'], 'base_rev': draw['rev'], 'request_uid': str(uuid.uuid4())})['draw']
             params['draw_id'] = draw['id']
-        plan = self.req('POST', f"/api/categories/{self.cat['team']['id']}/plan", {
+        plan = self.fixture_schedule('POST', f"/api/categories/{self.cat['team']['id']}/plan", {
             'stages': [{'kind': 'round_robin', 'name': '循环', 'params': params}]})['plan_id']
-        self.req('POST', f'/api/plans/{plan}/generate')
-        self.req('POST', f'/api/plans/{plan}/lock')
+        self.fixture_schedule('POST', f'/api/plans/{plan}/generate')
+        self.fixture_schedule('POST', f'/api/plans/{plan}/lock')
         self.team = next(t for t in self.req('GET', f"/api/categories/{self.cat['team']['id']}/teams")['teams'] if t['school_id'] == self.sid)
         self.match = self.req('GET', f"/api/matches?category_id={self.cat['team']['id']}")['matches'][0]
         return plan
@@ -246,13 +248,17 @@ class SchoolRegistrationTest(unittest.TestCase):
         payload = self.payload()
         payload['projects'] = [self.project('team', members=[{'athlete_key': f'a:{self.a}'}, {'athlete_key': f'a:{self.b}'}])]
         preview = self.req('POST', self.path+'preview', payload)
-        before = self.stored('team_members', 'teams', 'matches')
+        roster_before = self.stored('team_members', 'teams')
         self.req('POST', f"/api/recording/match/{self.match['id']}/claim", {})
+        # Claim legitimately freezes the match rules. A rejected registration must
+        # preserve both the original roster and the post-claim match snapshot.
+        before = self.stored('team_members', 'teams', 'matches')
         body = dict(payload, preview_hash=preview['preview_hash'], request_uid=str(uuid.uuid4()))
         response = self.req('POST', self.path+'commit', body, expected=409)
         self.assertEqual(response['code'], 'registration_stale')
         self.assertTrue(next(c for c in response['detail']['latest']['categories'] if c['id'] == self.cat['team']['id'])['roster_locked_reason'])
         self.assertEqual(before, self.stored(*before))
+        self.assertEqual(roster_before, self.stored(*roster_before))
 
     def test_finished_match_freezes_roster_even_without_recording_claim(self):
         self.lock_team_schedule()

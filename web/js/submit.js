@@ -13,6 +13,7 @@ export function buildMatchPayload(draft, summary) {
     device: draft.device,
     base_version: draft.base_version,
     plan_version: draft.plan_version,
+    ...(draft.rules_hash ? { rules_hash: draft.rules_hash } : {}),
     home_participation: draft.lineup ? draft.lineup.home : null,
     away_participation: draft.lineup ? draft.lineup.away : null,
     result_status: draft.result_status,

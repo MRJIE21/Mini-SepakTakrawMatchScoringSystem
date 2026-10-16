@@ -1,3 +1,4 @@
+import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -95,15 +96,13 @@ try {
   for(let i=1;i<=2;i++) await api('POST','/api/categories/'+team.id+'/enrollments',{
     school:{name:'权限学校'+i},members:[1,2,3].map(n=>({name:'队员'+i+'-'+n,gender:'male',jersey_no:String(n)})),captain_index:0,
   });
-  const plan=(await api('POST','/api/categories/'+team.id+'/plan',{stages:[
-    {kind:'round_robin',name:'小组赛',params:{pool_count:1,legs:1}},
-  ]})).plan_id;
-  await api('POST','/api/plans/'+plan+'/generate',{});
+  const fixture = await scheduleFixture(api, identity, team.id, { confirmed: false });
+  const plan = fixture.plan_id;
   token=accounts.viewer.token;
   assert.equal((await api('GET','/api/categories/'+team.id+'/plan')).plan,null);
   assert.equal((await api('GET','/api/matches?category_id='+team.id)).matches.length,0);
   token=adminToken;
-  await api('POST','/api/plans/'+plan+'/lock',{});
+  await fixture.confirm();
   const match=(await api('GET','/api/matches?category_id='+team.id)).matches[0];
   const deny=async(method,url,body,status=403,auth=token,headerIdentity=identity)=>{
     const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json','X-Client-Protocol':'2',Authorization:'Bearer '+auth,
@@ -296,9 +295,11 @@ try {
     await page.goto(base+'/#/account');
     await page.getByRole('heading',{name:'修改我的密码'}).waitFor();
     const nav=await page.locator('#sidenav').innerText();
-    if(['rec1','viewer'].includes(role)) {assert.ok(!nav.includes('赛事设置'));assert.ok(!nav.includes('账号管理'));}
+    if(['rec1','viewer'].includes(role)) {assert.ok(nav.includes('赛事设置'));assert.ok(!nav.includes('账号管理'));}
     if(role==='rec1') {
-      await page.goto(base+'/#/setup');await page.getByRole('heading',{name:'现场任务',exact:true}).waitFor();
+      await page.goto(base+'/#/setup');await page.locator('.setup-readonly-group').first().waitFor();
+      assert.equal(await page.getByRole('button',{name:'保存规则',exact:true}).count(),0);
+      assert.equal(await page.getByRole('button',{name:'修改资料',exact:true}).count(),0);
       await page.goto(base+`/#/workspace?event=${identity.event_id}&category=${team.id}&tab=registration`);
       await page.getByRole('heading',{name:/待记录场次/}).first().waitFor();
       assert.equal(await page.getByRole('button',{name:'添加参赛学校',exact:true}).count(),0);
@@ -313,7 +314,9 @@ try {
       assert.deepEqual(isolated,{own:true,other:null,all:0});
     } else if(role==='viewer') {
       await page.goto(base+'/#/matches?category='+team.id);
-      await page.getByRole('heading',{name:/比赛列表/}).waitFor();
+      await page.getByRole('heading',{name:'比赛赛程',exact:true}).waitFor();
+      await page.locator('.schedule-match').first().waitFor();
+      await page.locator('.schedule-match').getByText(/记录员：rec2/).waitFor();
       assert.ok((await page.locator('body').innerText()).includes('rec2'));
       assert.equal(await page.getByRole('button',{name:'记录',exact:true}).count(),0);
       await page.goto(base+'/#/results?category='+team.id);

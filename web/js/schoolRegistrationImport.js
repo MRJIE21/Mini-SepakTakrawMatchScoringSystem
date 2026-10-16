@@ -1,17 +1,19 @@
 /* Validate imported rows before applying them to the current registration form. */
-import { api, download, getApiEventContext } from './api.js';
+import { api, download, getApiEventContext, captureRequestContext } from './api.js';
 import { h, field, textarea, formDialog, clear, table, task } from './ui.js';
 
-export function openSchoolImport({ path, text = '', payload, onText, onApply, onConflict }) {
+export function openSchoolImport({ path, text = '', payload, onText, onApply, onConflict,
+    requestContext = captureRequestContext(), signal, isCurrent = () => true }) {
   const identity = JSON.stringify(getApiEventContext());
   const source = textarea(text, { rows: 9, placeholder: '从 Excel 复制含表头的项目、运动员等列，或上传 CSV' });
   const file = h('input', { type: 'file', accept: '.csv,text/csv', 'aria-label': '学校报名 CSV 文件' });
   const report = h('div', { 'aria-live': 'polite' });
   let result = null, ticket = 0, closed = false;
+  const alive = () => !closed && !signal?.aborted && isCurrent();
   const ensureContext = () => {
-    if (identity !== JSON.stringify(getApiEventContext())) throw new Error('赛事已切换，请进入对应学校重新导入');
+    if (!alive() || identity !== JSON.stringify(getApiEventContext())) throw new Error('页面已切换，请进入对应学校重新导入');
   };
-  const invalidate = () => { result = null; dlg.setActionDisabled(1, true); clear(report); onText(source.value); dlg.markClean(); };
+  const invalidate = () => { if (!alive()) return; result = null; dlg.setActionDisabled(1, true); clear(report); onText(source.value); dlg.markClean(); };
   source.oninput = () => { ticket++; invalidate(); };
   file.onchange = async () => {
     const current = ++ticket, selected = file.files?.[0];
@@ -23,14 +25,14 @@ export function openSchoolImport({ path, text = '', payload, onText, onApply, on
       let value;
       try { value = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
       catch { value = new TextDecoder('gb18030', { fatal: true }).decode(bytes); }
-      if (closed || ticket !== current) return;
+      if (!alive() || ticket !== current) return;
       source.value = value; invalidate(); dlg.clearErrors();
-    } catch (error) { if (!closed && ticket === current) dlg.showErrors(error); }
+    } catch (error) { if (alive() && ticket === current) dlg.showErrors(error); }
   };
   const dlg = formDialog({ title: '粘贴 / 导入学校报名表', width: 'min(960px, 96vw)',
     onClose: () => { closed = true; ticket++; },
     sections: [{ title: '准备表格', body: h('div',
-      h('button.btn', { type: 'button', onclick: task(async () => { ensureContext(); await download(`${path}/registration-import-template.csv`); }) }, '下载本校完整报名模板'),
+      h('button.btn', { type: 'button', onclick: task(async () => { ensureContext(); await download(`${path}/registration-import-template.csv`, {}, '学校报名模板.csv', { isCurrent: alive }); }) }, '下载本校完整报名模板'),
       h('p.small.muted', '同一项目的所有队员放在多行。所列项目按表中的完整名单更新，未列项目保持原状；退出、不参加须明确填写。'),
       h('p.small.muted', '同名人员填写运动员ID复用；新增另一人时，ID留空、“同名新建确认”填是，并填写不同的区分信息。仅整理人员时项目留空。'),
       h('details.small.mt', h('summary', '表头与填写示例'),
@@ -43,7 +45,8 @@ export function openSchoolImport({ path, text = '', payload, onText, onApply, on
       ensureContext(); result = null; dlg.setActionDisabled(1, true);
       source.disabled = true; file.disabled = true;
       try {
-        const data = await api.post(`${path}/registration-import-preview`, { ...payload, csv_text: source.value });
+        const data = await api.post(`${path}/registration-import-preview`, { ...payload, csv_text: source.value }, { context: requestContext, signal });
+        if (!alive()) return;
         ensureContext(); clear(report);
         if (data.errors.length) {
           report.append(h('div.warn-box', '请修正全部错误后重新核对。当前没有修改报名表或保存正式报名。'),
@@ -58,8 +61,8 @@ export function openSchoolImport({ path, text = '', payload, onText, onApply, on
         if (data.review.warnings.length) report.append(h('h4', '赛前待补充'), h('ul', ...data.review.warnings.map((w) => h('li', w.message))));
         report.append(h('p.small.muted', '应用到报名表后，请预览核对并整批提交。'));
         dlg.setActionDisabled(1, false);
-      } catch (error) { onConflict(error); throw error; }
-      finally { source.disabled = false; file.disabled = false; }
+      } catch (error) { if (alive()) { onConflict(error); throw error; } }
+      finally { if (alive()) { source.disabled = false; file.disabled = false; } }
     } }, { label: '应用到报名表', primary: true, run: async () => {
       ensureContext(); if (!result) throw new Error('请先核对表格');
       onApply(result.model);

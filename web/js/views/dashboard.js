@@ -46,7 +46,7 @@ function drawDashboard(data) {
         `${data.event.start_date || ''}${data.event.end_date ? ` ~ ${data.event.end_date}` : ''}`
         + `${data.event.location ? ` · ${data.event.location}` : ''}`)),
     h('div.row.small.muted',
-      h('span', '赛制口径：三人赛三局两胜、每局 15 分（含第三局）；小组排名依次比较积分、C 值、Z 值、抽签')),
+      h('span', '赛制口径：三人赛按各项目比赛规则计分；小组排名依次比较积分、C 值、Z 值、抽签')),
     /* 结构刚建好时明确下一步，不声称此时已可开赛（§5.1、Q01） */
     totalParticipants === 0 ? h('div.info-box.mt',
       '还没有任何报名。请选择下面的项目添加报名名单；名单未齐也可以先报名，开赛前补齐。') : null,
@@ -118,19 +118,19 @@ function categoryCard(cat, group) {
     next = { text: '成绩已完整，请确认项目名次', action: '核对项目名次', view: isTeam ? 'results' : 'individual', params: { category: cat.id } };
   } else if (!isTeam) {
     next = { text: '个人赛可直接录入成绩，不需要编排方案', action: '录入成绩', view: 'individual', params: { category: cat.id } };
+  } else if (!plan && cat.draw_status !== 'confirmed') {
+    next = { text: '已有报名，先完成学校抽签与分组', action: '完成学校分组', view: 'groups', params: { category: cat.id } };
   } else if (!plan) {
     next = { text: '已有报名，等待录入组委会赛程', action: '录入赛程', view: 'scheduling', params: { category: cat.id } };
-  } else if (plan.status === 'draft') {
-    next = { text: '赛程尚未生成预览，请继续核对', action: '核对赛程', view: 'scheduling', params: { category: cat.id } };
-  } else if (plan.status === 'previewed') {
-    next = { text: '赛程已预览，待管理员确认', action: '确认赛程', view: 'scheduling', params: { category: cat.id } };
+  } else if (plan.managed_state === 'draft' || !plan.managed_state && ['draft', 'previewed'].includes(plan.status)) {
+    next = { text: '有赛程阶段待核对', action: '核对赛程', view: 'scheduling', params: { category: cat.id } };
   } else if (total && processed < total) {
     next = { text: ready ? `${ready} 场待记录` : `${total - finished} 场未确认`, action: '进入待记录场次', view: 'matches', params: { category: cat.id } };
   } else {
     next = { text: '比赛已完成，核对名次', action: '查看成绩与名次', view: 'results', params: { category: cat.id } };
   }
 
-  const tabByView = { catalog: 'registration', scheduling: 'schedule', matches: 'matches',
+  const tabByView = { catalog: 'registration', groups: 'groups', scheduling: 'schedule', matches: 'matches',
     individual: 'entry', results: 'results' };
   const enter = (tab) => go('workspace', {
     event: state.eventId, group: group.id, category: cat.id, tab,
@@ -157,6 +157,7 @@ function categoryCard(cat, group) {
 }
 
 function planText(plan) {
+  if (plan.managed_state) return plan.managed_state === 'draft' ? '阶段待确认' : '阶段已确认';
   const map = { draft: '待生成预览', previewed: '已预览待锁定', locked: '已锁定', running: '执行中', archived: '已归档' };
   return `${map[plan.status] || plan.status} v${plan.version}`;
 }

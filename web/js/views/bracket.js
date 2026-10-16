@@ -3,8 +3,8 @@
    布局规则：每轮一列，节点纵向居中于它的两个前序场次之间，
    列与列之间用折线连接；待定签位按来源显示，不补造队伍。
 */
-import { api } from '../api.js';
-import { registerView, state, loadStructure, go } from '../main.js';
+import { api, captureRequestContext } from '../api.js';
+import { registerView, state, loadStructure } from '../main.js';
 import { h, field, selectInput, table, statusBadge, matchStatusBadge, categoryLabel } from '../ui.js';
 import { BOX_W, BOX_H, COL_GAP, HEAD_H, computeLayout, connectorPath } from '../bracketLayout.js';
 
@@ -15,9 +15,11 @@ const KIND_LABEL = {
 
 const LINE = '#c6d3e6';
 
-async function render({ el, params }) {
+async function render({ el, params, signal, requestContext = captureRequestContext(), isCurrent = () => true }) {
+  const alive = () => el.isConnected && !signal?.aborted && isCurrent();
   if (!state.eventId) throw new Error('请先在“赛事概览”中创建赛事');
   const structure = state.structure || await loadStructure();
+  if (!alive()) return;
   const cats = [];
   for (const g of structure.groups) {
     for (const c of g.categories) cats.push({ ...c, group_name: g.name });
@@ -34,7 +36,8 @@ async function render({ el, params }) {
       + '灰色虚线框表示尚未确定双方，金色框为冠军。'),
   ));
 
-  const data = await api.get(`/api/categories/${cat.id}/plan`);
+  const data = await api.get(`/api/categories/${cat.id}/plan`, { signal, context: requestContext });
+  if (!alive()) return;
   if (!data.plan) {
     el.append(h('div.panel', h('div.info-box', '该项目尚未编排方案，也没有自定义比赛。')));
     return;
@@ -52,7 +55,10 @@ async function render({ el, params }) {
 
     const bracketPools = stage.pools.filter((p) => p.kind === 'bracket');
     const isElim = bracketPools.length > 0;
-    if (isElim) {
+    const purpose = stage.params?.schedule_meta?.definition.purpose;
+    if (['knockout', 'placement'].includes(purpose)) {
+      panel.append(renderTree(stage.matches, { poolOf: new Map(), poolNames: new Map(), sectionPoolId: null }));
+    } else if (isElim) {
       const ctxBase = {
         poolOf: new Map(stage.matches.map((m) => [m.id, m.pool_id])),
         poolNames: new Map(stage.pools.map((p) => [p.id, p.name])),
@@ -79,11 +85,6 @@ async function render({ el, params }) {
           { label: '客队/选手', render: (m) => sideText(m.away) },
           { label: '比分', render: (m) => setSummary(m) },
           { label: '状态', render: (m) => matchStatusBadge(m) },
-          {
-            label: '',
-            render: (m) => (m.status === 'ready' || m.status === 'finished'
-              ? h('button.btn.small', { onclick: () => go('scoring', { match: m.id }) }, '记录') : null),
-          },
         ], poolMatches)));
       }
     }
@@ -131,7 +132,8 @@ function renderTree(matches, ctx) {
 
   /* 冠军 */
   const lastRound = rounds[rounds.length - 1];
-  const finals = matches.filter((m) => m.round_no === lastRound);
+  const explicitFinal = matches.filter(m => m.schedule_role === 'final');
+  const finals = explicitFinal.length ? explicitFinal : matches.filter((m) => m.round_no === lastRound);
   if (finals.length === 1) {
     const final = finals[0];
     const winner = winnerOf(final);
@@ -141,7 +143,7 @@ function renderTree(matches, ctx) {
       canvas.append(h('div.bk-champion', {
         style: `left:${p.x + BOX_W + COL_GAP}px;top:${p.y + HEAD_H + 8}px;width:${BOX_W * 0.62}px`,
       },
-        h('div.small.muted', { style: 'font-size:11px' }, '冠军'),
+        h('div.small.muted', { style: 'font-size:11px' }, final.winner_rank && final.winner_rank !== 1 ? `第${final.winner_rank}名` : '冠军'),
         h('div', { style: 'font-weight:700' }, name)));
     }
   }
@@ -157,7 +159,7 @@ function matchCard(m, x, y, ctx) {
     title: m.sets.length
       ? m.sets.map((s) => `第${s.set_no}局 ${s.home_points}:${s.away_points}`).join('　') : '',
   },
-    h('div.bk-title', `第${m.seq}场 · ${m.round_label}${m.status === 'void' ? ' · 轮空' : ''}`),
+    h('div.bk-title', `${m.public_code || `第${m.seq}场`} · ${m.round_label}${m.status === 'void' ? ' · 轮空' : ''}`),
     sideRow(m, 'home', ctx),
     sideRow(m, 'away', ctx));
   return card;
@@ -183,7 +185,7 @@ function teamNode(slot, ctx) {
   if (slot.label) {
     parts.push(h('span.bk-team', { title: slot.reason || '' }, slot.label));
   } else {
-    const text = {
+    const text = slot.source_label || {
       pool_rank: `小组第${slot.source_rank}名`,
       match_winner: '前场胜者',
       match_loser: '前场负者',
@@ -225,6 +227,7 @@ function sideText(side) {
   if (!side) return '';
   if (side.type === 'bye') return h('span.muted', '轮空');
   if (side.label) return side.label;
+  if (side.source_label) return h('span.muted', { title: side.reason || '' }, side.source_label + '（待定）');
   const map = {
     pool_rank: `小组第${side.source_rank}名（待定）`,
     match_winner: '前场胜者（待定）',

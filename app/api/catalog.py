@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import uuid
 
-from .. import db, idempotency, security, registration
+from .. import db, idempotency, security, registration, team_rules_store
+from ..domain import team_rules
 from ..errors import (ApiError, bad_request, conflict, invalid_fields, not_found,
                       stale_revision)
 from ..http_server import route
@@ -424,6 +425,7 @@ def event_structure(ctx):
                                 FROM matches WHERE category_id = ?""", (c["id"],))
             cat_items.append({
                 **dict(c), "participants": counts["participants"],
+                **(team_rules_store.project(ctx.conn, c['id']) if c['kind'] == 'team' else {}),
                 "plan": dict(plan) if plan else None,
                 "matches_total": mstats["total"] or 0,
                 "matches_finished": mstats["finished"] or 0,
@@ -432,7 +434,8 @@ def event_structure(ctx):
                              (g["id"],))
         out.append({**dict(g), "categories": cat_items, "schools": school_count["n"]})
     venues = db.q(ctx.conn, "SELECT * FROM venues WHERE event_id = ? ORDER BY seq, id", (event_id,))
-    return {"event": dict(event), "groups": out, "venues": [dict(v) for v in venues]}
+    return {"event": dict(event), "groups": out, "venues": [dict(v) for v in venues],
+            "team_rules": team_rules_store.event_impact(ctx.conn, event_id)}
 
 
 @route("GET", r"/api/categories/(?P<category_id>\d+)/workspace")
@@ -442,6 +445,45 @@ def category_workspace(ctx):
 
 
 # ------------------------------------------------------------------ 大组别 / 项目
+@route("GET", r"/api/categories/(?P<category_id>\d+)/team-rules")
+def get_team_rules(ctx):
+    with db.read_tx(ctx.conn):
+        return team_rules_store.impact(ctx.conn, int(ctx.params['category_id']))
+
+
+@route("PUT", r"/api/categories/(?P<category_id>\d+)/team-rules", roles=ADMIN)
+def reject_project_team_rules(ctx):
+    team_rules_store.project(ctx.conn, int(ctx.params['category_id']))
+    raise conflict('三人赛规则现由本赛事统一设置，请刷新后进入侧边栏“三人赛规则设置”', code='event_rules_required')
+
+
+@route("GET", r"/api/events/(?P<event_id>\d+)/team-rules")
+def get_event_team_rules(ctx):
+    with db.read_tx(ctx.conn):
+        return team_rules_store.event_impact(ctx.conn, int(ctx.params['event_id']))
+
+
+@route("PUT", r"/api/events/(?P<event_id>\d+)/team-rules", roles=ADMIN)
+def save_team_rules(ctx):
+    body = ctx.body or {}
+    if body.get('rules') is None:
+        raise bad_request('请填写比赛规则')
+    try:
+        value = team_rules.normalize(body['rules'])
+    except ValueError as exc:
+        raise bad_request(str(exc), code='invalid_rules') from exc
+    event_id = int(ctx.params['event_id'])
+    with db.tx(ctx.conn):
+        before, changed = team_rules_store.save_event(ctx.conn, event_id, value, body)
+        if not changed:
+            return {'message': '规则未变化', **before}
+        security.audit(ctx.conn, ctx.user, 'update_team_rules', 'event', event_id,
+                       {'before': before['rules'], 'before_state': before['rules_state'],
+                        'legacy_rules': before['legacy_rules'], 'after': value, 'revision': before['rules_revision'] + 1,
+                        'future_matches': before['future_matches'], 'frozen_matches': before['frozen_matches']})
+        return {'message': '赛事三人赛规则已保存，已开始场次保持原规则', **team_rules_store.event_impact(ctx.conn, event_id)}
+
+
 @route("POST", r"/api/events/(?P<event_id>\d+)/groups", roles=ORG)
 def create_group(ctx):
     event_id = int(ctx.params["event_id"])

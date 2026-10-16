@@ -1,3 +1,4 @@
+import { installLegacyRosterFixture } from './helpers/legacy_roster_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -76,9 +77,10 @@ try {
     localStorage.setItem('stss_token', token); localStorage.setItem('stss_event', String(event));
   }, { token, event: identity.event_id });
   const page = await context.newPage();
+  await installLegacyRosterFixture(page);
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  const workspace = (cat, tab) => `${base}/?test_nav=${Date.now()}#/workspace?event=${identity.event_id}&group=${group.id}&category=${cat.id}&tab=${tab}`;
+  const workspace = (cat, tab) => tab === 'registration' ? `${base}/?legacy_nav=${Date.now()}#/legacyRosterTest?event=${identity.event_id}&group=${group.id}&category=${cat.id}` : `${base}/?test_nav=${Date.now()}#/workspace?event=${identity.event_id}&group=${group.id}&category=${cat.id}&tab=${tab}`;
   await page.goto(workspace(team, 'registration'));
   await page.getByRole('button',{name:'添加参赛学校',exact:true}).waitFor();
   await api('POST','/api/categories/'+team.id+'/enrollments',{

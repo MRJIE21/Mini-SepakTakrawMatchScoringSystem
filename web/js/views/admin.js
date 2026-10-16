@@ -1,6 +1,7 @@
 /* 成绩更正与导出、账号管理（设计大纲 3、8、12.3；改进方案 §13.2、§13.4）。 */
 import { api, download, openHtml, newUid, captureRequestContext, recordRequestContext, validateReceipt } from '../api.js';
 import { localStore } from '../store.js';
+import { DEFAULT_RULES, normalizeRules, ruleForSet, rulesSummary, winner } from '../teamRules.js';
 import { registerView, state, loadStructure } from '../main.js';
 import { openEditor as openIndividualCorrection } from './individual.js';
 import {
@@ -219,11 +220,14 @@ async function openCorrection(match, reload) {
   reason.dataset.field = 'reason';
   const status = selectInput(RESULT_STATUS, match.result_status || 'normal');
   const sets = [];
+  const rules = normalizeRules(match.rules || DEFAULT_RULES);
   const setRows = [];
-  for (let i = 1; i <= 3; i += 1) {
+  for (let i = 1; i <= rules.max_sets; i += 1) {
+    const rule = ruleForSet(rules, i);
+    const cap = rule.mode === 'fixed_deuce' ? rule.deuce_points : rule.point_cap ?? 2147483647;
     const exist = match.sets.find((s) => s.set_no === i) || {};
-    const home = numberInput(exist.home_points ?? '', { min: 0, max: 15, style: 'width:80px' });
-    const away = numberInput(exist.away_points ?? '', { min: 0, max: 15, style: 'width:80px' });
+    const home = numberInput(exist.home_points ?? '', { min: 0, max: cap, style: 'width:80px' });
+    const away = numberInput(exist.away_points ?? '', { min: 0, max: cap, style: 'width:80px' });
     home.dataset.field = `set${i}_home`;
     away.dataset.field = `set${i}_away`;
     sets.push({
@@ -272,7 +276,7 @@ async function openCorrection(match, reload) {
     subtitle: `${match.home.label} vs ${match.away.label} · 当前结果版本 v${match.result_version}`,
     width: 'min(620px, 96vw)',
     sections: [
-      { title: '修正后的局分', body: h('div', ...setRows, diff) },
+      { title: '修正后的局分', body: h('div', h('p.small', rulesSummary(rules)), ...setRows, diff) },
       {
         title: '结果状态与原因',
         body: h('div',
@@ -296,12 +300,13 @@ async function openCorrection(match, reload) {
           home_points: s.home.value === '' ? 0 : Number(s.home.value),
           away_points: s.away.value === '' ? 0 : Number(s.away.value),
         })).filter((s) => s.home_points || s.away_points)
-          .map((s) => ({ ...s, winner_side: s.home_points > s.away_points ? 'home' : 'away' }));
+          .map((s) => ({ ...s, winner_side: winner(s.home_points, s.away_points, ruleForSet(rules, s.set_no)) || '' }));
         let res;
         try {
           const payload = packet?.payload || {
             reason: reason.value.trim(), result_status: status.value, sets: resultSets,
             events: [], request_uid: newUid('correction'), base_version: match.result_version,
+            rules_hash: match.rules_hash,
             ...(resetResolutions ? { reset_resolutions: resetResolutions } : {}),
           };
           packet ||= { key, kind: 'correction', match_id: match.id, uid: payload.request_uid, payload,

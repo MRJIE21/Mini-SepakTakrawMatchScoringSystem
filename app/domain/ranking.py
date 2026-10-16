@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from .slots import ratio, ratio_bucket, ratio_key, ratio_text, ratio_value
 from .. import config
+from . import team_rules
 
 VALID_RESULT_STATUS = ("normal", "home_forfeit", "away_forfeit")
 
@@ -51,7 +52,7 @@ def match_winner_side(match: dict) -> str | None:
     sets = match.get("sets") or []
     home_sets = sum(1 for s in sets if s.get("winner_side") == "home")
     away_sets = sum(1 for s in sets if s.get("winner_side") == "away")
-    if home_sets == away_sets or max(home_sets, away_sets) < config.TEAM_SETS_TO_WIN:
+    if home_sets == away_sets or max(home_sets, away_sets) < team_rules.sets_to_win(match.get('rules')):
         return None
     return "home" if home_sets > away_sets else "away"
 

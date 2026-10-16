@@ -8,9 +8,11 @@ import { api, captureRequestContext, readRequestOptions } from '../api.js';
 import { registerView, state, loadStructure, reloadShell, go, replaceViewParams } from '../main.js';
 import {
   h, field, textInput, selectInput, dateInput, toast, confirmAsync,
-  clear, setFieldError,
+  clear, setFieldError, setPageLeaveGuard,
 } from '../ui.js';
 import { PROJECT_PRESETS, existingProject, nameAfterChoice, participantLabel, setupSummary, venueOrder } from '../setupModel.js';
+import { createRulesEditor, validateEventRules } from '../teamRulesEditor.js';
+import { rulesSummary } from '../teamRules.js';
 
 const canWrite = () => state.user.role === 'admin';
 const SECTIONS = [
@@ -40,8 +42,8 @@ function hierarchyStrip() {
     h('span', '比赛项目'));
 }
 
-async function render({ el, params, refresh }) {
-  if (params.action === 'new') {
+async function render({ el, params, refresh }, rulesOnly = false) {
+  if (!rulesOnly && params.action === 'new') {
     if (!canWrite()) {
       el.append(h('div.panel', h('h2', '新建赛事'),
         h('div.warn-box', '当前角色没有创建赛事的权限。')));
@@ -52,11 +54,25 @@ async function render({ el, params, refresh }) {
     return;
   }
   if (!state.eventId) {
+    if (rulesOnly) {
+      el.append(h('div.panel', h('h2', '三人赛规则设置'),
+        h('p', '还没有赛事。请先在赛事设置中创建赛事。'),
+        canWrite() ? h('a.btn', { href: '#/setup?action=new' }, '前往赛事设置') : h('p.small.muted', '请联系管理员创建赛事。')));
+      return;
+    }
     el.append(h('div.panel', h('h2', '赛事设置'),
       h('div.info-box', '还没有赛事。请先创建赛事，再配置组别与项目。')));
     if (canWrite()) el.append(renderCreateEvent(refresh));
     else el.append(h('div.panel', h('div.small.muted', '请联系管理员创建赛事。')));
     return;
+  }
+  if (rulesOnly && params.event) {
+    const requestedEvent = state.events.find(event => event.id === Number(params.event));
+    if (!requestedEvent) {
+      el.append(h('div.panel', h('h2', '三人赛规则设置'), h('p', '链接中的赛事不存在或当前账号不可访问。')));
+      return;
+    }
+    if (state.eventId !== requestedEvent.id) await reloadShell(requestedEvent.id);
   }
   // 旧链接仍指向同一份结构维护界面，所选组别保持在地址中。
   const section = ['groups', 'categories'].includes(params.step) ? 'structure' : (params.step || 'event');
@@ -68,7 +84,9 @@ async function render({ el, params, refresh }) {
   let syncSettingsMetadata = () => {};
   const page = h('div.setup-page');
   const isCurrent = () => page.isConnected && state.eventId === selectedEvent
-    && state.events.find(event => event.id === selectedEvent)?.uuid === structure.event.uuid;
+    && state.events.find(event => event.id === selectedEvent)?.uuid === structure.event.uuid
+    && captureRequestContext().auth_fingerprint === context.auth_fingerprint
+    && captureRequestContext().user_id === context.user_id;
   const eventName = h('span.setup-current-event', structure.event.name);
   let readQueue = Promise.resolve();
   const readStructure = () => {
@@ -92,6 +110,17 @@ async function render({ el, params, refresh }) {
     readQueue = nextRead.catch(() => {});
     return nextRead;
   };
+  if (rulesOnly) {
+    page.classList.add('team-rules-page');
+    const rules = renderRulesPage(structure, params, readStructure, { context, isCurrent });
+    syncSettingsMetadata = next => rules.updateMetadata(next);
+    page.append(h('header.rules-page-heading', h('h2', '三人赛规则设置'),
+      h('p', eventName)), rules.root);
+    el.append(page);
+    installRulesLeaveGuard(page, () => rules.blocked);
+    rules.syncLocation();
+    return;
+  }
   const nav = h('nav.setup-page-nav', { 'aria-label': '赛事设置导航' });
   const sections = new Map();
   function locate(key) {
@@ -155,6 +184,66 @@ async function render({ el, params, refresh }) {
   if (params.step && sections.has(section)) requestAnimationFrame(() => { if (el.isConnected) locate(section); });
 }
 
+function installRulesLeaveGuard(page, blocked) {
+  if (!canWrite()) return;
+  const dirty = () => [...page.querySelectorAll('.team-rules')].some(hasEdits);
+  setPageLeaveGuard(async () => {
+    if (blocked()) {
+      toast('请先完成保存或核对保存结果', 'error'); return false;
+    }
+    if (!dirty()) return true;
+    return confirmAsync('离开三人赛规则设置', '有尚未保存的比赛规则输入，确认放弃并离开？', '放弃并离开', { initialFocus: 'cancel' });
+  }, () => blocked() || dirty());
+}
+
+function renderRulesPage(initialStructure, params, readStructure, { context, isCurrent }) {
+  let structure = initialStructure;
+  let pending = 0;
+  const root = h('div.rules-page-body');
+  const title = h('h3.rules-project-title', '本赛事统一规则');
+  const scope = h('p.rules-project-path', '适用于本赛事所有组别、男子及女子三人赛；新增项目自动继承。');
+  const note = h('p.small.muted.rules-project-count');
+  const card = h('article.rules-project-card', { dataset: { eventId: structure.event.id } },
+    h('header.rules-project-heading', title, scope), note);
+  const legacy = h('div.rules-legacy');
+  const blocked = () => pending > 0 || !!editor?.blocked;
+  const mutate = async action => {
+    if (blocked()) { toast('请先完成保存或核对保存结果', 'error'); return; }
+    pending += 1;
+    try { return await action(); } finally { pending -= 1; }
+  };
+  const metadata = validateEventRules(structure.team_rules, structure.event.id);
+  const editor = canWrite() ? createRulesEditor(metadata, {
+    context, isCurrent, tracked, resetInput, hasEdits, mutate, readStructure, feedbackFactory: mutationFeedback,
+    onMetadata: current => updateMetadata({ ...structure, team_rules: current }),
+  }) : null;
+  const summary = editor ? null : h('div.rules-readonly',
+    h('p.small.muted', '当前角色仅可查看，修改请联系管理员。'), h('p'));
+  card.append(legacy, editor ? editor.root : summary); root.append(card);
+  function updateMetadata(next) {
+    const current = validateEventRules(next.team_rules, structure.event.id);
+    structure = next;
+    note.textContent = current.rules_state === 'legacy_mixed' ? `当前共 ${current.team_projects} 个三人赛项目，原有规则待统一。`
+      : current.team_projects ? `当前共 ${current.team_projects} 个三人赛项目共用此规则。`
+      : '尚未添加三人赛项目，可以先保存规则；以后新增项目自动使用。';
+    legacy.hidden = current.rules_state !== 'legacy_mixed';
+    clear(legacy);
+    if (!legacy.hidden) {
+      legacy.append(h('div.warn-box', h('b', '旧规则尚未统一'),
+        h('p', canWrite() ? '原有三人赛项目使用不同规则。下方是尚未应用的统一草稿；确认保存后，全部未开始比赛采用统一规则。'
+          : '原有三人赛项目使用不同规则，管理员确认统一前，各比赛继续按原规则运行。')),
+        h('details.team-rules-help', h('summary', '查看原有规则差异'),
+          ...current.legacy_rules.map(item => h('p', `${item.group_name} · ${item.category_name}：${rulesSummary(item.rules)}`))));
+    }
+    if (editor) editor.update(current);
+    else summary.lastElementChild.textContent = current.rules_state === 'legacy_mixed'
+      ? '待管理员统一，原有规则见上方差异。' : rulesSummary(current.rules);
+  }
+  updateMetadata(initialStructure);
+  return { root, updateMetadata, syncLocation() {
+    if (isCurrent()) replaceViewParams({ event: structure.event.id, group: null, category: null });
+  }, get blocked() { return blocked(); } };
+}
 /* 写入与列表同步分开：写入确认后重试只读；未知结果先核对后台。 */
 function mutationFeedback(host, isCurrent = () => host.isConnected) {
   const message = h('span');
@@ -211,7 +300,7 @@ function mutationFeedback(host, isCurrent = () => host.isConnected) {
       try {
         response = await task.request();
         acknowledged = true;
-        if (!isCurrent()) { toast(task.success, 'ok'); return; }
+        if (!isCurrent()) { if (!task.quietIfStale) toast(task.success, 'ok'); return; }
         await complete();
       } catch (error) {
         if (!isCurrent()) return;
@@ -228,7 +317,11 @@ function renderCreateEvent(refresh, standalone = false) {
     groups: [], venues: [] };
   const labels = ['赛事信息', '组别', '比赛项目', '比赛场地', '确认创建'];
   let step = 0;
+  let createdEvent = null;
+  const creator = captureRequestContext();
   const root = h('div.event-wizard');
+  const isCurrent = () => root.isConnected && captureRequestContext().user_id === creator.user_id
+    && captureRequestContext().auth_fingerprint === creator.auth_fingerprint;
   const panel = h('div.panel',
     h('div.panel-head', h('div', h('h2', standalone ? '新建赛事' : '创建首个赛事'),
       h('div.small.muted', '按顺序完成设置，最终确认前不会创建赛事或数据库。')),
@@ -391,6 +484,7 @@ function renderCreateEvent(refresh, standalone = false) {
   function drawReview(content) {
     const error = errorLine();
     const createButton = h('button.btn.btn-primary', { onclick: create }, '确认并创建赛事');
+    const backButton = h('button.btn', { onclick: () => { step -= 1; draw(); }, disabled: !!createdEvent }, '上一步');
     content.append(h('h3', '第 5 步 · 确认创建'),
       h('div.review-block', h('h4', '赛事信息'), h('b', draft.event.name),
         h('div.small.muted', [draft.event.start_date, draft.event.end_date].filter(Boolean).join(' 至 ') || '未设置日期'),
@@ -401,19 +495,25 @@ function renderCreateEvent(refresh, standalone = false) {
       h('div.review-block', h('h4', '比赛场地'), h('div', draft.venues.length
         ? draft.venues.map((venue) => venue.name).join('、') : '暂未设置')),
       h('div.info-box', '确认后将创建赛事及其独立数据库。'), error,
-      h('div.wizard-actions', h('button.btn', { onclick: () => { step -= 1; draw(); } }, '上一步'), createButton));
+      h('div.wizard-actions', backButton, createButton));
 
     async function create() {
-      createButton.disabled = true; createButton.textContent = '正在创建…';
+      if (!isCurrent() || createButton.disabled) return;
+      createButton.disabled = true; backButton.disabled = true;
+      createButton.textContent = createdEvent ? '正在进入…' : '正在创建…';
       try {
-        const res = await api.post('/api/events/full', draft);
-        await reloadShell(res.event_id);
+        if (!createdEvent) createdEvent = await api.post('/api/events/full', draft, { context: creator });
+        if (!isCurrent()) return;
+        await reloadShell(createdEvent.event_id);
+        if (!isCurrent()) return;
         toast('赛事及项目结构已创建', 'ok');
-        location.hash = `#/workspace?event=${res.event_id}&group=${res.group_id}&category=${res.category_id}&tab=overview`;
-        refresh();
+        go('workspace', { event: createdEvent.event_id, group: createdEvent.group_id, category: createdEvent.category_id, tab: 'overview' });
       } catch (e) {
-        fail(error, e.message || '创建失败');
-        createButton.disabled = false; createButton.textContent = '确认并创建赛事';
+        if (!isCurrent() || e.cancelled) return;
+        fail(error, createdEvent ? `赛事已创建，暂时无法进入工作台：${e.message}。重试只重新读取，不会再次创建赛事。` : e.message || '创建失败');
+        createButton.disabled = false;
+        createButton.textContent = createdEvent ? '重试进入工作台' : '确认并创建赛事';
+        backButton.disabled = !!createdEvent;
       }
     }
   }
@@ -839,3 +939,4 @@ function renderVenuesStep(initialStructure, readStructure, { context, isCurrent 
 }
 
 registerView({ name: 'setup', label: '赛事设置', roles: ['admin', 'organizer', 'recorder', 'viewer'], render });
+registerView({ name: 'teamRules', label: '三人赛规则设置', roles: ['admin', 'organizer', 'recorder', 'viewer'], render: args => render(args, true) });

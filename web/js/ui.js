@@ -265,9 +265,26 @@ const activeModals = [];
 let pageLeaveGuard = null;
 let pageHasUnsaved = null;
 
-export function setPageLeaveGuard(guard, hasUnsaved = null) {
-  pageLeaveGuard = guard;
-  pageHasUnsaved = hasUnsaved;
+/* 路由在重新渲染前会清空旧守卫。但旧页面此刻仍然挂在屏幕上（新页面还要等接口），
+   这时清掉守卫就会出现“界面还显示未提交修改、离开确认却不再触发”的空窗。
+   渲染流程先声明即将换页：只忽略这一次清空，旧守卫保持到新视图接管为止。 */
+let pendingNavigation = false;
+
+export function markPageLeaveGuardPending() {
+  pendingNavigation = true;
+}
+
+export function settlePageLeaveGuard() {
+  if (pendingNavigation) { pageLeaveGuard = null; pageHasUnsaved = null; }
+  pendingNavigation = false;
+}
+
+export function setPageLeaveGuard(guard, hasUnsaved = null, isCurrent = null) {
+  if (isCurrent && !isCurrent()) return;
+  if (guard === null && pendingNavigation) return;
+  pendingNavigation = false;
+  pageLeaveGuard = guard && (async () => !isCurrent || isCurrent() ? guard() : true);
+  pageHasUnsaved = hasUnsaved && (() => (!isCurrent || isCurrent()) && hasUnsaved());
 }
 window.addEventListener('beforeunload', (event) => {
   if (pageHasUnsaved?.()) { event.preventDefault(); event.returnValue = ''; }

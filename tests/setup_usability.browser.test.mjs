@@ -449,16 +449,11 @@ try {
       const readonly = await readonlyContext.newPage(); readonly.on('pageerror', error => errors.push(error.message));
       readonly.setDefaultTimeout(10000);
       await readonly.goto(`${base}/#/setup`);
-      if (role === 'organizer') {
-        await readonly.getByText('赛事结构由管理员维护。', { exact: true }).waitFor();
-        assert.equal(await readonly.locator('.setup-page input,.setup-page select,.setup-page textarea').count(), 0);
-        assert.equal(await readonly.locator('.setup-page').getByRole('button', { name: /修改|保存|添加|删除|新建/ }).count(), 0);
-      } else {
-        await readonly.waitForURL(role === 'recorder' ? '**/#/field' : '**/#/school');
-        await readonly.waitForLoadState('networkidle');
-        assert.equal(await readonly.locator('.setup-page').count(), 0, `${role} retains its existing route restriction`);
-        assert.equal(await readonly.locator('.sidenav a[data-view="setup"]').count(), 0);
-      }
+      // The existing permission baseline lets all three roles inspect settings.
+      await readonly.getByText('赛事结构由管理员维护。', { exact: true }).waitFor();
+      assert.equal(await readonly.locator('.setup-page input,.setup-page select,.setup-page textarea').count(), 0);
+      assert.equal(await readonly.locator('.setup-page').getByRole('button', { name: /修改|保存|添加|删除|新建/ }).count(), 0);
+      assert.equal(await readonly.locator('.sidenav a[data-view="setup"]').count(), 1);
       const forbidden = await fetch(`${base}/api/events/${identity.event_id}`, { method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-Client-Protocol': '2', Authorization: `Bearer ${readonlyToken}`,
           'X-Event-ID': String(identity.event_id), 'X-Event-UUID': identity.event_uuid },
@@ -467,7 +462,7 @@ try {
       await readonly.screenshot({ path: path.join(artifacts, `setup-readonly-${role}.png`), fullPage: true }); await readonlyContext.close();
     }
     assert.equal((await api('GET', `/api/events/${identity.event_id}/structure`)).event.name, '赛事资料实际已保存');
-    checks.push('organizer has a read-only setup; recorder/viewer retain route restrictions; all three APIs deny writes');
+    checks.push('organizer/recorder/viewer retain existing read-only settings access; all three APIs deny writes');
   }
   assert.deepEqual(errors, []);
   await writeFile(path.join(artifacts, `setup-${cases}-report.json`), JSON.stringify({ status: 'PASS', cases, checks, dataDir, browser: await browser.version() }, null, 2) + '\n');

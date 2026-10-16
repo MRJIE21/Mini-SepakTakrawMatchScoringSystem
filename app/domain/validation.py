@@ -1,198 +1,170 @@
-"""现场记录与提交包校验（设计大纲 6.1、12.2）。
-
-校验用于发现漏传、重复记录、汇总不一致等问题，不替代裁判判罚；
-存在不一致时提示核对，不静默改写现场确认结果。
-
-三人赛口径：三局两胜，每局均为 15 分（含第三局），
-14 平后再得 1 分即结束，15 分封顶。
-"""
+"""Official package validation uses each match's immutable scoring parameters."""
 from __future__ import annotations
-
 import hashlib
 import json
-
-from .. import config
+from . import team_rules
 
 RESULT_STATUSES = ("normal", "home_forfeit", "away_forfeit", "unfinished", "cancelled")
 INDIVIDUAL_STATUSES = ("normal", "dnf", "dns", "dsq", "pending")
 
 
-def set_winner(home: int, away: int, cap: int | None = None) -> str | None:
-    cap = cap or config.TEAM_SET_POINT_CAP
-    if home >= cap and home > away:
-        return "home"
-    if away >= cap and away > home:
-        return "away"
-    return None
+def _rules(rules=None, cap=None, max_sets=None):
+    value = team_rules.normalize(rules)
+    if cap is not None:
+        value["regular"] = {"mode": "target", "target_points": cap, "win_by": 1, "point_cap": cap}
+    if max_sets is not None:
+        value["max_sets"] = max_sets
+    return team_rules.normalize(value)
 
 
-def match_winner_from_sets(sets: list[dict], sets_to_win: int | None = None) -> str | None:
-    need = sets_to_win or config.TEAM_SETS_TO_WIN
-    home = sum(1 for s in sets if s.get("winner_side") == "home")
-    away = sum(1 for s in sets if s.get("winner_side") == "away")
-    if home >= need:
-        return "home"
-    if away >= need:
-        return "away"
-    return None
+def set_winner(home, away, cap=None, *, rules=None, set_no=1):
+    return team_rules.winner(home, away, team_rules.for_set(_rules(rules, cap), set_no))
 
 
-# ------------------------------------------------------------------ 事件回放
-def replay_events(events: list[dict], cap: int | None = None,
-                  max_sets: int | None = None) -> tuple[dict[int, list[int]], list[str]]:
-    """回放得分事件，返回 {局次: [主队得分, 客队得分]} 与错误列表。"""
-    cap = cap or config.TEAM_SET_POINT_CAP
-    max_sets = max_sets or config.TEAM_MAX_SETS
-    scores: dict[int, list[int]] = {}
-    decided: set[int] = set()
-    active: dict[int, tuple[int, str]] = {}
-    errors: list[str] = []
-    seen_seq: set[int] = set()
-    for e in sorted(events, key=lambda x: int(x.get("seq") or 0)):
-        seq = int(e.get("seq") or 0)
-        kind = e.get("kind")
-        set_no = int(e.get("set_no") or 0)
-        if seq in seen_seq:
-            errors.append(f"事件序号 {seq} 重复")
+def match_winner_from_sets(sets, sets_to_win=None, *, rules=None):
+    need = sets_to_win if sets_to_win is not None else team_rules.sets_to_win(rules)
+    home = sum(s.get("winner_side") == "home" for s in sets)
+    away = sum(s.get("winner_side") == "away" for s in sets)
+    return "home" if home >= need else "away" if away >= need else None
+
+
+def replay_events(events, cap=None, max_sets=None, *, rules=None):
+    value = _rules(rules, cap, max_sets)
+    scores, active, errors, seen = {}, {}, [], set()
+    last_seq = 0
+    for event in events:
+        if not isinstance(event, dict):
+            errors.append("得分事件必须是对象")
             continue
-        seen_seq.add(seq)
-        if set_no < 1 or set_no > max_sets:
-            errors.append(f"事件 {seq} 的局次 {set_no} 超出范围")
+        seq, no = event.get("seq"), event.get("set_no")
+        if type(seq) is not int or not 1 <= seq <= 2147483647 or seq <= last_seq or seq in seen:
+            errors.append("事件序号必须是递增且不重复的正整数")
             continue
-        if kind == "score":
-            if set_no in decided:
-                errors.append(f"事件 {seq}：第{set_no}局已结束，不能再记分")
+        last_seq = seq
+        seen.add(seq)
+        if type(no) is not int or not 1 <= no <= value["max_sets"]:
+            errors.append(f"事件 {seq} 的局次超出范围")
+            continue
+        if event.get("kind") == "undo":
+            if event.get('side') not in (None, ''):
+                errors.append(f"事件 {seq}：撤回事件不应指定得分方")
                 continue
-            if set_no > 1 and (set_no - 1) not in decided:
-                errors.append(f"事件 {seq}：第{set_no - 1}局尚未结束，不能开始第{set_no}局")
+            ref = event.get("ref_seq")
+            if type(ref) is not int or not active or ref != next(reversed(active)):
+                errors.append(f"事件 {seq}：撤回必须指向最后一次有效记分")
                 continue
-            s = scores.setdefault(set_no, [0, 0])
-            side = e.get("side")
-            if side not in ("home", "away"):
-                errors.append(f"事件 {seq}：得分方不合法")
+            ref_no, side = active[ref]
+            if no != ref_no:
+                errors.append(f"事件 {seq}：撤回局次与原得分不一致")
                 continue
-            s[0 if side == "home" else 1] += 1
-            if s[0] > cap or s[1] > cap:
-                errors.append(f"事件 {seq}：第{set_no}局得分超过 {cap} 分上限")
-                continue
-            after = (e.get("home_after"), e.get("away_after"))
-            if after != (None, None) and after != (s[0], s[1]):
-                errors.append(f"事件 {seq}：记录的过程比分 {after} 与回放结果 {(s[0], s[1])} 不一致")
-            active[seq] = (set_no, side)
-            if set_winner(s[0], s[1], cap):
-                decided.add(set_no)
-        elif kind == "undo":
-            ref = e.get("ref_seq")
-            if ref not in active:
-                errors.append(f"事件 {seq}：撤回指向的得分事件不存在或已被撤回")
-                continue
-            set_no_ref, side = active.pop(ref)
-            s = scores.setdefault(set_no_ref, [0, 0])
-            s[0 if side == "home" else 1] -= 1
-            decided.discard(set_no_ref)
+            active.pop(ref)
+            scores[ref_no][0 if side == "home" else 1] -= 1
+            continue
+        if event.get("kind") != "score" or event.get("side") not in ("home", "away"):
+            errors.append(f"事件 {seq}：得分事件或得分方不合法")
+            continue
+        decided = {}
+        for set_no, score in scores.items():
+            w = team_rules.winner(*score, team_rules.for_set(value, set_no))
+            if w: decided[set_no] = w
+        if any(sum(w == side for w in decided.values()) >= team_rules.sets_to_win(value) for side in ("home", "away")):
+            errors.append(f"事件 {seq}：比赛已结束，不能再记分")
+            continue
+        current = next((i for i in range(1, value["max_sets"] + 1) if i not in decided), None)
+        if no != current:
+            errors.append(f"事件 {seq}：第{no}局已结束或上一局尚未结束，不能记分")
+            continue
+        score = scores.setdefault(no, [0, 0])
+        side = event["side"]
+        index = 0 if side == "home" else 1
+        score[index] += 1
+        rule = team_rules.for_set(value, no)
+        if not team_rules.legal_score(*score, rule):
+            score[index] -= 1
+            errors.append(f"事件 {seq}：比分超出合法获胜边界或分数上限")
+            continue
+        after = (event.get("home_after"), event.get("away_after"))
+        if after != (None, None) and (any(type(x) is not int for x in after) or after != tuple(score)):
+            errors.append(f"事件 {seq}：过程比分与回放结果不一致")
+        active[seq] = (no, side)
     return scores, errors
 
 
-def validate_sets(sets: list[dict], result_status: str,
-                  cap: int | None = None) -> list[str]:
-    """校验单局结果本身。
-
-    弃权或未完成时，现场往往停在一局中途（如 8:5 时弃权）：允许最后一局没有胜方，
-    其余各局仍必须完整且与比分一致。
-    """
-    cap = cap or config.TEAM_SET_POINT_CAP
-    errors: list[str] = []
+def validate_sets(sets, result_status, cap=None, *, rules=None):
+    value = _rules(rules, cap)
     if result_status == "cancelled":
-        if sets:
-            errors.append("已取消的比赛不应包含局分")
-        return errors
-    partial_allowed = result_status in ("home_forfeit", "away_forfeit", "unfinished")
-    last_set_no = max((int(s.get("set_no") or 0) for s in sets), default=0)
-    seen: set[int] = set()
-    wins = {"home": 0, "away": 0}
+        return ["已取消的比赛不应包含局分"] if sets else []
+    errors, seen, wins = [], set(), {"home": 0, "away": 0}
+    valid_nos = [s.get("set_no") for s in sets if isinstance(s, dict) and type(s.get("set_no")) is int]
+    last_no = max(valid_nos, default=0)
+    partial = result_status in ("home_forfeit", "away_forfeit", "unfinished")
     for s in sets:
-        set_no = int(s.get("set_no") or 0)
-        hp, ap = int(s.get("home_points") or 0), int(s.get("away_points") or 0)
-        if set_no < 1 or set_no > config.TEAM_MAX_SETS:
-            errors.append(f"局次 {set_no} 超出范围")
+        if not isinstance(s, dict):
+            errors.append("局分必须是对象")
             continue
-        if set_no in seen:
-            errors.append(f"第{set_no}局重复提交")
+        no = s.get("set_no")
+        if type(no) is not int or not 1 <= no <= value["max_sets"]:
+            errors.append("局次超出范围")
             continue
-        seen.add(set_no)
-        if hp > cap or ap > cap:
-            errors.append(f"第{set_no}局比分超过 {cap} 分上限")
+        if no in seen:
+            errors.append(f"第{no}局重复提交")
+        seen.add(no)
+        hp, ap = s.get("home_points"), s.get("away_points")
+        rule = team_rules.for_set(value, no)
+        if not team_rules.legal_score(hp, ap, rule):
+            errors.append(f"第{no}局比分不合法或超过分数上限")
+            continue
+        expected = team_rules.winner(hp, ap, rule)
         winner = s.get("winner_side")
-        expected = set_winner(hp, ap, cap)
         if winner not in ("home", "away"):
-            if partial_allowed and set_no == last_set_no and expected is None:
-                continue        # 弃权/未完成时停在半途的最后一局
-            errors.append(f"第{set_no}局缺少胜方")
-            continue
-        if expected != winner:
-            errors.append(f"第{set_no}局胜方与比分不一致（{hp}:{ap}）")
-            continue
-        wins[winner] += 1
-    if result_status == "normal":
-        if not sets:
-            errors.append("正常完成的比赛必须包含各局比分")
+            if partial and no == last_no and expected is None:
+                continue
+            errors.append(f"第{no}局缺少胜方")
+        elif expected != winner:
+            errors.append(f"第{no}局胜方与比分不一致")
         else:
-            if wins["home"] != config.TEAM_SETS_TO_WIN and wins["away"] != config.TEAM_SETS_TO_WIN:
-                errors.append("正常完成的比赛必须有队伍取得三分之二局数（三局两胜）")
+            wins[winner] += 1
+    if result_status == "normal" and not any(n == team_rules.sets_to_win(value) for n in wins.values()):
+        errors.append(f"正常完成的比赛必须有一方赢得{team_rules.sets_to_win(value)}局")
     return errors
 
 
-def validate_set_order(sets: list[dict]) -> list[str]:
-    """局次必须连续，且任何一局结束后不再出现新的局。"""
-    errors: list[str] = []
-    ordered = sorted(sets, key=lambda s: int(s.get("set_no") or 0))
-    for i, s in enumerate(ordered, start=1):
-        if int(s.get("set_no") or 0) != i:
+def validate_set_order(sets, *, rules=None):
+    value = team_rules.normalize(rules)
+    if any(not isinstance(s, dict) or type(s.get("set_no")) is not int for s in sets):
+        return ["局次格式不正确"]
+    ordered = sorted(sets, key=lambda s: s["set_no"])
+    errors, wins = [], {"home": 0, "away": 0}
+    for i, s in enumerate(ordered, 1):
+        if s["set_no"] != i:
             errors.append("局次必须从 1 开始连续")
-            break
-    wins = {"home": 0, "away": 0}
-    for s in ordered:
-        w = s.get("winner_side")
-        if w in wins:
-            wins[w] += 1
-        if wins["home"] >= config.TEAM_SETS_TO_WIN or wins["away"] >= config.TEAM_SETS_TO_WIN:
-            if s is not ordered[-1]:
-                errors.append("比赛已结束后不应再有新的局")
-            break
+        side = s.get("winner_side")
+        if side in wins: wins[side] += 1
+        if max(wins.values()) >= team_rules.sets_to_win(value) and i != len(ordered):
+            errors.append("比赛已结束后不应再有新的局")
     return errors
 
 
-def validate_team_package(*, sets: list[dict], events: list[dict],
-                          result_status: str, require_events: bool = True) -> list[str]:
-    """三人赛提交包校验：过程与结果一致性。
-
-    require_events=False 用于正式更正：只更正最终局分时保留原过程记录，不补造过程。
-    """
-    errors: list[str] = []
+def validate_team_package(*, sets, events, result_status, require_events=True, rules=None):
     if result_status not in RESULT_STATUSES:
         return [f"未知结果状态：{result_status}"]
-    sets = sets or []
-    events = events or []
+    if not isinstance(sets, list) or not isinstance(events, list):
+        return ["局分与得分过程必须是数组"]
+    errors = []
     if result_status == "normal" and not events and require_events:
         errors.append("正常完成的三人赛必须包含逐分得分过程")
-    errors.extend(validate_sets(sets, result_status))
-    errors.extend(validate_set_order(sets))
-    replayed, replay_errors = replay_events(events)
+    errors.extend(validate_sets(sets, result_status, rules=rules))
+    errors.extend(validate_set_order(sets, rules=rules))
+    scores, replay_errors = replay_events(events, rules=rules)
     errors.extend(replay_errors)
-    if result_status in ("normal", "home_forfeit", "away_forfeit", "unfinished"):
-        for s in sets:
-            set_no = int(s.get("set_no") or 0)
-            if set_no in replayed:
-                got = replayed[set_no]
-                if got != [int(s.get("home_points") or 0), int(s.get("away_points") or 0)]:
-                    errors.append(
-                        f"第{set_no}局：提交比分 {s.get('home_points')}:{s.get('away_points')} "
-                        f"与得分过程回放 {got[0]}:{got[1]} 不一致")
-            elif events:
-                errors.append(f"第{set_no}局：缺少对应的得分过程记录")
-        for set_no, sc in replayed.items():
-            if not any(int(s.get("set_no") or 0) == set_no for s in sets):
-                errors.append(f"第{set_no}局：得分过程存在但没有对应的局分结果")
+    if result_status == "cancelled" and events:
+        errors.append("取消的比赛不能包含得分过程")
+    if events:
+        submitted = {s["set_no"]: [s.get("home_points"), s.get("away_points")] for s in sets
+                     if isinstance(s, dict) and type(s.get("set_no")) is int}
+        actual = {no: sc for no, sc in scores.items() if any(sc)}
+        if actual != submitted:
+            errors.append("提交局分与得分过程回放结果不一致，或缺少对应局分/过程")
     return errors
 
 

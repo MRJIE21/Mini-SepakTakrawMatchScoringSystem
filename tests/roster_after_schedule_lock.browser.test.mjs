@@ -1,3 +1,4 @@
+import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* Real HTTP + browser; isolated test databases, never the running event. */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -74,11 +75,7 @@ try {
   for (const action of ['complete', 'confirm']) draw = (await api('POST', `${drawPath}/${action}`, {
     draw_id: draw.id, base_rev: draw.rev, request_uid: crypto.randomUUID(),
   })).draw;
-  const plan = (await api('POST', `/api/categories/${category.id}/plan`, {
-    stages: [{ kind: 'round_robin', name: '循环', params: { pool_count: 1, draw_id: draw.id } }],
-  })).plan_id;
-  await api('POST', `/api/plans/${plan}/generate`, {});
-  await api('POST', `/api/plans/${plan}/lock`, {});
+  const plan = (await scheduleFixture(api, identity, category.id, { drawId: draw.id })).plan_id;
   const before = await api('GET', `/api/plans/${plan}`);
   const formal = await api('GET', `/api/schools/${school.id}/registration-workspace`);
   const entry = formal.projects.find(p => p.category_id === category.id);

@@ -1,6 +1,8 @@
 """接口层公用查询与序列化。"""
 from __future__ import annotations
 
+import json
+
 from .. import db
 from ..domain import slots as slotmod
 from ..domain import validation, advancement
@@ -106,6 +108,9 @@ def plan_effective(conn, plan) -> bool:
     """
     if plan is None:
         return False
+    for stage in db.q(conn, 'SELECT params_json FROM stages WHERE plan_id=?', (plan['id'],)):
+        if json.loads(stage['params_json'] or '{}').get('schedule_meta', {}).get('state') == 'confirmed':
+            return True
     if plan["status"] in ("locked", "running"):
         return True
     return bool(db.q1(conn,
@@ -117,9 +122,12 @@ def match_plan_effective(conn, row, plan=None):
     plan = plan or db.q1(conn, "SELECT * FROM plans WHERE id=?", (row["plan_id"],))
     if not plan or plan["status"] == "archived":
         return False
+    stage = db.q1(conn, "SELECT kind,params_json FROM stages WHERE id=? AND plan_id=?", (row["stage_id"], plan["id"]))
+    managed = json.loads(stage['params_json'] or '{}').get('schedule_meta') if stage else None
+    if managed:
+        return managed['state'] == 'confirmed'
     if plan["status"] in ("locked", "running"):
         return True
-    stage = db.q1(conn, "SELECT kind FROM stages WHERE id=? AND plan_id=?", (row["stage_id"], plan["id"]))
     return bool(stage and stage["kind"] == "custom")
 
 
@@ -133,7 +141,7 @@ def recording_blocker(conn, row):
     if row["status"] == "finished":
         return "该场次已确认，更正需要编排与成绩人员操作"
     if not match_plan_effective(conn, row):
-        return "编排方案尚未生效，请管理员先锁定方案，再领取任务和开始记录"
+        return "赛程阶段尚未确认，请管理员核对并确认后再领取和记录"
     return ""
 
 
@@ -146,6 +154,13 @@ def slot_view(conn, row: dict, prefix: str) -> dict:
             "participation_id": None, "label": "", "source_match_id": row.get(f"{prefix}_source_match"),
             "source_pool_id": row.get(f"{prefix}_source_pool"),
             "source_rank": row.get(f"{prefix}_source_rank"), "resolved": False, "reason": ""}
+    if stype == 'pool_rank':
+        pool = db.q1(conn, 'SELECT name FROM pools WHERE id=?', (view['source_pool_id'],))
+        view['source_label'] = f"{pool['name'] if pool else '小组'}第{view['source_rank']}名"
+    elif stype in ('match_winner', 'match_loser'):
+        view['source_label'] = f"M{view['source_match_id']:03d}{'胜者' if stype == 'match_winner' else '负者'}"
+    else:
+        view['source_label'] = ''
     if stype == "bye":
         view["resolved"] = True
         view["label"] = "轮空"
@@ -171,11 +186,17 @@ def slot_view(conn, row: dict, prefix: str) -> dict:
 
 def serialize_match(conn, row, with_sets: bool = True) -> dict:
     from ..access import owner_info
+    from .. import team_rules_store
     row = dict(row)
     home = slot_view(conn, row, "home")
     away = slot_view(conn, row, "away")
     info = {
         "id": row["id"],
+        "public_code": f"M{row['id']:03d}",
+        "schedule_role": row.get('schedule_role', ''),
+        "schedule_revision": row.get('schedule_revision', 1),
+        "winner_rank": row.get('winner_rank'),
+        "loser_rank": row.get('loser_rank'),
         "category_id": row["category_id"],
         "stage_id": row["stage_id"],
         "pool_id": row["pool_id"],
@@ -201,6 +222,11 @@ def serialize_match(conn, row, with_sets: bool = True) -> dict:
         "reset_parent_id": row.get("reset_parent_id"),
     }
     info["blocked_reason"] = recording_blocker(conn, row)
+    info['destinations'] = [{'match_id': target['id'], 'public_code': f"M{target['id']:03d}",
+        'source_type': target[f'{side}_source_type']} for target in db.q(conn,
+        'SELECT id,home_source_match,away_source_match,home_source_type,away_source_type FROM matches WHERE home_source_match=? OR away_source_match=? ORDER BY id',
+        (row['id'], row['id'])) for side in ('home', 'away') if target[f'{side}_source_match'] == row['id']]
+    info.update(team_rules_store.match_rules(conn, row))
     info["can_score"] = not bool(info["blocked_reason"])
     info.update(owner_info(conn, 'match', row['id']))
     authors = db.q(conn, 'SELECT s.user_id,u.display_name FROM submissions s LEFT JOIN users u ON u.id=s.user_id WHERE s.match_id=? ORDER BY s.id', (row['id'],))
@@ -225,7 +251,7 @@ def serialize_match(conn, row, with_sets: bool = True) -> dict:
     if with_sets:
         sets = db.q(conn, "SELECT * FROM match_sets WHERE match_id = ? ORDER BY set_no", (row["id"],))
         info["sets"] = [dict(s) for s in sets]
-        info["winner_side"] = validation.match_winner_from_sets(info["sets"]) \
+        info["winner_side"] = validation.match_winner_from_sets(info["sets"], rules=info['rules']) \
             if row["result_status"] in ("normal", "home_forfeit", "away_forfeit") else None
         if row["result_status"] == "home_forfeit":
             info["winner_side"] = "away"

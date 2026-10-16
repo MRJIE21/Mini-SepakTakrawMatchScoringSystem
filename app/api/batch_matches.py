@@ -40,7 +40,18 @@ class BatchReadConnection:
                                   if row[f'{side}_source_match'])
             missing = source_ids - seen
         selected = [self.matches[mid] for mid in mids]
+        self.destinations = defaultdict(list)
+        for start in range(0, len(mids), 400):
+            part = mids[start:start+400]
+            marks = ','.join('?' for _ in part)
+            for row in db.q(conn, f'''SELECT id,home_source_match,away_source_match,home_source_type,away_source_type
+                FROM matches WHERE home_source_match IN ({marks}) OR away_source_match IN ({marks}) ORDER BY id''', part + part):
+                for source in {row['home_source_match'], row['away_source_match']} - {None}:
+                    self.destinations[source].append(dict(row))
         self.plans = self._map('plans', {r['plan_id'] for r in self.matches.values()})
+        self.categories = self._map('categories', {r['category_id'] for r in self.matches.values()})
+        self.groups = self._map('groups', {r['group_id'] for r in self.categories.values()})
+        self.events = self._map('events', {r['event_id'] for r in self.groups.values()})
         self.stages = self._map('stages', {r['stage_id'] for r in self.matches.values()})
         self.venues = self._map('venues', {r['venue_id'] for r in selected if r['venue_id']})
         pool_ids = {r.get(f'{side}_source_pool') for r in self.matches.values()
@@ -101,6 +112,8 @@ class BatchReadConnection:
         key = args[0] if args else None
         row = None
         if text.startswith('select'):
+            if 'from matches where home_source_match=? or away_source_match=?' in text:
+                return _Rows(self.destinations.get(key, []))
             if 'from participations p' in text and 'where p.id in' in text:
                 return _Rows(self.labels[pid] for pid in args if pid in self.labels)
             if 'from submissions s' in text and 's.match_id' in text and len(args) == 1:
@@ -123,6 +136,8 @@ class BatchReadConnection:
                 row = self.users.get(key)
             else:
                 for table, lookup in (('plans', self.plans), ('stages', self.stages),
+                                      ('categories', self.categories),
+                                      ('groups', self.groups), ('events', self.events),
                                       ('venues', self.venues), ('matches', self.matches),
                                       ('pools', self.pools)):
                     if f'from {table} where id' in text:

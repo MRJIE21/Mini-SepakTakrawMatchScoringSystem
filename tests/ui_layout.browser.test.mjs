@@ -103,7 +103,7 @@ try {
   const routes = [
     ['schools', 'schoolRegistration'], ['dashboard', 'dashboard'], ['setup-event', 'setup'],
     ['setup-groups', 'setup?step=groups'], ['setup-projects', 'setup?step=categories'], ['setup-venues', 'setup?step=venues'],
-    ['event-wizard', 'setup?action=new'], ['workspace-chooser', 'workspace?category=0'],
+    ['event-wizard', 'setup?action=new'], ['workspace-direct', 'workspace'],
     ...['overview', 'registration', 'schedule', 'matches', 'results'].map(tab => [`team-${tab}`, workspace(team, tab)]),
     ...['overview', 'registration', 'entry', 'results'].map(tab => [`individual-${tab}`, workspace(individual, tab)]),
     ['field', 'field'], ['scoring-list', 'scoring'], ['scoring-console', `scoring?match=${match.match_id}`],
@@ -111,7 +111,7 @@ try {
     ['school-projects', `schoolRegistration?event=${event.event_id}&school=${schools[0].id}`],
   ];
   const navigate = async route => {
-    if (route === 'workspace?category=0') await page.evaluate(eventId => localStorage.removeItem(`stss_workspace_last:${eventId}`), event.event_id);
+    if (route === 'workspace') await page.evaluate(eventId => localStorage.removeItem(`stss_workspace_last:admin:${eventId}`), event.event_id);
     await page.goto(`${base}/#/${route}`);
     await page.waitForLoadState('networkidle');
     await page.locator('.content').getByRole('heading').first().waitFor();
@@ -178,17 +178,16 @@ try {
     await page.setViewportSize({ width: 1365, height: 900 });
     await navigate('schoolRegistration');
     const cards = page.locator('.school-registration-school');
-    assert.equal(await cards.count(), 20);
-    const selector = page.getByLabel('组别', { exact: true });
-    const filterBox = await selector.boundingBox();
+    assert.equal(await cards.count(), 7, '默认只显示当前组别');
+    const selector = page.getByLabel('大组别', { exact: true });
+    assert.equal(await selector.count(), 1, '工作台只保留一处组别选择');
     const addBox = await page.getByRole('button', { name: '新增学校', exact: true }).boundingBox();
-    assert.ok(addBox.x - filterBox.x - filterBox.width >= 16, '筛选和新增操作留有间距');
-    assert.ok(Math.abs(addBox.y + addBox.height - filterBox.y - filterBox.height) <= 2, '筛选与新增按钮底部对齐');
     const first = await cards.first().boundingBox();
-    assert.ok(first.y - addBox.y - addBox.height >= 24, '工具栏和学校列表有清楚分隔');
-    assert.ok((await cards.first().textContent()).includes('8 位人员'), '学校卡片包含组别和人员信息');
-    await selector.selectOption(String(group.id));
-    assert.equal(await cards.count(), 7, '组别筛选保持可用');
+    assert.ok(first.y - addBox.y - addBox.height >= 16, '操作与学校卡片留出间距');
+    assert.ok((await cards.first().textContent()).includes('8 位人员'));
+    await selector.selectOption(String(structure.groups[1].id));
+    await page.waitForFunction(() => document.querySelectorAll('.school-registration-school').length === 9);
+    assert.equal(await cards.count(), 9, '组别切换进入该组学校列表');
     await cards.first().click();
     await page.getByRole('tab', { name: '人员名单', exact: true }).waitFor();
     console.log(`PASS: ${report.length} 个页面与尺寸组合、学校筛选与进入、弹窗边界、工具栏间距和卡片信息；无脚本错误或整页横向溢出`);

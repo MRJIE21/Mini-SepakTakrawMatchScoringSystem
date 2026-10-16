@@ -84,6 +84,32 @@ class FrontendGuardrailTest(unittest.TestCase):
         self.assertIn("'搜索或填写运动员姓名'", text)
         self.assertNotIn("items: ['workspace', 'catalog']", main)
 
+    def test_leave_guard_survives_until_the_old_page_is_replaced(self):
+        """换页开始时旧页面仍在屏幕上，此时清空守卫会让未提交输入失去离开确认。"""
+        main = (WEB / "js" / "main.js").read_text(encoding="utf-8")
+        ui = (WEB / "js" / "ui.js").read_text(encoding="utf-8")
+        render_route = main[main.index("async function renderRoute"):]
+        render_route = render_route[:render_route.index("\n}\n") + 3]
+        self.assertIn("markPageLeaveGuardPending()", render_route)
+        self.assertIn("finally", render_route, "结束换页必须放在 finally，避免报错或取消后守卫冻结")
+        self.assertIn("settlePageLeaveGuard()", render_route)
+        self.assertNotIn("setPageLeaveGuard(null)", render_route,
+                         "renderRoute 不能在旧页面上直接清空守卫")
+        self.assertIn("if (guard === null && pendingNavigation) return;", ui,
+                      "ui.js 必须支持换页期间冻结守卫")
+        self.assertIn("history.replaceState(null, '', restore)", main,
+                      "取消离开后必须把地址还原到真正渲染的那一页")
+
+    def test_school_registration_has_one_entry_inside_the_workspace(self):
+        """侧栏不再重复出现学校报名；旧链接与待办统一落到工作台报名名单。"""
+        main = (WEB / "js" / "main.js").read_text(encoding="utf-8")
+        self.assertNotIn("items: ['schoolRegistration'", main)
+        for name in ("views/workspace.js", "views/catalog.js", "views/dashboard.js",
+                     "views/schoolRegistration.js"):
+            body = (WEB / "js" / name).read_text(encoding="utf-8")
+            self.assertNotIn("go('schoolRegistration'", body,
+                             f"{name} 不应再把用户送出项目工作台")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

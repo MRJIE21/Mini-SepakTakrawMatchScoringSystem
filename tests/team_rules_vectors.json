@@ -1,0 +1,311 @@
+[
+  {
+    "rule": {
+      "mode": "target",
+      "target_points": 15,
+      "win_by": 1,
+      "point_cap": 15
+    },
+    "cases": [
+      [
+        14,
+        14,
+        null,
+        true
+      ],
+      [
+        15,
+        14,
+        "home",
+        true
+      ],
+      [
+        14,
+        15,
+        "away",
+        true
+      ],
+      [
+        16,
+        10,
+        "home",
+        false
+      ],
+      [
+        15,
+        15,
+        null,
+        false
+      ],
+      [
+        15,
+        0,
+        "home",
+        true
+      ]
+    ]
+  },
+  {
+    "rule": {
+      "mode": "target",
+      "target_points": 15,
+      "win_by": 2,
+      "point_cap": null
+    },
+    "cases": [
+      [
+        15,
+        14,
+        null,
+        true
+      ],
+      [
+        16,
+        14,
+        "home",
+        true
+      ],
+      [
+        16,
+        15,
+        null,
+        true
+      ],
+      [
+        17,
+        15,
+        "home",
+        true
+      ],
+      [
+        17,
+        14,
+        "home",
+        false
+      ],
+      [
+        101,
+        100,
+        null,
+        true
+      ],
+      [
+        102,
+        100,
+        "home",
+        true
+      ],
+      [
+        14,
+        16,
+        "away",
+        true
+      ]
+    ]
+  },
+  {
+    "rule": {
+      "mode": "target",
+      "target_points": 15,
+      "win_by": 2,
+      "point_cap": 17
+    },
+    "cases": [
+      [
+        15,
+        14,
+        null,
+        true
+      ],
+      [
+        16,
+        14,
+        "home",
+        true
+      ],
+      [
+        17,
+        16,
+        "home",
+        true
+      ],
+      [
+        17,
+        14,
+        "home",
+        false
+      ],
+      [
+        17,
+        17,
+        null,
+        false
+      ],
+      [
+        18,
+        17,
+        "home",
+        false
+      ]
+    ]
+  },
+  {
+    "rule": {
+      "mode": "fixed_deuce",
+      "target_points": 15,
+      "deuce_points": 17
+    },
+    "cases": [
+      [
+        15,
+        13,
+        "home",
+        true
+      ],
+      [
+        15,
+        14,
+        null,
+        true
+      ],
+      [
+        16,
+        14,
+        null,
+        true
+      ],
+      [
+        17,
+        14,
+        "home",
+        true
+      ],
+      [
+        17,
+        16,
+        "home",
+        true
+      ],
+      [
+        17,
+        13,
+        "home",
+        false
+      ],
+      [
+        16,
+        13,
+        "home",
+        false
+      ],
+      [
+        16,
+        17,
+        "away",
+        true
+      ]
+    ]
+  },
+  {
+    "rule": {
+      "mode": "target",
+      "target_points": 21,
+      "win_by": 2,
+      "point_cap": 25
+    },
+    "cases": [
+      [
+        21,
+        20,
+        null,
+        true
+      ],
+      [
+        22,
+        20,
+        "home",
+        true
+      ],
+      [
+        25,
+        24,
+        "home",
+        true
+      ],
+      [
+        25,
+        20,
+        "home",
+        false
+      ]
+    ]
+  },
+  {
+    "rule": {
+      "mode": "target",
+      "target_points": 15,
+      "win_by": 1,
+      "point_cap": null
+    },
+    "cases": [
+      [
+        15,
+        14,
+        "home",
+        true
+      ],
+      [
+        15,
+        15,
+        null,
+        false
+      ],
+      [
+        16,
+        15,
+        "home",
+        false
+      ],
+      [
+        16,
+        14,
+        "home",
+        false
+      ]
+    ]
+  },
+  {
+    "rule": {
+      "mode": "target",
+      "target_points": 15,
+      "win_by": 1,
+      "point_cap": 17
+    },
+    "cases": [
+      [
+        15,
+        14,
+        "home",
+        true
+      ],
+      [
+        15,
+        15,
+        null,
+        false
+      ],
+      [
+        16,
+        15,
+        "home",
+        false
+      ],
+      [
+        17,
+        16,
+        "home",
+        false
+      ]
+    ]
+  }
+]

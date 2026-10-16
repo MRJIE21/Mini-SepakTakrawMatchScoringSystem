@@ -7,6 +7,7 @@ import {
   clear, emptyState, loadingState, errorState, categoryLabel,
 } from '../ui.js';
 import { summarize } from '../scoring.js';
+import { DEFAULT_RULES, rulesSummary } from '../teamRules.js';
 
 const canScore = () => ['admin', 'organizer', 'recorder'].includes(state.user.role);
 /* 同步状态固定文案，区分“本机已存”和“服务器已确认”（§12.3、Q18） */
@@ -138,7 +139,8 @@ function draftCard(draft, reload) {
     return h('div.panel', card);
   }
   if (draft.kind === 'match') {
-    const sum = summarize(draft.events || []);
+    const sum = summarize(draft.events || [], draft.rules || DEFAULT_RULES);
+    card.append(h('div.small.muted', rulesSummary(draft.rules || DEFAULT_RULES)));
     card.append(h('div.small',
       `局分 ${sum.winners.home}:${sum.winners.away} · `,
       sum.sets.filter((s) => s.home_points || s.away_points)

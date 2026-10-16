@@ -10,6 +10,7 @@ import {
 } from '../ui.js';
 import { addPoint, summarize, undoEvent, isSetOpen, SET_CAP } from '../scoring.js';
 import { buildMatchPayload } from '../submit.js';
+import { DEFAULT_RULES, normalizeRules, rulesSummary, sameRules, setsToWin } from '../teamRules.js';
 
 const canScore = () => ['admin', 'organizer', 'recorder'].includes(state.user.role);
 const DRAFT_STATUS = {
@@ -72,7 +73,7 @@ async function render({ el, params, refresh }) {
         h('button.btn', { onclick: () => refresh() }, '刷新场次'),
       )),
     h('div.small.muted', '比赛过程中逐分记录并保存在本机；单场结束后核对并提交完整得分过程和最终结果。'
-      + `每局 ${SET_CAP} 分（含第三局），三局两胜。`),
+      + '每场按对应项目规则计分，领取后规则固定。'),
     h('div.small.muted.mt', `列表更新于 ${fmtDateTime(lastUpdated)}`),
     listOffline ? h('div.warn-box.mt',
       '当前离线：下方为最近一次成功载入的场次列表，可继续记录，恢复联网后再提交。') : null,
@@ -192,7 +193,7 @@ async function renderConsole(matchId, container, params) {
     return h('div.panel', h('h3', `${match.home.label} vs ${match.away.label}`),
       h('div.warn-box', match.blocked_reason || '当前场次暂不能记录'),
       ['admin', 'organizer'].includes(state.user.role) ? h('button.btn.mt', {
-        onclick: () => go('scheduling', { category: match.category_id }),
+        onclick: () => go('workspace', { event: state.eventId, category: match.category_id, tab: 'schedule' }),
       }, '核对编排方案') : null);
   }
   if (match.status === 'ready' && !offline) {
@@ -243,6 +244,7 @@ async function renderConsole(matchId, container, params) {
       category_id: match.category_id, event_identity: identity,
       plan_version: match.plan_version, base_version: match.base_version,
       lineup, status: 'recording', result_status: 'normal', events: [],
+      rules: normalizeRules(match.rules || DEFAULT_RULES), rules_hash: match.rules_hash,
       active_set: null,
       uid: newUid('match'),
       request_context: requestContext,
@@ -257,14 +259,16 @@ async function renderConsole(matchId, container, params) {
   }
   /* 兼容升级前的草稿：正在计分的未结束局保持开启；空白草稿或两局之间等待手动开局。 */
   if (!Object.prototype.hasOwnProperty.call(draft, 'active_set')) {
-    const oldSum = summarize(draft.events);
+    const oldSum = summarize(draft.events, draft.rules || DEFAULT_RULES);
     const current = oldSum.sets.find((set) => set.set_no === oldSum.currentSet);
     draft.active_set = current && !current.winner_side && (current.home_points || current.away_points)
       ? oldSum.currentSet : null;
   }
-  if (!summarize(draft.events).matchOver && !['failed', 'submitting'].includes(draft.status)) {
+  if (!summarize(draft.events, draft.rules || DEFAULT_RULES).matchOver && !['failed', 'submitting'].includes(draft.status)) {
     draft.status = draft.active_set ? 'recording' : 'waiting';
   }
+  const rulesChanged = !sameRules(draft.rules || DEFAULT_RULES, match.rules || DEFAULT_RULES)
+    || (!!draft.rules_hash && draft.rules_hash !== match.rules_hash);
   const lineupChanged = draft.lineup.home !== lineup.home || draft.lineup.away !== lineup.away;
 
   const message = h('div.info-box', { style: 'display:none' });
@@ -272,6 +276,9 @@ async function renderConsole(matchId, container, params) {
     message.style.display = '';
     message.className = 'warn-box';
     message.textContent = '当前离线：使用本机已下载的场次数据继续记录，恢复联网后提交前请再次核对双方与轮次。';
+  } else if (rulesChanged) {
+    message.style.display = ''; message.className = 'warn-box';
+    message.textContent = '本机记录与正式场次规则不一致，已暂停记录和提交。请导出恢复副本并联网核对，输入不会自动换规则。';
   } else if (lineupChanged) {
     message.style.display = '';
     message.className = 'warn-box';
@@ -302,16 +309,16 @@ async function renderConsole(matchId, container, params) {
   let storageFailed = false;
   let lastSavedAt = draft.updated_at || '';
   const editBlocked = () => saving || storageFailed || draft.storage_conflict || draft.submission_unknown
-    || draft.status === 'submitting' || lineupChanged || !canScore() || match.status !== 'ready';
+    || draft.status === 'submitting' || rulesChanged || summarize(draft.events, draft.rules || DEFAULT_RULES).errors.length || lineupChanged || !canScore() || match.status !== 'ready';
 
   const draw = () => {
-    const sum = summarize(draft.events);
+    const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
     board.querySelector('[data-role=points-home]').textContent = sum.liveScore[0];
     board.querySelector('[data-role=points-away]').textContent = sum.liveScore[1];
     board.querySelector('[data-role=sets-home]').textContent = sum.winners.home;
     board.querySelector('[data-role=sets-away]').textContent = sum.winners.away;
     clear(setStrip);
-    for (let i = 1; i <= 3; i += 1) {
+    for (let i = 1; i <= sum.rules.max_sets; i += 1) {
       const s = sum.sets.find((x) => x.set_no === i);
       const cls = s && s.winner_side ? 'done' : (sum.currentSet === i ? 'live' : '');
       setStrip.append(h(`div.set-pill ${cls}`,
@@ -402,7 +409,7 @@ async function renderConsole(matchId, container, params) {
 
   const pushPoint = async (side) => {
     if (editBlocked()) return;
-    const sum = summarize(draft.events);
+    const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
     if (!isSetOpen(sum, draft.active_set)) {
       toast(`请先点击“开始第 ${sum.currentSet} 局记录”`, 'error');
       return;
@@ -411,7 +418,7 @@ async function renderConsole(matchId, container, params) {
     if (!e) { toast('该局已结束或比赛已结束', 'error'); return; }
     draft.events.push(e);
     draft.payload = null;      // 内容变了，重试时必须重新构造提交包
-    const after = summarize(draft.events);
+    const after = summarize(draft.events, draft.rules || DEFAULT_RULES);
     if (after.matchOver) {
       draft.status = 'review';
       draft.active_set = null;
@@ -427,7 +434,7 @@ async function renderConsole(matchId, container, params) {
 
   const startSet = async (setNo) => {
     if (editBlocked()) return;
-    const sum = summarize(draft.events);
+    const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
     if (sum.matchOver || Number(setNo) !== Number(sum.currentSet)) return;
     draft.active_set = sum.currentSet;
     draft.status = 'recording';
@@ -441,7 +448,7 @@ async function renderConsole(matchId, container, params) {
     if (!e) { toast('没有可撤回的记分', 'error'); return; }
     draft.events.push(e);
     draft.payload = null;
-    const sum = summarize(draft.events);
+    const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
     draft.active_set = sum.matchOver ? null : sum.currentSet;
     draft.status = sum.matchOver ? 'review' : 'recording';
     await persist();
@@ -470,7 +477,7 @@ async function renderConsole(matchId, container, params) {
   board.append(
     sideCol('home', match.home, 'home'),
     h('div.vs',
-      h('div.match-format', '三局两胜 · 每局 15 分'),
+      h('div.match-format', rulesSummary(draft.rules || DEFAULT_RULES)),
       h('div.match-score-label', '大比分'),
       matchScore,
       h('div.current-set-label', '各局比分'),
@@ -483,7 +490,7 @@ async function renderConsole(matchId, container, params) {
   const review = h('div.panel', { style: 'margin-top:12px' });
   const drawReview = () => {
     clear(review);
-    const sum = summarize(draft.events);
+    const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
     const homeName = match.home.label || '主队';
     const awayName = match.away.label || '客队';
     const status = draft.result_status;
@@ -496,7 +503,7 @@ async function renderConsole(matchId, container, params) {
         : status === 'normal' && sum.matchOver
           ? (sum.winners.home > sum.winners.away ? homeName : awayName) : '未分出胜方';
     const reason = status === 'normal' && !sum.matchOver
-      ? '正常完成须先记录到一方赢得两局，当前不可提交。'
+      ? `正常完成须先记录到一方赢得${setsToWin(draft.rules || DEFAULT_RULES)}局，当前不可提交。`
       : status === 'cancelled' && sum.sets.length
         ? '取消的比赛不能包含已记录局分；请撤回记分或选择实际结果状态。'
         : '';
@@ -534,7 +541,7 @@ async function renderConsole(matchId, container, params) {
       h('div.row.mt',
         h('button.btn.btn-primary.btn-lg', {
           disabled: saving || storageFailed || draft.status === 'submitting' || !canScore()
-            || (match.status !== 'ready' && !draft.submission_unknown) || lineupChanged || !!reason,
+            || (match.status !== 'ready' && !draft.submission_unknown) || rulesChanged || sum.errors.length || lineupChanged || !!reason,
           onclick: async () => submitMatch(match, draft, draw, persist, params),
         }, draft.status === 'failed' ? '重试提交' : '核对无误，提交成绩'),
         h('span.small.muted', draft.status === 'failed'
@@ -557,10 +564,13 @@ async function renderConsole(matchId, container, params) {
 }
 
 async function submitMatch(match, draft, draw, persist, params) {
-  const sum = summarize(draft.events);
+  const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
   if (draft.result_status === 'normal' && !sum.matchOver) {
-    toast('正常完成须先记录到一方赢得两局', 'error');
+    toast(`正常完成须先记录到一方赢得${setsToWin(draft.rules || DEFAULT_RULES)}局`, 'error');
     return;
+  }
+  if (sum.errors.length || !sameRules(draft.rules || DEFAULT_RULES, match.rules || DEFAULT_RULES)) {
+    toast('记录过程或比赛规则需要核对，请保留输入', 'error'); return;
   }
   const payload = buildMatchPayload(draft, sum);
   draft.status = 'submitting';
@@ -632,6 +642,7 @@ function renderFinishedView(match, offline, params) {
       h('div.row.tight', h('button.btn', { onclick: () => returnToQueue(match, params) }, '返回列表'),
         h('span.badge.badge-ok', `结果版本 ${match.base_version}`))),
     offline ? h('div.warn-box.mb', '当前离线，展示的是本机缓存的场次信息。') : null,
+    h('p.small.muted', rulesSummary(match.rules || DEFAULT_RULES)),
     h('div.row.small.muted',
       h('span', `${match.home.label || '主队'} vs ${match.away.label || '客队'}`),
       h('span', `结果：${match.result_status_name || match.result_status}`),

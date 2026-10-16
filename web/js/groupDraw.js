@@ -1,11 +1,12 @@
 /* 学校抽签面板：揭晓进度以服务器为准，失败重试沿用同一请求标识。 */
 import { api, newUid, openHtml } from './api.js';
-import { groupName } from './schedulingFlow.js';
+import { groupName } from './groupNames.js';
 import { h, clear, field, selectInput, textInput, numberInput, table, statusBadge, toast, confirmAsync, promptDialog, categoryLabel } from './ui.js';
 
 const STATUS = { drawing: ['抽签进行中', 'info'], complete: ['已抽完 · 待确认', 'warn'], confirmed: ['分组已确认', 'ok'], cancelled: ['已撤销', ''] };
 
-export function renderGroupDraw(cat, initial, onChange) {
+export function renderGroupDraw(cat, initial, onChange, { client = api, isCurrent = () => true,
+  openNotice = path => openHtml(path, {}, '小组抽签分组表') } = {}) {
   const panel = h('section.panel.group-draw', { id: 'group-draw', 'aria-label': '学校小组抽签' });
   panel.addEventListener('fullscreenchange', () => {
     const button = panel.querySelector('[data-fullscreen]');
@@ -31,13 +32,14 @@ export function renderGroupDraw(cat, initial, onChange) {
   }
 
   async function reload() {
-    data = await api.get(`/api/categories/${cat.id}/group-draw`);
+    data = await client.get(`/api/categories/${cat.id}/group-draw`);
+    if (!isCurrent()) return;
     drawPanel();
     onChange(data.draw);
   }
 
   async function mutate(action, values = {}) {
-    if (busy) return;
+    if (busy || !isCurrent()) return;
     busy = true;
     errorBox.classList.add('hidden');
     const previous = data.draw;
@@ -51,10 +53,10 @@ export function renderGroupDraw(cat, initial, onChange) {
     controls.forEach((control) => { control.disabled = true; });
     try {
       const path = `/api/categories/${cat.id}/group-draw${action === 'start' ? '' : `/${action}`}`;
-      await api.post(path, { ...body, request_uid: uid });
+      await client.post(path, { ...body, request_uid: uid });
       await reload();
       retries.delete(key);
-      if (action === 'confirm') toast('抽签分组已确认，可保存并生成赛程预览', 'ok');
+      if (action === 'confirm') toast('抽签分组已确认，可在比赛赛程建立小组赛阶段', 'ok');
       if (action === 'cancel') toast('已撤销本次抽签，原记录保留', 'ok');
     } catch (error) {
       errorBox.textContent = error.status === 0
@@ -90,7 +92,7 @@ export function renderGroupDraw(cat, initial, onChange) {
         ? `本次 ${draw.total} 所学校 · ${draw.capacities.length} 个小组` : `当前已报名 ${data.roster.length} 所学校`))),
     h('div.row.tight', active ? statusBadge(...STATUS[draw.status]) : null,
       h('button.btn.small', { onclick: async () => {
-        if (busy) return;
+        if (busy || !isCurrent()) return;
         try { await reload(); } catch (error) { toast(error.message, 'error'); }
       } }, '刷新抽签状态')));
     panel.append(header, errorBox);
@@ -155,12 +157,12 @@ export function renderGroupDraw(cat, initial, onChange) {
       if (draw.status === 'complete') actions.append(h('button.btn.btn-primary', { disabled,
         onclick: async () => {
           await leaveFullscreen();
-          if (await confirmAsync('确认抽签分组', '确认后按此分组生成赛程，重新抽签须填写撤销原因。', '确认分组')) await mutate('confirm');
+          if (await confirmAsync('确认抽签分组', '确认后在比赛赛程引用此分组，重新抽签须填写撤销原因。', '确认分组')) await mutate('confirm');
         } }, '确认抽签分组'));
       if (draw.status === 'confirmed') {
-        panel.append(h('div.info-box.mt', `已由 ${draw.confirmed_by_name} 于 ${draw.confirmed_at} 确认。下方编排将使用这份分组。`));
+        panel.append(h('div.info-box.mt', `已由 ${draw.confirmed_by_name} 于 ${draw.confirmed_at} 确认。比赛赛程可引用这份分组。`));
         actions.append(h('button.btn', { disabled: draw.stale, onclick: async () => {
-          try { await openHtml(`/api/categories/${cat.id}/group-draw/notice.html`, {}, '小组抽签分组表'); }
+          try { await openNotice(`/api/categories/${cat.id}/group-draw/notice.html`); }
           catch (error) { toast(error.message, 'error'); }
         } }, '打印分组表'));
       }
@@ -173,7 +175,7 @@ export function renderGroupDraw(cat, initial, onChange) {
       if (!data.blocked_reason) actions.append(h('button.btn.btn-ghost', { onclick: async () => {
         await leaveFullscreen();
         const reason = await promptDialog({ title: '撤销本次抽签', label: '撤销原因', required: true, multiline: true,
-          hint: '原结果和已揭晓过程会保留；已生成的预览需重新保存并生成。', okLabel: '撤销抽签' });
+          hint: '原结果和已揭晓过程会保留；已用于正式赛程时须先处理后续依赖。', okLabel: '撤销抽签' });
         if (reason) await mutate('cancel', { reason });
       } }, '撤销本次抽签'));
       panel.append(actions, h('details.draw-log.mt', h('summary', '查看抽签过程'),

@@ -35,6 +35,16 @@ def owner_info(conn, kind, sid):
 
 
 def claim(ctx, kind, sid, transfer=False):
+    with db.tx(ctx.conn):
+        result = _claim(ctx, kind, sid, transfer)
+        if kind == 'match':
+            from . import team_rules_store
+            row = db.q1(ctx.conn, 'SELECT * FROM matches WHERE id=?', (sid,))
+            result.update(team_rules_store.freeze(ctx.conn, row))
+        return result
+
+
+def _claim(ctx, kind, sid, transfer=False):
     if kind not in ('match', 'individual'):
         raise bad_request('记录类型无效')
     if kind == 'match':
@@ -107,10 +117,10 @@ def authorize(ctx, scope):
         if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
             return
         raise forbidden('当前角色没有该操作权限')
-    shared = [r'/api/events/\d+/structure', r'/api/events/\d+/venues', r'/api/matches', r'/api/matches/\d+', r'/api/receipts/[\w.-]+']
+    shared = [r'/api/events/\d+/structure', r'/api/events/\d+/team-rules', r'/api/events/\d+/venues', r'/api/matches', r'/api/matches/\d+', r'/api/receipts/[\w.-]+', r'/api/categories/\d+/team-rules']
     recorder = [r'/api/scoring/queue', r'/api/scoring/match/\d+', r'/api/submissions/[\w.-]+',
                 r'/api/matches/\d+/submissions', r'/api/categories/\d+/participations', r'/api/categories/\d+/individual-results']
-    viewer = [r'/api/categories/\d+/plan', r'/api/plans/\d+', r'/api/pools/\d+/standings',
+    viewer = [r'/api/categories/\d+/(?:plan|schedule)', r'/api/plans/\d+', r'/api/pools/\d+/standings',
               r'/api/categories/\d+/placements', r'/api/groups/\d+/school-totals', r'/api/events/\d+/school-totals']
     if not any(re.fullmatch(pattern, path) for pattern in shared + (recorder if role == 'recorder' else viewer)):
         raise forbidden('当前角色不能查看该部分')
@@ -134,13 +144,23 @@ def filter_result(ctx, result):
         if result.get('submission') and result['submission']['user_id'] != ctx.user['id']: return {'found': False}
     if role == 'viewer':
         if 'placements' in result: result['placements'] = [p for p in result['placements'] if p['status'] == 'confirmed']
-        if result.get('plan') and result['plan']['status'] not in ('locked', 'running', 'archived'): result['plan'] = None
+        if result.get('plan'):
+            plan = result['plan']
+            public_stages = [s for s in plan.get('stages', []) if
+                s.get('params', {}).get('schedule_meta', {}).get('state') == 'confirmed' or
+                (not s.get('params', {}).get('schedule_meta') and plan['status'] in ('locked', 'running', 'archived'))]
+            if public_stages:
+                plan['stages'] = public_stages
+            else:
+                result['plan'] = None
         if 'available_formats' in result: result['available_formats'] = []
         if 'matches' in result and 'list_revision' not in result:
+            from .api.common import match_plan_effective
             result['matches'] = [m for m in result['matches'] if m['status'] in ('ready', 'finished') and
-                (not m.get('plan_id') or db.q1(ctx.conn, "SELECT id FROM plans WHERE id=? AND status IN ('locked','running','archived')", (m['plan_id'],)))]
+                (not m.get('plan_id') or match_plan_effective(ctx.conn, m))]
         if result.get('match'):
             match = result['match']
-            if match.get('plan_id') and not db.q1(ctx.conn, "SELECT id FROM plans WHERE id=? AND status IN ('locked','running','archived')", (match['plan_id'],)):
+            from .api.common import match_plan_effective
+            if match.get('plan_id') and not match_plan_effective(ctx.conn, match):
                 raise forbidden('赛程尚未发布')
     return result

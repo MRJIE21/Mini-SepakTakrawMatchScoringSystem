@@ -1,3 +1,5 @@
+import { scheduleFixture } from './helpers/schedule_fixture.mjs';
+import { installLegacyRosterFixture } from './helpers/legacy_roster_fixture.mjs';
 /* 设置分区、种子编辑与记录队列的真实浏览器回归；只使用独立临时服务。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -100,6 +102,7 @@ try {
     localStorage.setItem('stss_token', token); localStorage.setItem('stss_event', String(event));
   }, { token, event: identity.event_id });
   page = await context.newPage();
+  await installLegacyRosterFixture(page);
   page.setDefaultTimeout(10000);
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   const route = async suffix => {
@@ -107,7 +110,7 @@ try {
     await page.waitForLoadState('networkidle');
     await page.waitForFunction(() => !document.querySelector('.content .spinner'));
   };
-  const registration = category => `workspace?event=${identity.event_id}&group=${category.group_id}&category=${category.id}&tab=registration`;
+  const registration = category => `legacyRosterTest?event=${identity.event_id}&group=${category.group_id}&category=${category.id}&tab=registration`;
   const setupNav = () => page.getByRole('navigation', { name: '赛事设置导航', exact: true });
   const chosenGroup = () => page.locator('.setup-group-choice[aria-current="true"]');
   const screenshot = async name => {
@@ -455,11 +458,7 @@ try {
     await route(registration(team)); await roster.waitFor();
   }
   await page.setViewportSize({ width: 1365, height: 900 });
-  const plan = (await api('POST', `/api/categories/${team.id}/plan`, { stages: [
-    { kind: 'round_robin', name: '小组循环', params: { pool_count: 1, legs: 1 } },
-  ] })).plan_id;
-  await api('POST', `/api/plans/${plan}/generate`, {});
-  await api('POST', `/api/plans/${plan}/lock`, {});
+  const plan = (await scheduleFixture(api, identity, team.id)).plan_id;
   // 浏览器仍持有原来的可编辑页面，在锁定竞态中也必须采用最新后台状态。
   await seed().fill('4'); await seed().press('Enter');
   await page.locator('.seed-readonly').first().waitFor();

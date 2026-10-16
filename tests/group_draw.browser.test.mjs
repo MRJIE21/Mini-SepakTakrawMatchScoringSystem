@@ -1,3 +1,4 @@
+import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 独立赛事库验证抽签全过程；不会写入实际赛事。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -71,8 +72,7 @@ try {
   page = await context.newPage();
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  await page.goto(`${base}/#/workspace?event=${event.event_id}&group=${group.id}&category=${cat.id}&tab=schedule`);
-  await page.getByRole('button', { name: '小组抽签', exact: true }).click();
+  await page.goto(`${base}/#/workspace?event=${event.event_id}&group=${group.id}&category=${cat.id}&tab=schedule&view=groups`);
   const panel = page.getByRole('region', { name: '学校小组抽签', exact: true });
   assert.equal(await panel.getByLabel('小组数量', { exact: true }).getAttribute('min'), '1');
   assert.equal(await panel.getByLabel('小组数量', { exact: true }).getAttribute('max'), null);
@@ -109,7 +109,8 @@ try {
   await panel.getByText('操作结果待核实。请刷新抽签状态，或用原操作重试。', { exact: true }).waitFor();
   assert.equal((await api('GET', drawPath)).draw.revealed, 3);
   await page.unroute('**/group-draw/next');
-  await panel.getByRole('button', { name: '抽下一所学校', exact: true }).click();
+  await page.getByRole('button', { name: '核实并重试原操作', exact: true }).click();
+  await panel.getByRole('button', { name: '刷新抽签状态', exact: true }).click();
   await panel.getByText('3 / 10 所学校已揭晓', { exact: true }).waitFor();
   assert.equal((await api('GET', drawPath)).draw.revealed, 3);
   await panel.getByRole('button', { name: '一键完成抽签', exact: true }).click();
@@ -161,27 +162,17 @@ try {
   await page.getByRole('dialog', { name: '确认抽签分组', exact: true }).getByRole('button', { name: '确认分组', exact: true }).click();
   await panel.getByText('分组已确认', { exact: true }).waitFor();
   const confirmed = (await api('GET', drawPath)).draw;
-  const guided = page.locator('.schedule-flow');
-  assert.equal(await guided.getByLabel('分组数量', { exact: true }).isDisabled(), true);
-  const generatedResponse = page.waitForResponse((response) => /\/api\/plans\/\d+\/generate$/.test(response.url()) && response.request().method() === 'POST');
-  await page.getByRole('button', { name: '保存并查看赛程预览', exact: true }).click();
-  const generated = await generatedResponse;
-  assert.equal(generated.ok(), true);
-  const generation = await generated.json();
-  if (generation.warnings.length) {
-    await page.getByRole('dialog', { name: '编排提示（请在锁定前核对）', exact: true }).getByRole('button', { name: '关闭', exact: true }).click();
-  }
-  await page.getByText('预览待核对', { exact: true }).waitFor();
-  await page.getByText('预计 18 场比赛：小组赛 12 场＋淘汰赛 6 场。', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '建立小组赛阶段', exact: true }).count(), 0);
+  await page.getByRole('link', { name: '进入赛程', exact: true }).click();
+  await page.getByRole('button', { name: '建立小组赛阶段', exact: true }).click();
+  const preview = page.getByRole('dialog', { name: '核对阶段 · 小组赛', exact: true });
+  await preview.getByRole('button', { name: '确认正式赛程', exact: true }).click();
+  await preview.waitFor({ state: 'detached' });
   const plan = (await api('GET', `/api/categories/${cat.id}/plan`)).plan;
-  assert.equal(plan.params.stages[0].params.draw_id, confirmed.id);
-  assert.deepEqual(plan.stages[0].pools.map((p) => p.members.map((m) => m.participation_id)),
-    confirmed.groups.map((g) => g.members.map((m) => m.participation_id)));
-  for (const match of plan.stages[1].matches.filter((m) => m.round_no === 1)) {
-    if (match.home.type === 'pool_rank' && match.away.type === 'pool_rank') {
-      assert.notEqual(match.home.source_pool_id, match.away.source_pool_id, '淘汰首轮不得同组相遇');
-    }
-  }
+  assert.deepEqual(plan.stages[0].pools.map(p => p.members.map(m => m.participation_id)), confirmed.groups.map(g => g.members.map(m => m.participation_id)));
+  assert.equal(plan.stages[0].matches.length, 0, 'draw confirmation does not create fixtures');
+  await page.getByRole('navigation', { name: '项目工作台导航', exact: true }).getByRole('link', { name: '分组', exact: true }).click();
+  await panel.getByText('分组已确认', { exact: true }).waitFor();
   const popupWait = page.waitForEvent('popup');
   await panel.getByRole('button', { name: '打印分组表', exact: true }).click();
   const popup = await popupWait;
@@ -199,11 +190,13 @@ try {
   await page.locator('.toast.show').waitFor({ state: 'hidden' });
   await page.locator('.toast').evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
   await panel.screenshot({ path: path.join(artifacts, 'draw-mobile.png') });
-  await api('POST', `/api/plans/${plan.id}/lock`, {});
+  const stage = plan.stages[0];
+  const frozen = { event_id: event.event_id, event_uuid: event.event_uuid, deployment_id: (await api('GET', '/api/events')).deployment_id };
   await page.reload();
-  await panel.getByText('方案已锁定，请由管理员解锁后调整', { exact: true }).waitFor();
+  await panel.getByText('分组已用于正式赛程，调整前须处理后续引用并撤回小组赛阶段确认', { exact: true }).waitFor();
   assert.equal(await panel.getByRole('button', { name: '撤销本次抽签', exact: true }).count(), 0);
-  await api('POST', `/api/plans/${plan.id}/unlock`, { reason: '核对分组' });
+  await api('POST', `/api/schedule-stages/${stage.id}/unconfirm`, { event_identity: frozen, request_uid: crypto.randomUUID(), base_revision: 2, reason: '核对分组' });
+  await api('DELETE', `/api/schedule-stages/${stage.id}`, { category_id: cat.id, event_identity: frozen, request_uid: crypto.randomUUID(), base_revision: 3 });
   await page.reload();
   await panel.getByRole('button', { name: '撤销本次抽签', exact: true }).click();
   const reasonDialog = page.getByRole('dialog', { name: '撤销本次抽签', exact: true });

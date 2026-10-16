@@ -1,3 +1,4 @@
+import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -97,12 +98,7 @@ try {
   for(let i=1;i<=4;i++) await api('POST','/api/categories/'+team.id+'/enrollments',{
     school:{name:'刷新测试学校'+i},members:[1,2,3,4].map(n=>({name:'队员'+i+'-'+n,gender:'male',jersey_no:String(n)})),captain_index:0,seed_no:i,
   });
-  const plan=(await api('POST','/api/categories/'+team.id+'/plan',{stages:[
-    {kind:'round_robin',name:'小组赛',params:{pool_count:2,legs:1,assign:'snake'}},
-    {kind:'single_elim',name:'决赛',params:{sources:[{type:'pool_rank',stage:1,pool:0,rank:1},{type:'pool_rank',stage:1,pool:1,rank:1}]}},
-  ]})).plan_id;
-  await api('POST','/api/plans/'+plan+'/generate',{});
-  await api('POST','/api/plans/'+plan+'/lock',{});
+  const plan = (await scheduleFixture(api, identity, team.id, { groupCount: 2, knockout: true })).plan_id;
   const matches=(await api('GET','/api/matches?category_id='+team.id)).matches;
   for(const match of matches.filter(m=>m.status==='ready')) {
     const detail=(await api('GET','/api/matches/'+match.id)).match;

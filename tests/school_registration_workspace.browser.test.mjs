@@ -1,3 +1,4 @@
+import { installLegacyRosterFixture } from './helpers/legacy_roster_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -79,6 +80,7 @@ try {
     localStorage.setItem('stss_token', token); localStorage.setItem('stss_event', String(event));
   }, { token, event: identity.event_id });
   const page = await context.newPage(), errors = [];
+  await installLegacyRosterFixture(page);
   page.on('pageerror', error => errors.push(error.message));
   const url = `${base}/#/schoolRegistration?event=${identity.event_id}&school=${school.id}`;
   await page.goto(url);
@@ -187,7 +189,7 @@ try {
   const legacy = await api('POST', `/api/events/${identity.event_id}/schools`, { name: '旧入口同名测试校', group_id: group.id });
   const original = await api('POST', `/api/schools/${legacy.school_id}/athletes`, { name: '同名队员', gender: 'male', note: '一班' });
   await api('POST', `/api/categories/${individual.id}/participations`, { athlete_id: original.athlete_id });
-  await page.goto(`${base}/#/workspace?event=${identity.event_id}&group=${group.id}&category=${team.id}&tab=registration`);
+  await page.goto(`${base}/?legacy_fixture=1#/legacyRosterTest?event=${identity.event_id}&group=${group.id}&category=${team.id}`);
   await page.getByRole('button', { name: '添加参赛学校', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '添加项目报名', exact: true });
   await dialog.getByPlaceholder('搜索或新建学校').fill('旧入口同名测试校');

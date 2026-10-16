@@ -5,6 +5,7 @@ import { readPendingRequest, writePendingRequest, removePendingRequest, captureP
 import { h, clear, field, textInput, selectInput as uiSelectInput, formDialog, confirmAsync, toast, setPageLeaveGuard } from '../ui.js';
 import { clone, submission, eligibility, occupancy } from '../schoolRegistrationModel.js';
 import { openSchoolImport } from '../schoolRegistrationImport.js';
+import { workspaceSchoolLink, resolveSchoolContext } from '../workspaceContext.js';
 
 const genders = [{ value: '', label: '待补充' }, { value: 'male', label: '男子' }, { value: 'female', label: '女子' }];
 const choices = [{ value: 'unresolved', label: '尚未决定' }, { value: 'participate', label: '参加报名' },
@@ -14,48 +15,40 @@ const genderName = (value) => genders.find((x) => x.value === value)?.label || v
 const btn = (label, click, primary = false, attrs = {}) => h(`button.btn${primary ? '.btn-primary' : ''}`, { type: 'button', onclick: click, ...attrs }, label);
 const personLabel = (p) => `${p.name} · ${genderName(p.gender)}${p.note ? ` · ${p.note}` : ''}${p.key.startsWith('new:') ? ' · 待提交' : ''}`;
 
+/* 学校报名已收敛到项目工作台：页面只负责工作台正文，换页由 workspace 统一处理。 */
+const scopedClient = (requestContext, signal) => ({
+  get: (path) => api.get(path, { context: requestContext, signal }),
+  post: (path, body) => api.post(path, body, { context: requestContext }),
+  del: (path) => api.del(path, {}, { context: requestContext }),
+});
+
+/* 学校报名详情的规范地址：工作台报名名单页签 + 目标学校。 */
 async function render({ el, params, requestContext = captureRequestContext(), signal, isCurrent: routeIsCurrent = () => true }) {
-  const client = { get: path => api.get(path, { context: requestContext, signal }),
-    post: (path, body) => api.post(path, body, { context: requestContext }),
-    del: path => api.del(path, {}, { context: requestContext }) };
+  const client = scopedClient(requestContext, signal);
   if (params.event && Number(params.event) !== state.eventId) await reloadShell(Number(params.event));
+  if (!el.isConnected || signal?.aborted || !routeIsCurrent()) return;
   if (!state.eventId) { el.append(h('div.panel', '请先选择赛事。')); return; }
-  const structure = state.structure || await loadStructure();
-  if (!params.school) {
-    const { schools } = await client.get(`/api/events/${state.eventId}/schools`);
-    const group = selectInput([{ value: '', label: '全部组别' }, ...structure.groups.map((g) => ({ value: g.id, label: g.name }))], params.group || '');
-    group.setAttribute('aria-label', '组别');
-    const list = h('div.school-registration-list', { role: 'list', 'aria-label': '学校报名列表' });
-    const count = h('div.small.muted', { role: 'status', 'aria-live': 'polite' });
-    const draw = () => {
-      clear(list);
-      const visible = schools.filter((s) => !group.value || s.group_id === Number(group.value));
-      count.textContent = `共 ${visible.length} 所学校`;
-      for (const s of visible) list.append(h('div.school-registration-item', { role: 'listitem' },
-        btn([
-          h('div.school-registration-school-info',
-            h('div.school-registration-school-name', s.name),
-            h('div.school-registration-school-meta', { id: `school-registration-meta-${s.id}` },
-              h('span.badge.badge-info', s.group_name || '未分组'), h('span', `${s.athlete_count} 位人员`))),
-          h('span.school-registration-school-arrow', { 'aria-hidden': 'true' }, '›'),
-        ], () => go('schoolRegistration', { event: state.eventId, school: s.id }), false,
-        { class: 'school-registration-school', 'aria-label': s.name, 'aria-describedby': `school-registration-meta-${s.id}` })));
-      if (!visible.length) list.append(h('p.muted.school-registration-empty', '该组别尚无学校，可以新增学校后整理报名。'));
-    };
-    group.onchange = draw;
-    el.append(h('div.page-head', h('div', h('h2', '学校报名'), h('p.muted', '按学校整理人员与项目；项目工作台继续处理赛程和成绩。'))),
-      h('section.panel.school-registration-directory',
-        h('div.toolbar.school-registration-filter', field('组别', group), btn('新增学校', () => newSchool(structure), true)),
-        h('div.school-registration-list-head', h('h3', '学校名单'), count), list));
-    draw(); return;
-  }
-  const sid = Number(params.school), path = `/api/schools/${sid}`;
+  const embedded = params.embedded === 'workspace';
   const selectedEvent = state.eventId, selectedToken = getToken();
   const currentPage = () => el.isConnected && !signal?.aborted && routeIsCurrent()
     && state.eventId === selectedEvent && state.user?.id === requestContext.user_id && getToken() === selectedToken
     && state.events.find(event => event.id === selectedEvent)?.uuid === requestContext.identity?.event_uuid;
+  const structure = state.structure || await loadStructure();
+  if (!currentPage()) return;
+  const schoolData = params.school ? params.initialSchoolData
+    || await client.get(`/api/schools/${encodeURIComponent(params.school)}/registration-workspace`) : null;
+  if (!currentPage()) return;
+  const resolved = resolveSchoolContext(structure, params, schoolData);
+  if (!embedded) {
+    location.hash = workspaceSchoolLink({ eventId: selectedEvent, groupId: resolved.group?.id,
+      categoryId: resolved.category?.id, schoolId: resolved.schoolId, profile: params.profile });
+    return;
+  }
+  if (!params.school) return renderDirectory({ el, groupId: resolved.group?.id,
+    categoryId: resolved.category?.id, requestContext, signal, isCurrent: currentPage });
+  const sid = resolved.schoolId, path = `/api/schools/${sid}`;
   const storageScope = capturePendingRequestScope();
-  let latest = await client.get(`${path}/registration-workspace`);
+  let latest = schoolData;
   const requestKey = `school-registration:${sid}:${latest.group.id}`;
   let base = latest, model = clone(latest), pending = readPendingRequest(requestKey, storageScope), preview = null, busy = false;
   let pendingUnknown = !!pending;
@@ -68,19 +61,24 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   const deleteButton = state.user.role === 'admin' ? btn('删除学校', deleteSchool, false,
     { class: 'school-registration-delete', 'aria-describedby': 'school-delete-status' }) : null;
   deleteFeedback.id = 'school-delete-status';
-  const backButton = btn('返回学校列表', () => go('schoolRegistration', { event: selectedEvent }));
+  const listLink = () => workspaceSchoolLink({
+    eventId: selectedEvent, groupId: latest.group.id, categoryId: resolved.category?.id, profile: params.profile,
+  });
+  const backButton = btn('返回学校列表', () => { location.hash = listLink(); });
   const content = h('div.school-registration-content'), tabs = h('div.school-registration-tabs', { role: 'tablist' });
   const status = h('div.small', { role: 'status' }), errors = h('div.form-errors.hidden', { role: 'alert' });
   const summary = h('div.school-registration-summary');
   const action = btn('预览整批变更', () => runPreview(), true, { dataset: { action: 'school-preview' } });
   const importButton = btn('粘贴 / 导入学校报名表', () => openSchoolImport({ path, text: model.importText || '', payload: currentPayload(),
+    requestContext, signal, isCurrent: currentPage,
     onText: (text) => { model.importText = text; edit(); },
     onApply: (imported) => { model.people = imported.people; model.projects = imported.projects; model.importText = ''; errors.textContent = ''; errors.classList.add('hidden'); edit(); draw(); },
     onConflict: (error) => { handleError(error); draw(); } }));
+  importButton.classList.add('school-registration-import');
   const discard = btn('取消未提交修改', async () => {
-    if (busy || pending || deletionLocked()) return;
+    if (busy || pending || deletionLocked() || !currentPage()) return;
     if (await confirmAsync('取消未提交修改', '取消当前未提交的人员和项目调整，重新读取后台报名。', '取消修改')) {
-      await reload();
+      if (currentPage()) await reload();
     }
   });
   el.append(h('div.page-head.school-registration-detail-head', h('div', h('h2', model.school.name), h('p.muted', `${model.group.name} · 本届学校报名工作台`)),
@@ -114,7 +112,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     schoolDeleted = true;
     deletionStatus('idle');
     toast('学校已删除，正在读取学校名单', 'ok');
-    go('schoolRegistration', { event: selectedEvent });
+    location.hash = listLink();
   }
   async function deleteSchool() {
     if (!deleteButton || deleteButton.disabled || !currentPage()) return;
@@ -188,12 +186,14 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     return storageOK;
   }
   function updateStatus() {
+    if (!currentPage()) return;
     status.textContent = pending ? (storageOK ? '提交结果待核实；请用原内容重试' : '提交结果待核实，请保持页面打开并重试')
       : changed() ? '当前修改尚未提交' : '已读取后台报名';
   }
   function edit() { preview = null; savedResult = null; updateStatus(); updateFooter(); }
-  function showError(error) { errors.textContent = error.message || String(error); errors.classList.remove('hidden'); }
+  function showError(error) { if (!currentPage()) return; errors.textContent = error.message || String(error); errors.classList.remove('hidden'); }
   function handleError(error) {
+    if (!currentPage()) return;
     showError(error);
     if (error.code === 'registration_stale') {
       latest = error.detail.latest; base = latest; model = clone(latest); preview = null;
@@ -202,6 +202,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     }
   }
   function updateFooter() {
+    if (!currentPage()) return;
     const n = latest.projects.filter((p) => p.choice === 'participate').length;
     const no = latest.projects.filter((p) => p.choice === 'not_participating').length;
     const unresolved = latest.projects.filter((p) => p.choice === 'unresolved').length;
@@ -238,7 +239,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     return confirmAsync('离开学校报名', pending
       ? (storageOK ? '提交结果待核实。返回此学校后将核实或重试原提交。' : '原提交尚未核实且未能保留，请继续留在此页重试。离开可能丢失提交内容。')
       : '当前修改尚未提交，离开后将放弃这些修改。下次进入将显示后台已保存的报名。', '离开');
-  }, () => !schoolDeleted && (busy || deletionLocked() || (!pending && changed()) || (!!pending && !storageOK)));
+  }, () => !schoolDeleted && (busy || deletionLocked() || (!pending && changed()) || (!!pending && !storageOK)), currentPage);
 
   function input(value, onChange, attrs = {}) {
     const control = textInput(value, attrs);
@@ -246,11 +247,12 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     return control;
   }
   function draw() {
+    if (!currentPage()) return;
     clear(tabs); clear(content);
     for (const [key, label] of [['people', '人员名单'], ['projects', '项目报名'], ['review', '核对与提交']]) tabs.append(
       btn(label, () => { tab = key; draw(); }, tab === key, { role: 'tab', 'aria-selected': String(tab === key) }));
     if (savedResult) content.append(h('div.notice', '学校报名已保存，请读取后台最新名单。', btn('读取最新正式名单', async () => {
-      if (busy || deletionLocked()) return;
+      if (busy || deletionLocked() || !currentPage()) return;
       busy = true; updateFooter();
       try { await reload(); } catch (error) { showError(error); }
       finally { busy = false; draw(); }
@@ -339,6 +341,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   function drawProjects() {
     const grid = h('div.school-registration-projects');
     content.append(h('p.small.muted', '跨项目调整：先在原项目移除人员或退出，再分配到目标项目，最后统一预览提交。'), grid);
+    if (!model.categories.length) content.append(h('p.notice', '本组别尚未开设项目，可先在“人员名单”整理人员，配置项目后再报名。'));
     for (const cat of model.categories) {
       const p = model.projects.find((p) => p.category_id === cat.id);
       const original = base.projects.find((x) => x.category_id === cat.id);
@@ -431,25 +434,29 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   }
   async function reload() {
     const formal = await client.get(`${path}/registration-workspace`);
+    if (!currentPage()) return;
+    resolveSchoolContext(structure, params, formal);
     latest = formal;
     base = latest; model = clone(latest); preview = null; pending = null; savedResult = null;
     removePendingRequest(requestKey, storageScope); status.textContent = '已读取正式报名'; errors.classList.add('hidden'); draw();
   }
   async function runPreview() {
-    if (busy || deletionLocked()) return;
+    if (busy || deletionLocked() || !currentPage()) return;
     if (pending || preview) { await commit(); return; }
     if (hasUnaddedPeople()) { showError(new Error('请先添加新增人员，或清空尚未添加的输入，再预览提交。')); return; }
     if (model.importText?.trim()) { showError(new Error('还有尚未合入的表格，请打开导入窗口核对并合入，或清空表格输入。')); return; }
     busy = true; errors.classList.add('hidden'); updateFooter();
     try {
-      preview = await client.post(`${path}/registration-preview`, currentPayload());
+      const result = await client.post(`${path}/registration-preview`, currentPayload());
+      if (!currentPage()) return;
+      preview = result;
       tab = 'review';
     } catch (error) {
       handleError(error);
     } finally { busy = false; draw(); }
   }
   async function commit() {
-    if (busy || deletionLocked()) return;
+    if (busy || deletionLocked() || !currentPage()) return;
     if (!pending) {
       pending = { ...currentPayload(), preview_hash: preview.preview_hash, request_uid: crypto.randomUUID() };
     }
@@ -458,7 +465,9 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     busy = true; errors.classList.add('hidden'); updateFooter();
     try {
       savedResult = await client.post(`${path}/registration-commit`, pending);
-      pending = null; preview = null; removePendingRequest(requestKey, storageScope); toast('学校报名已整批保存');
+      pending = null; preview = null; removePendingRequest(requestKey, storageScope);
+      if (!currentPage()) return;
+      toast('学校报名已整批保存');
     } catch (error) {
       handleError(error);
       // HTTP validation rejection guarantees no writes; network/5xx may have committed.
@@ -470,23 +479,72 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       pendingUnknown = !!pending && (retryingUnknown || !!error.outcome_unknown);
       retainRequest();
     } finally { busy = false; }
+    if (!currentPage()) return;
     if (savedResult) {
-      try { await loadStructure(); await reload(); } catch (error) { showError(new Error(`报名已保存，读取最新名单失败：${error.message}`)); draw(); }
+      try { await loadStructure(); if (currentPage()) await reload(); } catch (error) { showError(new Error(`报名已保存，读取最新名单失败：${error.message}`)); draw(); }
     } else draw();
   }
   status.textContent = pending ? '已读取后台报名；上次提交结果待核实' : '已读取后台报名';
   draw();
 }
 
-function newSchool(structure) {
+/* 学校名单只显示当前组别；项目筛选仅定位待补资料学校。 */
+async function renderDirectory({ el, groupId = null, categoryId = null, profile = null, incomplete = [],
+    requestContext = captureRequestContext(), signal, isCurrent = () => true }) {
+  const eventId = state.eventId, token = getToken(), client = scopedClient(requestContext, signal);
+  const alive = () => el.isConnected && !signal?.aborted && isCurrent() && state.eventId === eventId
+    && state.user?.id === requestContext.user_id && getToken() === token
+    && state.events.find(event => event.id === eventId)?.uuid === requestContext.identity?.event_uuid;
+  const structure = state.structure || await loadStructure();
+  if (!alive()) return;
+  const resolved = resolveSchoolContext(structure, { event: eventId, group: groupId, category: categoryId });
+  const { schools } = await client.get(`/api/events/${eventId}/schools`);
+  if (!alive()) return;
+  if (!Array.isArray(schools) || schools.some(school => !Number.isInteger(school.id) || school.event_id !== eventId)) {
+    throw new Error('学校名单读取不完整，请重新读取');
+  }
+  const filtered = profile === 'incomplete' && !!categoryId;
+  const gaps = new Map((incomplete || []).map(item => [item.school_id, item.gaps]));
+  const visible = schools.filter(school => school.group_id === resolved.group?.id && (!filtered || gaps.has(school.id)));
+  const list = h('div.school-registration-list', { role: 'list', 'aria-label': '学校报名列表' });
+  const link = school => workspaceSchoolLink({ eventId, groupId: school.group_id,
+    categoryId: resolved.category?.id, schoolId: school.id, profile: filtered ? profile : null });
+  for (const school of visible) list.append(h('div.school-registration-item', { role: 'listitem' },
+    btn([
+      h('div.school-registration-school-info',
+        h('div.school-registration-school-name', school.name),
+        h('div.school-registration-school-meta', { id: `school-registration-meta-${school.id}` },
+          h('span.badge.badge-info', school.group_name || resolved.group.name), h('span', `${school.athlete_count} 位人员`),
+          filtered ? h('span.badge.badge-warn', '资料待补充') : null)),
+      h('span.school-registration-school-arrow', { 'aria-hidden': 'true' }, '›'),
+    ], () => { if (alive()) location.hash = link(school); }, false,
+    { class: 'school-registration-school', 'aria-label': school.name, 'aria-describedby': `school-registration-meta-${school.id}` })));
+  if (!visible.length) list.append(h('p.muted.school-registration-empty', filtered
+    ? '当前项目没有资料待补充的学校。' : '该组别尚无学校，可以新增学校后整理报名。'));
+  el.append(h('section.panel.school-registration-directory',
+    h('div.school-registration-list-head', h('div', h('h3', '学校名单'),
+      h('p.small.muted', '选择学校，统一整理本组别的人员与全部项目报名。')),
+      btn('新增学校', () => { if (alive()) newSchool(structure, resolved, { client, eventId, alive }); }, true)),
+    filtered ? h('div.notice.school-registration-filter', h('span', '仅显示当前项目资料待补充的学校'),
+      h('a.btn', { href: workspaceSchoolLink({ eventId, groupId, categoryId }) }, '查看全部学校')) : null,
+    h('p.small.muted', { role: 'status', 'aria-live': 'polite' }, `共 ${visible.length} 所学校`), list));
+}
+
+function newSchool(structure, resolved, { client, eventId, alive }) {
   const name = textInput(''), short = textInput('');
-  const group = selectInput(structure.groups.map((g) => ({ value: g.id, label: g.name })), structure.groups[0]?.id);
-  formDialog({ title: '新增学校', sections: [{ body: h('div', field('学校名称', name, { required: true, name: 'name' }), field('简称', short, { name: 'short_name' }), field('组别', group, { name: 'group_id' })) }],
+  const group = selectInput(structure.groups.map(item => ({ value: item.id, label: item.name })), resolved.group.id);
+  formDialog({ title: '新增学校', sections: [{ body: h('div', field('学校名称', name, { required: true, name: 'name' }),
+    field('简称', short, { name: 'short_name' }), field('组别', group, { name: 'group_id' })) }],
     actions: [{ label: '创建并整理报名', primary: true, run: async ({ close }) => {
-      const result = await api.post(`/api/events/${state.eventId}/schools`, { name: name.value.trim(), short_name: short.value.trim(), group_id: Number(group.value) });
+      if (!alive()) return;
+      const target = resolveSchoolContext(structure, { event: eventId, group: group.value,
+        category: Number(group.value) === resolved.group.id ? resolved.category?.id : null });
+      const result = await client.post(`/api/events/${eventId}/schools`, {
+        name: name.value.trim(), short_name: short.value.trim(), group_id: target.group.id });
+      if (!alive()) return;
       close();
-      go('schoolRegistration', { event: state.eventId, school: result.school_id });
+      location.hash = workspaceSchoolLink({ eventId, groupId: target.group.id, categoryId: target.category?.id, schoolId: result.school_id });
     } }] });
 }
 
-registerView({ name: 'schoolRegistration', label: '学校报名', render });
+registerView({ name: 'schoolRegistration', label: '学校报名', render, renderDirectory });

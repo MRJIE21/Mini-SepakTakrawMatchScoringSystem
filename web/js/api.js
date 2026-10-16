@@ -187,8 +187,10 @@ function filenameFromDisposition(header, fallback) {
   try { return decodeURIComponent(m[1]); } catch { return m[1]; }
 }
 
-async function fetchBlob(path, query) {
-  const frozen = captureRequestContext();
+async function fetchBlob(path, query, frozen = captureRequestContext()) {
+  if (frozen.user_id !== apiUser?.id || frozen.auth_fingerprint && frozen.auth_fingerprint !== sha256(new TextEncoder().encode(getToken()))) {
+    throw new ApiError(409, { code: 'account_changed', message: '账号已切换，请返回原账号核对下载', outcome: 'not_committed' });
+  }
   const context = frozen.identity;
   const headers = {};
   const token = getToken();
@@ -209,8 +211,10 @@ async function fetchBlob(path, query) {
   } finally { clearTimeout(timer); }
 }
 
-export async function download(path, query = {}, fallbackName = 'download') {
+export async function download(path, query = {}, fallbackName = 'download', { isCurrent = () => true } = {}) {
+  if (!isCurrent()) return;
   const { blob, filename } = await fetchBlob(path, query);
+  if (!isCurrent()) return;
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -222,11 +226,14 @@ export async function download(path, query = {}, fallbackName = 'download') {
 }
 
 /* 打印用 HTML：先同步开窗（避免被拦截），再写入带令牌请求到的内容 */
-export async function openHtml(path, query = {}, title = '') {
+export async function openHtml(path, query = {}, title = '', options = {}) {
   const win = window.open('', '_blank');
-  const { blob } = await fetchBlob(path, query);
+  let blob;
+  try { ({ blob } = await fetchBlob(path, query, options.context)); }
+  catch (error) { win?.close(); throw error; }
   const html = await blob.text();
   if (!win) throw new ApiError(0, { message: '浏览器拦截了新窗口，请允许弹出窗口后重试' });
+  if (options.isCurrent && !options.isCurrent()) { win.close(); return null; }
   win.document.open();
   win.document.write(html);
   win.document.close();

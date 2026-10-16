@@ -1,6 +1,6 @@
 """报表导出：赛程、成绩、学校总分 CSV 与打印记录表（设计大纲 8、12.1）。
 
-打印记录表按 15 分制排版，第三局同样为 15 分，不使用旧表 11 分格。
+打印记录表按各场保存的比赛规则生成局列和说明。
 """
 from __future__ import annotations
 
@@ -68,28 +68,32 @@ def export_schedule(ctx):
     ids = [r["home_actual"] for r in rows if r["home_actual"]] + \
           [r["away_actual"] for r in rows if r["away_actual"]]
     labels = participation_display_map(ctx.conn, list(set(ids)))
+    pool_names = {p['id']: p['name'] for p in db.q(ctx.conn, 'SELECT id,name FROM pools')}
     out = [["大组别", "项目", "阶段", "小组", "轮次", "场次序号", "状态", "结果状态",
-            "主队/选手", "客队/选手", "场地", "计划时间", "备注"]]
+            "主队/选手", "客队/选手", "场地", "计划时间", "备注", "比赛编号"]]
     for r in rows:
         out.append([
             r["group_name"], _category_label(r["category_name"], r["category_gender"]),
             r["stage_name"] or "", r["pool_name"] or "",
             r["round_label"], r["seq"], r["status"], r["result_status"] or "",
-            labels.get(r["home_actual"], _source_text(r, "home")),
-            labels.get(r["away_actual"], _source_text(r, "away")),
+            labels.get(r["home_actual"], _source_text(r, "home", pool_names)),
+            labels.get(r["away_actual"], _source_text(r, "away", pool_names)),
             r["venue_name"] or "", r["scheduled_at"] or "", advancement.display_note(ctx.conn, r),
+            f"M{r['id']:03d}",
         ])
     return _csv_response(out, "schedule.csv")
 
 
-def _source_text(row, side: str) -> str:
+def _source_text(row, side: str, pool_names=None) -> str:
     stype = row[f"{side}_source_type"]
     if stype == "bye":
         return "轮空"
     if stype == "pool_rank":
-        return f"小组第{row[f'{side}_source_rank']}名（待定）"
+        return f"{(pool_names or {}).get(row[f'{side}_source_pool'], '小组')}第{row[f'{side}_source_rank']}名（待定）"
     if stype in ("match_winner", "match_loser"):
-        return "前场胜者（待定）" if stype == "match_winner" else "前场负者（待定）"
+        ref = row[f'{side}_source_match']
+        source = f'M{ref:03d}' if ref else '前场'
+        return source + ('胜者（待定）' if stype == 'match_winner' else '负者（待定）')
     return "待定"
 
 
@@ -199,14 +203,14 @@ PAGE_HEAD = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
  .foot{margin-top:16px;font-size:13px;line-height:2}
  .box{display:inline-block;width:16px;height:16px;border:1px solid #333;vertical-align:-3px;margin:0 4px}
  @media print{ .noprint{display:none} body{margin:10mm} }
-</style></head><body>
+</style>__RULE_PAGE_STYLE__</head><body>
 <div class="noprint"><button onclick="window.print()">打印记录表</button>
- <span style="margin-left:12px;font-size:13px">场次 __ID__ · 每局 15 分（含第三局）</span></div>"""
+ <span style="margin-left:12px;font-size:13px">场次 __ID__ · 规则见下方</span></div>"""
 
 
 @route("GET", r"/api/exports/record-sheet.html")
 def export_record_sheet(ctx):
-    """打印用记录表：每局 15 分制，第三局同样为 15 分。
+    """打印用记录表采用本场固定规则，较长局制使用横向页面。
 
     所有来自数据库的文本（队名、姓名、组别名等）都做 HTML 转义，
     避免录入内容里的标签在打印页中被执行。
@@ -218,8 +222,11 @@ def export_record_sheet(ctx):
     away_name = esc(info["away"]["label"] or info["away"]["type_name"])
     players_home = _team_line(ctx.conn, info["home"]["participation_id"])
     players_away = _team_line(ctx.conn, info["away"]["participation_id"])
-    set_cols = "".join(f"<th>第{i}局</th>" for i in range(1, config.TEAM_MAX_SETS + 1))
-    blanks = "".join("<td></td>" for _ in range(config.TEAM_MAX_SETS)) + "<td></td>"
+    maximum = info['rules']['max_sets']
+    team_width = 20 if maximum >= 5 else 28
+    players_width = 25 if maximum >= 5 else 30
+    set_cols = "".join(f"<th>第{i}局</th>" for i in range(1, maximum + 1))
+    blanks = "".join("<td></td>" for _ in range(maximum)) + "<td></td>"
     body = f"""<h1>藤球比赛记录表</h1>
 <div class="meta">
   <div>大组别：{esc(info.get('group_name'))}</div>
@@ -231,11 +238,11 @@ def export_record_sheet(ctx):
   <div>日期：____________</div>
 </div>
 <table>
-  <tr><th style="width:28%">队伍</th><th style="width:30%">上场队员</th>{set_cols}<th>局分</th></tr>
+  <tr><th style="width:{team_width}%">队伍</th><th style="width:{players_width}%">上场队员</th>{set_cols}<th>局分</th></tr>
   <tr class="setrow"><td>{home_name}（主）</td><td style="text-align:left">{players_home}</td>{blanks}</tr>
   <tr class="setrow"><td>{away_name}（客）</td><td style="text-align:left">{players_away}</td>{blanks}</tr>
 </table>
-<p style="font-size:13px">每局 15 分制，14 平后再得 1 分即结束，15 分封顶；三局两胜，第三局同样为 15 分。</p>
+<p style="font-size:13px">比赛规则：{esc(info['rules_summary'])}</p>
 <table>
   <tr><th>结果</th><td>正常完成 <span class="box"></span></td><td>主队弃权 <span class="box"></span></td>
       <td>客队弃权 <span class="box"></span></td><td>未完成 <span class="box"></span></td>
@@ -245,7 +252,8 @@ def export_record_sheet(ctx):
   记录员：____________ 裁判员：____________ 核对：____________<br>
   得分过程见系统提交记录；本表与系统提交内容不一致时以核对后的系统记录为准。
 </div>"""
-    page = PAGE_HEAD.replace("__ID__", str(match_id)) + body + "</body></html>"
+    extra_style = '<style>@page{size:A4 landscape}table{table-layout:fixed}th,td{overflow-wrap:anywhere}</style>' if maximum >= 5 else ''
+    page = PAGE_HEAD.replace("__ID__", f'M{match_id:03d}').replace('__RULE_PAGE_STYLE__', extra_style) + body + "</body></html>"
     return Response(page.encode("utf-8"), 200, "text/html; charset=utf-8")
 
 
@@ -272,9 +280,9 @@ def export_record_sheet_csv(ctx):
     for s in info.get("sets", []):
         out.append([f"第{s['set_no']}局", s["home_points"], s["away_points"], s["winner_side"]])
     if not info.get("sets"):
-        for i in range(1, config.TEAM_MAX_SETS + 1):
+        for i in range(1, info['rules']['max_sets'] + 1):
             out.append([f"第{i}局", "", "", ""])
-    out.append(["结果状态", info["result_status_name"], "制表口径", "每局 15 分，含第三局"])
+    out.append(["结果状态", info["result_status_name"], "制表口径", info['rules_summary']])
     return _csv_response(out, f"record_{match_id}.csv")
 
 
@@ -346,7 +354,10 @@ def export_category_notice(ctx):
                  r["points"] if _has_rank(r) else "—", "名次已确认" if _has_rank(r) else "名次待确认"] for r in data]
         pending = sum(not _has_rank(r) for r in data)
         title = "三人赛项目名次表"
-        note = f"三局两胜，每局 15 分（含第三局）；集体项目积分双倍计入。待确认 {pending} 所学校。"
+        from .. import team_rules_store
+        current_rules = team_rules_store.project(ctx.conn, category_id)
+        rules_label = '赛事统一规则' if current_rules['rules_scope'] == 'event' else '尚未统一，此项目原规则'
+        note = f"{rules_label}：{current_rules['rules_summary']}；历史场次按各场记录规则。集体项目积分双倍计入。待确认 {pending} 所学校。"
     return _print_response(ctx, title, cat["event_name"], scope, headers, rows,
                            note + " 请经核对、签字后公示；成绩更正后请重新打印。")
 

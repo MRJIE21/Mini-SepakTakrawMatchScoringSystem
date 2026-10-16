@@ -1,5 +1,6 @@
 """1.1 迭代验收：真实 HTTP 导入事务、赛事身份、幂等与打印成绩完整性。"""
 from __future__ import annotations
+from helpers.historical_schedule import fixture_schedule
 
 import csv
 import io
@@ -22,6 +23,7 @@ class QuietHandler(Handler):
 
 
 class ImportExportsTest(unittest.TestCase):
+    fixture_schedule = fixture_schedule
     @classmethod
     def setUpClass(cls):
         cls.old_config = config.DATA_DIR, config.DB_PATH, config.EVENTS_DIR
@@ -301,10 +303,10 @@ class ImportExportsTest(unittest.TestCase):
         self.commit(text, self.preview(text))
         other = self.team_text("第二大学")
         self.commit(other, self.preview(other))
-        plan = self.req("POST", f"/api/categories/{cat_id}/plan", {"stages": [
+        plan = self.fixture_schedule("POST", f"/api/categories/{cat_id}/plan", {"stages": [
             {"kind": "round_robin", "name": "小组赛", "params": {"pool_count": 1}}]})
-        self.req("POST", f"/api/plans/{plan['plan_id']}/generate", {})
-        self.req("POST", f"/api/plans/{plan['plan_id']}/lock", {})
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/generate", {})
+        self.fixture_schedule("POST", f"/api/plans/{plan['plan_id']}/lock", {})
         blocked = self.preview(self.team_text("锁定后新学校"))
         self.assertEqual(blocked["items"][0]["code"], "plan_locked")
         self.assertEqual(self.count("schools"), 2)

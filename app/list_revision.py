@@ -6,12 +6,13 @@ def install(conn):
     conn.execute('CREATE TABLE IF NOT EXISTS match_list_meta (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0)')
     conn.execute('INSERT OR IGNORE INTO match_list_meta(id,revision) VALUES(1,0)')
     dependencies = {
+        'events': ('team_rules_json', 'team_rules_revision', 'team_rules_state'),
         'matches': ('category_id', 'plan_id', 'stage_id', 'pool_id', 'venue_id', 'scheduled_at',
                     'status', 'result_status', 'round_no', 'round_label', 'seq', 'home_actual',
-                    'away_actual', 'home_participation', 'away_participation', 'reset_state'),
+                    'away_actual', 'home_participation', 'away_participation', 'reset_state', 'rules_hash'),
         'groups': ('event_id', 'name', 'code', 'seq'),
-        'categories': ('group_id', 'name', 'kind', 'gender', 'seq'),
-        'stages': ('plan_id', 'name', 'seq', 'kind'),
+        'categories': ('group_id', 'name', 'kind', 'gender', 'seq', 'team_rules_json', 'rules_revision'),
+        'stages': ('plan_id', 'name', 'seq', 'kind', 'params_json'),
         'schools': ('name', 'short_name'),
         'teams': ('name', 'school_id'),
         'athletes': ('name', 'school_id'),

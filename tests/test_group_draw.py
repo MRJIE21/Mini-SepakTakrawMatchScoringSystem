@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from app.domain.group_draw import draw_groups
-from app.domain.formats import plan_pools
+from app.domain.slots import pool_name
 import test_api as fixtures
 from app import config, db
 
@@ -53,7 +53,7 @@ class DrawRulesTest(unittest.TestCase):
                     steps = draw_groups(roster, method, caps, random.Random(seed))
                     self.assertEqual(sorted(s['participation_id'] for s in steps), list(range(count)))
                     self.assertEqual([sum(s['group'] == g for s in steps) for g in range(len(caps))], caps)
-        names = [name for name, _ in plan_pools(27, {'pool_count': 27})]
+        names = [pool_name(i) for i in range(27)]
         self.assertEqual(len(set(names)), 27)
         self.assertEqual((names[0], names[25], names[26]), ('A小组', 'Z小组', 'AA小组'))
 
@@ -62,9 +62,7 @@ class DrawApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         task_tmp = Path(tempfile.mkdtemp(prefix='stss_draw_'))
-        config.DATA_DIR = task_tmp
-        config.DB_PATH = task_tmp / 'registry.db'
-        config.EVENTS_DIR = task_tmp / 'events'
+        config.DATA_DIR, config.DB_PATH, config.EVENTS_DIR = task_tmp, task_tmp / 'registry.db', task_tmp / 'events'
         fixtures.ApiTest.setUpClass.__func__(cls)
 
     tearDownClass = classmethod(fixtures.ApiTest.tearDownClass.__func__)
@@ -81,195 +79,91 @@ class DrawApiTest(unittest.TestCase):
     def setUp(self):
         fixtures.ApiTest.setUp(self)
         self.use_event_database = True
-        self.fx = self.build_event(team_count=10, individual_count=0)
+        self.fx = self.build_event(10, 0)
         self.path = f"/api/categories/{self.fx['team_cat']}/group-draw"
 
-    def current(self):
-        return self.ok('GET', self.path)['draw']
+    def current(self): return self.ok('GET', self.path)['draw']
 
-    def start(self, method='random', caps=None, **extra):
-        body = {'method': method, 'capacities': caps or [4, 3, 3], 'request_uid': str(uuid.uuid4()),
-                'roster_hash': self.ok('GET', self.path)['roster_hash'], **extra}
-        return self.ok('POST', self.path, body)['draw']
+    def packet(self, **body):
+        return {'request_uid': str(uuid.uuid4()), 'event_identity': self.event_identity, **body}
 
-    def action_body(self, **extra):
-        draw = self.current()
-        return {'draw_id': draw['id'], 'base_rev': draw['rev'], 'request_uid': str(uuid.uuid4()), **extra}
+    def start(self, caps=None, method='random', **extra):
+        return self.ok('POST', self.path, self.packet(method=method, capacities=caps or [4, 3, 3],
+            roster_hash=self.ok('GET', self.path)['roster_hash'], **extra))['draw']
 
     def action(self, name, **extra):
-        return self.ok('POST', self.path + '/' + name, self.action_body(**extra))['draw']
+        draw = self.current()
+        return self.ok('POST', self.path + '/' + name, self.packet(draw_id=draw['id'], base_rev=draw['rev'], **extra))['draw']
 
-    def plan(self, draw_id):
-        return self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'name': '小组赛', 'params': {'pool_count': 3, 'legs': 1, 'assign': 'snake', 'draw_id': draw_id}},
-            {'kind': 'single_elim', 'name': '淘汰赛', 'params': {'third_place': True, 'sources': [
-                {'type': 'pool_rank', 'stage': 1, 'pool': group, 'rank': rank}
-                for rank in (1, 2) for group in range(3)]}},
-        ]})['plan_id']
+    def draft(self, draw_id, cat=None, expect=200, code=None):
+        result = self.request('POST', f"/api/categories/{cat or self.fx['team_cat']}/schedule/stages",
+            self.packet(base_revision=0, definition={'purpose': 'group', 'name': '小组赛', 'draw_id': draw_id}), expect=expect)
+        if code: self.assertEqual(result['code'], code)
+        return result
 
-    def test_single_group_draw_keeps_confirmation_and_generation_guards(self):
-        self.start(caps=[10])
-        plain = self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 1}}]})['plan_id']
-        self.err('POST', f'/api/plans/{plain}/generate', expect=409, code='draw_not_confirmed')
-        self.action('complete')
-        confirmed = self.action('confirm')
-        self.err('POST', f'/api/plans/{plain}/generate', expect=409, code='draw_groups_changed')
-        plan_id = self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 1, 'draw_id': confirmed['id']}}]})['plan_id']
-        self.assertEqual(self.ok('POST', f'/api/plans/{plan_id}/generate')['matches_total'], 45)
-        pools = self.ok('GET', f'/api/plans/{plan_id}')['plan']['stages'][0]['pools']
-        self.assertEqual(len(pools), 1)
-        self.assertEqual([m['participation_id'] for m in pools[0]['members']],
-                         [m['participation_id'] for m in confirmed['groups'][0]['members']])
+    def confirm_stage(self, stage):
+        sid = stage['stage_id']
+        preview = self.ok('POST', f'/api/schedule-stages/{sid}/preview', self.packet(base_revision=1))
+        self.ok('POST', f'/api/schedule-stages/{sid}/confirm', self.packet(base_revision=1,
+            definition_hash=preview['definition_hash'], basis_hash=preview['basis_hash']))
+        return self.ok('GET', f"/api/categories/{self.fx['team_cat']}/plan")['plan']['stages'][0]
 
-    def test_single_school_groups_generate_without_inventing_matches(self):
-        self.start(caps=[8, 1, 1])
-        self.action('complete')
-        confirmed = self.action('confirm')
-        plan_id = self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 3, 'draw_id': confirmed['id']}}]})['plan_id']
-        generated = self.ok('POST', f'/api/plans/{plan_id}/generate')
-        self.assertEqual(generated['matches_total'], 28)
-        pools = self.ok('GET', f'/api/plans/{plan_id}')['plan']['stages'][0]['pools']
-        self.assertEqual([len(p['members']) for p in pools], [8, 1, 1])
+    def test_single_group_and_unequal_groups_keep_members_without_auto_fixtures(self):
+        for capacities in ([10], [8, 1, 1]):
+            if self.current(): self.action('cancel', reason='重新验证组数')
+            draw = self.start(capacities); self.action('complete'); draw = self.action('confirm')
+            stage = self.draft(draw['id'])
+            formal = self.confirm_stage(stage)
+            self.assertEqual(formal['matches'], [])
+            self.assertEqual([len(p['members']) for p in formal['pools']], capacities)
+            for pool, group in zip(formal['pools'], draw['groups']):
+                self.assertEqual([p['participation_id'] for p in pool['members']], [p['participation_id'] for p in group['members']])
+            self.ok('POST', f"/api/schedule-stages/{stage['stage_id']}/unconfirm", self.packet(base_revision=2, reason='核对'))
+            self.ok('DELETE', f"/api/schedule-stages/{stage['stage_id']}", self.packet(category_id=self.fx['team_cat'], base_revision=3))
 
     def test_more_than_26_group_names_match_draw_print_and_schedule(self):
-        self.fx = self.build_event(team_count=27, individual_count=0)
-        self.path = f"/api/categories/{self.fx['team_cat']}/group-draw"
-        self.start(caps=[1] * 27)
-        self.action('complete')
-        confirmed = self.action('confirm')
-        names = [g['name'] for g in confirmed['groups']]
-        self.assertEqual(len(set(names)), 27)
+        self.fx = self.build_event(27, 0); self.path = f"/api/categories/{self.fx['team_cat']}/group-draw"
+        self.start([1] * 27); self.action('complete'); draw = self.action('confirm')
+        formal = self.confirm_stage(self.draft(draw['id']))
+        names = [p['name'] for p in formal['pools']]
         self.assertEqual((names[0], names[25], names[26]), ('A组', 'Z组', 'AA组'))
-        plan_id = self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 27, 'draw_id': confirmed['id']}}]})['plan_id']
-        self.assertEqual(self.ok('POST', f'/api/plans/{plan_id}/generate')['matches_total'], 0)
-        pools = self.ok('GET', f'/api/plans/{plan_id}')['plan']['stages'][0]['pools']
-        self.assertEqual([p['name'] for p in pools], names)
-        notice = self.request('GET', self.path + '/notice.html', raw=True)
-        self.assertEqual(notice[0], 200)
-        self.assertIn('AA组', notice[1].decode())
+        self.assertEqual(names, [g['name'] for g in draw['groups']])
+        status, html = self.request('GET', self.path + '/notice.html', raw=True)
+        self.assertEqual(status, 200); self.assertIn('AA组', html.decode())
 
-    def test_lifecycle_retry_revision_and_fixed_schedule(self):
-        start = self.start()
-        self.assertEqual(start['status'], 'drawing')
-        self.assertEqual(start['steps'], [])
-        self.err('POST', self.path + '/confirm', self.action_body(), expect=409, code='draw_incomplete')
-        body = self.action_body()
+    def test_lifecycle_retry_revision_confirmation_and_use_guard(self):
+        draw = self.start(); self.assertEqual(draw['steps'], [])
+        self.draft(draw['id'], expect=409, code='draw_not_confirmed')
+        body = self.packet(draw_id=draw['id'], base_rev=draw['rev'])
         first = self.ok('POST', self.path + '/next', body)['draw']
         self.assertEqual(first['revealed'], 1)
         self.assertTrue(self.ok('POST', self.path + '/next', body)['replayed'])
-        self.assertEqual(self.current()['revealed'], 1)
-        self.err('POST', self.path + '/next', dict(body, request_uid=str(uuid.uuid4())), expect=409, code='draw_stale_revision')
-        complete = self.action('complete')
-        self.assertEqual(complete['steps'][0], first['steps'][0])
-        self.assertEqual([len(g['members']) for g in complete['groups']], [4, 3, 3])
-        confirmed = self.action('confirm')
-        plan_id = self.plan(confirmed['id'])
-        expected = [[p['participation_id'] for p in g['members']] for g in confirmed['groups']]
-        for _ in range(2):
-            generated = self.ok('POST', f'/api/plans/{plan_id}/generate')
-            self.assertEqual(generated['matches_total'], 18)
-            pools = self.ok('GET', f'/api/plans/{plan_id}')['plan']['stages'][0]['pools']
-            self.assertEqual([[m['participation_id'] for m in p['members']] for p in pools], expected)
-        notice = self.request('GET', self.path + '/notice.html', raw=True)
-        self.assertEqual(notice[0], 200)
-        self.assertIn('学校小组抽签分组表', notice[1].decode())
-        self.ok('POST', f'/api/plans/{plan_id}/lock')
-        self.err('POST', self.path + '/cancel', self.action_body(reason='调整'), expect=403)
-        self.err('POST', self.path, {'request_uid': str(uuid.uuid4())}, expect=403)
-        self.ok('POST', f'/api/plans/{plan_id}/unlock', {'reason': '核对分组'})
-        self.action('cancel', reason='调整组数')
-        self.err('POST', f'/api/plans/{plan_id}/generate', expect=409, code='draw_not_confirmed')
-        self.assertEqual(self.ok('GET', self.path)['history'][0]['cancel_reason'], '调整组数')
-        self.assertNotEqual(self.start()['id'], confirmed['id'])
+        self.err('POST', self.path + '/next', {**body, 'request_uid': str(uuid.uuid4())}, expect=409, code='draw_stale_revision')
+        completed = self.action('complete'); self.assertEqual(completed['steps'][0], first['steps'][0])
+        draw = self.action('confirm'); self.confirm_stage(self.draft(draw['id']))
+        self.err('POST', self.path + '/cancel', self.packet(draw_id=draw['id'], base_rev=draw['rev'], reason='调整'), expect=409, code='draw_in_use')
 
-    def test_seeded_membership_and_unconfirmed_generation(self):
-        draw = self.start('seeded')
-        self.err('POST', self.path, {'request_uid': str(uuid.uuid4())}, expect=409, code='draw_exists')
-        self.err('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 3, 'draw_id': draw['id']}}]}, expect=409, code='draw_not_confirmed')
-        plain = self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 3}}]})['plan_id']
-        self.err('POST', f'/api/plans/{plain}/generate', expect=409, code='draw_not_confirmed')
-        draw = self.action('complete')
-        self.assertEqual(len({(s['group'], s['pot']) for s in draw['steps']}), 10)
-        for group in draw['groups']:
-            self.assertEqual(len([m for m in group['members'] if m['pot'] == 1]), 1)
-        self.action('confirm')
-        self.err('POST', f'/api/plans/{plain}/generate', expect=409, code='draw_groups_changed')
-
-    def test_roster_change_invalidates_confirmation_and_old_start_preview(self):
+    def test_seeded_pots_and_roster_staleness(self):
         old = self.ok('GET', self.path)
         self.ok('PUT', f"/api/participations/{self.fx['team_parts'][0]}", {'seed_no': 101})
-        self.err('POST', self.path, {'method': 'random', 'capacities': [4, 3, 3],
-                 'roster_hash': old['roster_hash'], 'request_uid': str(uuid.uuid4())}, expect=409, code='draw_roster_changed')
-        self.start()
+        self.err('POST', self.path, self.packet(method='random', capacities=[4, 3, 3], roster_hash=old['roster_hash']), expect=409, code='draw_roster_changed')
+        self.start(method='seeded'); draw = self.action('complete')
+        self.assertEqual(len({(s['group'], s['pot']) for s in draw['steps']}), 10)
         self.ok('PUT', f"/api/participations/{self.fx['team_parts'][1]}", {'seed_no': 102})
         self.assertTrue(self.current()['stale'])
-        self.err('POST', self.path + '/complete', self.action_body(), expect=409, code='draw_roster_changed')
-        self.err('POST', self.path + '/cancel', self.action_body(reason=''))
-        self.action('cancel', reason='报名名单调整')
-        self.assertFalse(self.start()['stale'])
+        self.err('POST', self.path + '/confirm', self.packet(draw_id=draw['id'], base_rev=draw['rev']), expect=409, code='draw_roster_changed')
+        self.action('cancel', reason='名单调整'); self.assertFalse(self.start()['stale'])
 
-    def test_roles_individual_category_and_other_category_draw_reference(self):
-        organizer = self.make_user('organizer')
-        recorder = self.make_user('recorder')
-        viewer = self.make_user('viewer')
+    def test_roles_and_cross_category_draw_reference(self):
+        organizer, recorder, viewer = [self.make_user(role) for role in ('organizer', 'recorder', 'viewer')]
         self.ok('GET', self.path, token=organizer)
         for token in (recorder, viewer):
             self.err('GET', self.path, token=token, expect=403)
-            self.err('POST', self.path, {'request_uid': str(uuid.uuid4())}, token=token, expect=403)
+            self.err('POST', self.path, self.packet(), token=token, expect=403)
         self.err('GET', f"/api/categories/{self.fx['indiv_cat']}/group-draw")
-        draw = self.start(); self.action('complete'); self.action('confirm')
-        other_cat = next(c['id'] for c in self.fx['groups']['乙']['categories'] if c['kind'] == 'team' and c['gender'] == 'male')
-        self.err('POST', f'/api/categories/{other_cat}/plan', {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 3, 'draw_id': draw['id']}}]}, expect=409, code='draw_not_confirmed')
-
-    def test_locked_preview_cannot_bypass_a_new_draw(self):
-        plain = self.ok('POST', f"/api/categories/{self.fx['team_cat']}/plan", {'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 3}}]})['plan_id']
-        self.ok('POST', f'/api/plans/{plain}/generate')
-        self.start()
-        self.err('POST', f'/api/plans/{plain}/lock', expect=409, code='draw_not_confirmed')
-        self.action('complete'); self.action('confirm')
-        self.err('POST', f'/api/plans/{plain}/lock', expect=409, code='draw_groups_changed')
-
-    def test_existing_event_upgrade_preserves_registration_and_plan(self):
-        category_path = f"/api/categories/{self.fx['team_cat']}"
-        plan_id = self.ok('POST', category_path + '/plan', {'name': '旧库方案', 'stages': [
-            {'kind': 'round_robin', 'params': {'pool_count': 2}}]})['plan_id']
-        before = self.ok('GET', category_path + '/participations')
-        event_path = db.event_db_path(self.fx['event_id'])
-        conn = db.connect(event_path)
-        try:
-            conn.execute('DROP TABLE group_draws')
-        finally:
-            conn.close()
-        db.init_db(event_path)
-        self.assertEqual(self.ok('GET', category_path + '/participations'), before)
-        plan = self.ok('GET', category_path + '/plan')['plan']
-        self.assertEqual((plan['id'], plan['name']), (plan_id, '旧库方案'))
-        self.assertIsNone(self.current())
-        self.assertEqual(self.start()['total'], 10)
-
-    def test_finished_match_prevents_redraw_even_after_admin_unlock(self):
-        draw = self.start(); self.action('complete'); self.action('confirm')
-        plan_id = self.plan(draw['id'])
-        self.ok('POST', f'/api/plans/{plan_id}/generate')
-        self.ok('POST', f'/api/plans/{plan_id}/lock')
-        stage = self.ok('GET', f'/api/plans/{plan_id}')['plan']['stages'][0]
-        match = next(m for m in stage['matches'] if m['status'] == 'ready')
-        lineup = self.lineup_for(match['id'])
-        lineup['event_identity'] = dict(self.event_identity)
-        self.play(match['id'], [(15, 3), (15, 4)], lineup=lineup)
-        self.ok('POST', f'/api/plans/{plan_id}/unlock', {'force': True, 'reason': '核对已完成比赛'})
-        self.err('POST', self.path + '/cancel', self.action_body(reason='重抽'), expect=409, code='has_results')
-        self.err('POST', self.path, {'request_uid': str(uuid.uuid4())}, expect=409, code='has_results')
-        self.assertEqual(self.current()['status'], 'confirmed')
-        self.assertEqual(self.ok('GET', self.path)['blocked_reason'], '已有比赛成绩，不能改变抽签分组')
+        self.start(); self.action('complete'); draw = self.action('confirm')
+        other = next(c['id'] for c in self.fx['groups']['乙']['categories'] if c['kind'] == 'team' and c['gender'] == 'male')
+        self.draft(draw['id'], cat=other, expect=409, code='draw_not_confirmed')
 
 
 if __name__ == '__main__': unittest.main()
