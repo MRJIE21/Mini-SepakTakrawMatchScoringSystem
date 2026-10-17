@@ -7,6 +7,7 @@ import { openEditor as openIndividualCorrection } from './individual.js';
 import {
   h, field, selectInput, numberInput, textInput, textarea, table, toast, modal, statusBadge,
   task, formDialog, promptDialog, clear, loadingState, errorState, emptyState, categoryLabel,
+  exportOrderControl,
 } from '../ui.js';
 
 const canOrg = () => ['admin', 'organizer'].includes(state.user.role);
@@ -85,6 +86,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
 
   const listBox = h('div');
   const exportBox = h('div');
+  let exportOrder = 'asc';
   const logBox = h('div');
   const pager = h('div.row.tight.mt');
   let pageOffset = 0, pageRevision;
@@ -154,6 +156,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       exportBox.append(h('div.panel',
         h('h3', '导出与打印'),
         h('div.row',
+          exportOrderControl((value) => { exportOrder = value; }, exportOrder),
           h('button.btn', {
             title: '导出整届赛事全部场次的赛程',
             onclick: task(() => download('/api/exports/schedule.csv', { event_id: state.eventId })),
@@ -164,10 +167,17 @@ async function render({ el, params, signal, requestContext = captureRequestConte
           }, '本项目赛程 CSV') : null,
           h('button.btn', {
             title: `只导出 ${categoryLabel(cat)} 的成绩`,
-            onclick: task(() => download('/api/exports/results.csv', { category_id: cat.id })),
+            onclick: task(() => download('/api/exports/results.csv', {
+              category_id: cat.id, order: exportOrder })),
           }, '本项目成绩 CSV'),
           h('button.btn', {
-            onclick: task(() => openHtml('/api/exports/category-notice.html', { category_id: cat.id }, '项目成绩单')),
+            title: `只导出 ${categoryLabel(cat)} 的成绩（Excel）`,
+            onclick: task(() => download('/api/exports/results.xlsx', {
+              category_id: cat.id, order: exportOrder })),
+          }, '本项目成绩 XLSX'),
+          h('button.btn', {
+            onclick: task(() => openHtml('/api/exports/category-notice.html', {
+              category_id: cat.id, order: exportOrder }, '项目成绩单')),
           }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表'),
           !isIndividual ? field('记录表场次', selectInput(
             finished.map((m) => [m.id, `${m.round_label} ${m.home.label} vs ${m.away.label}`]),
@@ -176,7 +186,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
           !isIndividual ? h('button.btn', {
             onclick: task(() => openHtml('/api/exports/record-sheet.html', { match_id: sheetId }, '藤球比赛记录表')),
             disabled: !sheetId,
-          }, '打印记录表（15 分制）') : null,
+          }, '打印记录表') : null,
           !isIndividual ? h('button.btn', {
             onclick: task(() => download('/api/exports/record-sheet.csv', { match_id: sheetId })),
             disabled: !sheetId,

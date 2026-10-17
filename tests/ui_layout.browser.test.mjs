@@ -178,6 +178,7 @@ try {
     await page.setViewportSize({ width: 1365, height: 900 });
     await navigate('schoolRegistration');
     const cards = page.locator('.school-registration-school');
+    await page.waitForFunction(() => document.querySelectorAll('.school-registration-school').length === 7);
     assert.equal(await cards.count(), 7, '默认只显示当前组别');
     const selector = page.getByLabel('大组别', { exact: true });
     assert.equal(await selector.count(), 1, '工作台只保留一处组别选择');

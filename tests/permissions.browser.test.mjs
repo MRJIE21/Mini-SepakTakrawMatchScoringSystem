@@ -175,6 +175,7 @@ try {
     if (mobile) await page.getByRole('button', { name: '登录', exact: true }).click();
     else await page.getByLabel('密码', { exact: true }).press('Enter');
     await page.getByRole('heading', { name: '账号列表', exact: true }).waitFor();
+    assert.equal(await page.locator('#sidenav a[data-view="scoring"]').count(), 0);
     const form = page.locator('#create-account-form');
     for (const label of ['登录名', '显示名称', '初始密码']) {
       assert.equal(await form.getByLabel(label, { exact: true }).inputValue(), '');
@@ -295,6 +296,10 @@ try {
     await page.goto(base+'/#/account');
     await page.getByRole('heading',{name:'修改我的密码'}).waitFor();
     const nav=await page.locator('#sidenav').innerText();
+    assert.equal(await page.locator('#sidenav a[data-view="scoring"]').count(),0);
+    assert.equal(await page.locator('#sidenav').getByRole('link',{name:'三人赛记录',exact:true}).count(),0);
+    assert.equal(await page.locator('#sidenav a[data-view="workspace"]').count(),role==='rec1'?0:1);
+    assert.equal(await page.locator('#sidenav a[data-view="field"]').count(),role==='viewer'?0:1);
     if(['rec1','viewer'].includes(role)) {assert.ok(nav.includes('赛事设置'));assert.ok(!nav.includes('账号管理'));}
     if(role==='rec1') {
       await page.goto(base+'/#/setup');await page.locator('.setup-readonly-group').first().waitFor();
@@ -303,6 +308,21 @@ try {
       await page.goto(base+`/#/workspace?event=${identity.event_id}&category=${team.id}&tab=registration`);
       await page.getByRole('heading',{name:/待记录场次/}).first().waitFor();
       assert.equal(await page.getByRole('button',{name:'添加参赛学校',exact:true}).count(),0);
+      await page.locator('#sidenav').getByRole('link',{name:'现场任务',exact:true}).click();
+      await page.getByRole('heading',{name:'现场任务',exact:true}).waitFor();
+      await page.locator('.workspace-choice').filter({hasText:'男子三人赛'}).first().click();
+      await page.getByRole('heading',{name:'待记录场次',exact:true}).waitFor();
+      assert.match(page.url(),new RegExp(`category=${team.id}.*tab=matches`));
+      await page.getByRole('button',{name:'查看成绩',exact:true}).first().click();
+      await page.getByRole('button',{name:'返回列表',exact:true}).waitFor();
+      assert.equal(await page.locator('#sidenav a.active').getAttribute('data-view'),'field');
+      await page.reload();
+      await page.getByRole('button',{name:'返回列表',exact:true}).waitFor();
+      assert.equal(await page.locator('#sidenav a.active').getAttribute('data-view'),'field');
+      await page.screenshot({path:path.join(artifacts,'team-scoring-nav-recorder.png'),fullPage:true});
+      await page.getByRole('button',{name:'返回列表',exact:true}).click();
+      await page.getByRole('heading',{name:'待记录场次',exact:true}).waitFor();
+      assert.match(page.url(),new RegExp(`category=${team.id}.*tab=matches`));
       const isolated=await page.evaluate(async({a,b})=>{
         const s=await import('/js/store.js');s.setStoreUser({id:a,role:'recorder'});
         await s.localStore.begin({key:'permission-draft',kind:'match',uid:'permission-cache',base_version:0,
@@ -313,6 +333,9 @@ try {
       },{a:accounts.rec1.user_id,b:accounts.rec2.user_id});
       assert.deepEqual(isolated,{own:true,other:null,all:0});
     } else if(role==='viewer') {
+      await page.goto(base+`/#/scoring?match=${match.id}`);
+      await page.waitForURL('**/#/school');
+      assert.equal(await page.getByRole('button',{name:'返回列表',exact:true}).count(),0);
       await page.goto(base+'/#/matches?category='+team.id);
       await page.getByRole('heading',{name:'比赛赛程',exact:true}).waitFor();
       await page.locator('.schedule-match').first().waitFor();
@@ -322,7 +345,18 @@ try {
       await page.goto(base+'/#/results?category='+team.id);
       await page.getByRole('heading',{name:'小组排名',exact:true}).waitFor();
       assert.equal(await page.getByRole('button',{name:/导出|打印|确认小组/}).count(),0);
-    } else if(role==='admin') {
+    } else {
+      await page.goto(base+`/#/scoring?match=${match.id}&category=${team.id}`);
+      await page.getByRole('button',{name:'返回列表',exact:true}).waitFor();
+      assert.equal(await page.locator('#sidenav a.active').getAttribute('data-view'),'workspace');
+      await page.reload();
+      await page.getByRole('button',{name:'返回列表',exact:true}).waitFor();
+      assert.equal(await page.locator('#sidenav a.active').getAttribute('data-view'),'workspace');
+      await page.getByRole('button',{name:'返回列表',exact:true}).click();
+      await page.getByRole('heading',{name:'三人赛记录',exact:true}).waitFor();
+      assert.equal(await page.locator('#sidenav a.active').getAttribute('data-view'),'workspace');
+    }
+    if(role==='admin') {
       await page.goto(base+'/#/users');
       await page.getByRole('heading',{name:'账号列表',exact:true}).waitFor();
       await page.getByRole('button',{name:'角色与赛事',exact:true}).nth(1).click();
@@ -334,5 +368,6 @@ try {
     await context.close();
   }
   assert.deepEqual(pageErrors,[]);
+  console.log('PASS: 四角色侧栏无三人赛记录；工作台/现场任务入口、旧场次与列表链接、刷新和返回及角色高亮均可用');
   console.log('PASS: 赛事隔离、角色导航、深链接拦截、领取互斥、转交、提交归属、正式更正追溯、查看者只读、草稿账号隔离');
 } finally {if(browser) await browser.close();child.kill();}

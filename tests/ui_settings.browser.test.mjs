@@ -152,14 +152,14 @@ try {
   const openComposer = async () => { if (!await newProjectForm().isVisible()) await structureSection().getByRole('button', { name: '添加项目', exact: true }).click(); };
 
   const assertAllSettings = async () => {
-    for (const section of [eventSection(), structureSection(), venueSection()]) {
+    for (const section of [eventSection(), structureSection(), venueSection(), page.locator('#setup-rules')]) {
       assert.equal(await section.count(), 1);
-      assert.equal(await section.isVisible(), true, '三个设置区域始终显示');
+      assert.equal(await section.isVisible(), true, '四个设置区域始终显示');
     }
   };
   await route('setup');
   await assertAllSettings();
-  assert.deepEqual(await setupNav().getByRole('button').evaluateAll(buttons => buttons.map(b => b.getAttribute('aria-label'))), ['赛事资料', '组别与项目', '比赛场地']);
+  assert.deepEqual(await setupNav().getByRole('button').evaluateAll(buttons => buttons.map(b => b.getAttribute('aria-label'))), ['赛事资料', '组别与项目', '比赛场地', '三人赛规则']);
   assert.equal(await page.locator('.wizard-steps').count(), 0);
   assert.equal(await page.getByRole('heading', { name: /第\s*\d+\s*步/ }).count(), 0);
   await openEvent(); await openVenue();
@@ -180,9 +180,15 @@ try {
   };
   page.on('request', watchSettingsRequests);
   const beforeNavUrl = page.url();
-  for (const [name, targetId] of [['组别与项目', 'setup-structure'], ['比赛场地', 'setup-venues'], ['赛事资料', 'setup-event']]) {
+  for (const [name, targetId] of [['组别与项目', 'setup-structure'], ['比赛场地', 'setup-venues'], ['赛事资料', 'setup-event'], ['三人赛规则', 'setup-rules']]) {
+    const beforeClickUrl = page.url();
     await setupNav().getByRole('button', { name, exact: true }).click();
-    assert.equal(page.url(), beforeNavUrl, '页内定位不改变地址');
+    if (name === '三人赛规则') {
+      const hash = new URL(page.url()).hash;
+      assert.ok(hash.startsWith('#/setup') && hash.includes('step=rules'), '规则分区同步地址 step');
+    } else {
+      assert.equal(page.url(), beforeClickUrl, '页内定位不改变地址');
+    }
     assert.equal(await page.evaluate(id => document.activeElement?.tagName === 'H3'
       && document.activeElement.closest(`#${id}`) !== null, targetId), true, `${name} 定位到该区域标题`);
     await assertAllSettings();
@@ -222,7 +228,8 @@ try {
 
   // 原来的设置链接仍进入同页，并定位对应区域及有效组别。
   for (const [step, targetId] of [['event', 'setup-event'], ['venues', 'setup-venues'],
-    ['groups', 'setup-structure'], ['categories', 'setup-structure'], ['structure', 'setup-structure']]) {
+    ['groups', 'setup-structure'], ['categories', 'setup-structure'], ['structure', 'setup-structure'],
+    ['rules', 'setup-rules']]) {
     await route(`setup?step=${step}&group=${groupB.id}`);
     await assertAllSettings();
     assert.match(await chosenGroup().innerText(), /乙组/);
@@ -355,12 +362,20 @@ try {
   await newGroupForm().getByRole('button', { name: '保存新组别', exact: true }).click();
   await groupArrived;
   await page.getByRole('link', { name: '赛事首页', exact: true }).click();
-  await page.waitForFunction(() => !document.querySelector('#setup-structure'));
+  // 保存进行中：整页聚合离开保护阻止跳转，地址与页面保持设置页。
+  await page.getByText('请先完成保存或核对保存结果', { exact: true }).waitFor();
+  assert.equal(await page.locator('#setup-structure').count(), 1, '保存中不能离开设置页');
   const destinationUrl = page.url();
   releaseGroupResponse();
   await page.getByRole('status').filter({ hasText: /组别已添加/ }).waitFor();
-  assert.equal(page.url(), destinationUrl, '设置页已离开时，旧响应不能修改新页面地址');
+  assert.ok(new URL(page.url()).hash.startsWith('#/setup'), '保存完成后仍在设置页，旧响应不导航离开');
   await page.unroute(groupUrl);
+  await page.getByRole('link', { name: '赛事首页', exact: true }).click();
+  const leaveSetup = page.getByRole('dialog', { name: '离开赛事设置', exact: true });
+  if (await leaveSetup.isVisible().catch(() => false)) {
+    await leaveSetup.getByRole('button', { name: '放弃并离开', exact: true }).click();
+  }
+  await page.waitForFunction(() => !document.querySelector('#setup-structure'));
   await route(`setup?step=structure&group=${groupB.id}`);
   await chosenGroup().filter({ hasText: '乙组（已保存）' }).waitFor();
   await projectRows().first().getByRole('button', { name: '进入项目工作台', exact: true }).click();
@@ -541,11 +556,11 @@ try {
   readOnlyPage.on('pageerror', error => errors.push(error.message));
   await readOnlyPage.goto(`${base}/#/setup?step=structure&group=${groupB.id}`);
   await readOnlyPage.getByText('赛事结构由管理员维护。', { exact: true }).waitFor();
-  for (const id of ['setup-event', 'setup-venues', 'setup-structure']) {
+  for (const id of ['setup-event', 'setup-venues', 'setup-structure', 'setup-rules']) {
     assert.equal(await readOnlyPage.locator(`#${id}`).isVisible(), true, `只读角色也显示 ${id}`);
   }
   const readOnlyNav = readOnlyPage.getByRole('navigation', { name: '赛事设置导航', exact: true });
-  assert.deepEqual(await readOnlyNav.getByRole('button').evaluateAll(buttons => buttons.map(b => b.getAttribute('aria-label'))), ['赛事资料', '组别与项目', '比赛场地']);
+  assert.deepEqual(await readOnlyNav.getByRole('button').evaluateAll(buttons => buttons.map(b => b.getAttribute('aria-label'))), ['赛事资料', '组别与项目', '比赛场地', '三人赛规则']);
   const readOnlyUrl = readOnlyPage.url();
   await readOnlyNav.getByRole('button', { name: '比赛场地', exact: true }).click();
   assert.equal(readOnlyPage.url(), readOnlyUrl, '只读定位同样保留页面与地址');

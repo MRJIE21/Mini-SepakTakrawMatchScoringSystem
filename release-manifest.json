@@ -1,14 +1,30 @@
 {
   "name": "NEW-PROJIECT",
-  "version": "1.3.1",
-  "feature": "individual-start-order-draw",
-  "created_at": "2026-10-16T11:43:50.058978+00:00",
+  "version": "1.3.12",
+  "feature": "export-order",
+  "created_at": "2026-10-17T12:26:40.942Z",
   "startup": "start.cmd",
-  "previous_release_manifest_sha256": "ed9218c68e57d0af3693d5d961035d270a823db49a050f26e4e4e389b675b3a5",
-  "source_manifest_sha256": "a3c32967d4a31458de136c3bb947514f3009295c04ebb2d4ebad81b1175cee68",
-  "workflow_code_hash": "ec365904cef32036808f73d27042de4a25daa770305e3ce8f58977ba3f18f4f4",
-  "schema_change": "Independent individual_draws table, pre-upgrade backup; preserves seeds, rankings and existing rows.",
+  "previous_release_commit": "42c23b544b926d91a02b7bec1673aa7749f071b4",
+  "previous_release_manifest_sha256": "2cd8619bad76a1fe823b09034991ca6c6b4bf7c456e4379c8672d6aed58f5286",
+  "source_manifest_sha256": "1c539a379dccb969e80ebb82a2737641b52b25311ee9ea4ae38df06a84871f54",
+  "workflow_code_hash": "8c2c9f531e1eeceb4dbb41a8bbf8544586f988615c84c7c05806ba54ea030853",
+  "schema_change": "None in 1.3.12.",
   "files": [
+    {
+      "path": ".gitignore",
+      "sha256": "8972d230488bf58f135b67f1c00a9b3d358f1de6155b7f61770d695319ea1d48",
+      "bytes": 120
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "fad0b58eab2b6872a09d842e1cc08392050f8d8cde0570ad56cee9ee2a35098e",
+      "bytes": 31918
+    },
+    {
+      "path": "README.md",
+      "sha256": "0767bda04f67cba28b4e5dae3307fca6e59e06d2b409235d214071fda56a3b83",
+      "bytes": 35391
+    },
     {
       "path": "app/__init__.py",
       "sha256": "35218dea539e3eb08ce013934c33e037678ce96884bd59b4b109d0fb9ca4e559",
@@ -56,13 +72,13 @@
     },
     {
       "path": "app/api/exports.py",
-      "sha256": "747d643d162fbe0719a0e8ad8b4ec370479d28094ee134bde48ef7de834ca279",
-      "bytes": 21416
+      "sha256": "8f5382511d956d035a78a1e573f405590caf59153841a19e22eb15f3ca3e1c01",
+      "bytes": 26321
     },
     {
       "path": "app/api/group_draw.py",
-      "sha256": "ca3bdc066c7645c9a674244302fc69779a66313329af9bc0fd9b30a7600870ef",
-      "bytes": 11286
+      "sha256": "82788cc8faf2a23afb636d6d6b3203798d8f8a1fe8863eefabfdfa7d8a96af32",
+      "bytes": 11264
     },
     {
       "path": "app/api/imports.py",
@@ -71,8 +87,8 @@
     },
     {
       "path": "app/api/individual_draw.py",
-      "sha256": "dfd233cbd499c3bfdca817fddab4eed4669d16e7e383aebabef20bbc6dd1f284",
-      "bytes": 6913
+      "sha256": "4706abe397fbe6188cd348337a1ce41fc6b10beebc92eb396a1bd68f50893692",
+      "bytes": 20460
     },
     {
       "path": "app/api/matches.py",
@@ -111,8 +127,13 @@
     },
     {
       "path": "app/api/standings.py",
-      "sha256": "13217de734b46824354016c77d61b1f5d914e1bbfe5ce4c897a1e86b106e5378",
-      "bytes": 44513
+      "sha256": "3b74559cb997cb0f35c95e81b2b4558a0c8fa82eae59badcedc33cfb651d58c6",
+      "bytes": 45006
+    },
+    {
+      "path": "app/api/xlsx.py",
+      "sha256": "91ae62b3e7091711ab1f05a2ee5d8fc6ad1b48be1f3c22024ea9031e11d7025c",
+      "bytes": 7592
     },
     {
       "path": "app/auto_schedule_store.py",
@@ -126,8 +147,8 @@
     },
     {
       "path": "app/db.py",
-      "sha256": "ed4ca8d9a54b30a15df632a92439fb5cfa747a6546d11c85032daf1b612ae4f0",
-      "bytes": 13937
+      "sha256": "884bc8f592df2a1c1a3d35c89c085c59f20f7d6c9d612fcdfa2c9fb103c61e1c",
+      "bytes": 15868
     },
     {
       "path": "app/domain/__init__.py",
@@ -146,13 +167,13 @@
     },
     {
       "path": "app/domain/group_draw.py",
-      "sha256": "ba6b02d4875a0bb3f34771bdd8e25a1cb01d0926ce8908ceffc0c977316b7772",
-      "bytes": 2115
+      "sha256": "af5eb15ec81c2aa2dbebdd8f1d479359fd9092e672a25954bd664e6d83054e25",
+      "bytes": 3514
     },
     {
       "path": "app/domain/individual_draw.py",
-      "sha256": "3ecf183c9b1a27fbade431327045c6c5956db60a6da5babf6f7c64da5dccc6b2",
-      "bytes": 920
+      "sha256": "cba9f8c482ce785d1f9c54ea98462d33a0c7fb47aa4dcd19c7198e580bb213c4",
+      "bytes": 3066
     },
     {
       "path": "app/domain/points.py",
@@ -210,6 +231,11 @@
       "bytes": 2528
     },
     {
+      "path": "app/individual_draw_session_store.py",
+      "sha256": "121672cdf225beb5afb4561b526b8212c989fdff1d796e81bd16a476735e8473",
+      "bytes": 15553
+    },
+    {
       "path": "app/individual_draw_store.py",
       "sha256": "3a866a73fea2196f6bb6603e3cd3be93b77ed30a269d79603eec3ac8afbd2ddd",
       "bytes": 4097
@@ -241,8 +267,8 @@
     },
     {
       "path": "app/schema.sql",
-      "sha256": "566b13f76cdd361a38f91d4816776f7fcc72ab7e825b673f944893613824adeb",
-      "bytes": 22148
+      "sha256": "3c79831bee34230a99bc99fd66db11469b7a3dc23c8dcb0bb862fcc811abb4c3",
+      "bytes": 24009
     },
     {
       "path": "app/school_import.py",
@@ -275,14 +301,14 @@
       "bytes": 12469
     },
     {
-      "path": "CHANGELOG.md",
-      "sha256": "0223e5faa0856b7ef5309f5905f3f0819a7bc4876c5437701fdc8cf67a137d7a",
-      "bytes": 20160
+      "path": "data/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
     },
     {
       "path": "docs/三人赛比赛规则设置.md",
-      "sha256": "34916da0457794a8b2b36139c75ed60b7226b3c5e1c550e57405dce7212fb046",
-      "bytes": 3778
+      "sha256": "5af372b13b0310c73d8eae084eee150ef97ffc77a0d3be07f04165133c3a8012",
+      "bytes": 4079
     },
     {
       "path": "docs/个人赛抽签排序说明-20261016.md",
@@ -318,6 +344,11 @@
       "path": "docs/学校报名工作台实施记录.md",
       "sha256": "131610d34512ccb011131a9b863f96bc538c12f5e63488cdf4132636fbf6046a",
       "bytes": 9311
+    },
+    {
+      "path": "docs/成绩导出与打印说明-20261017.md",
+      "sha256": "09ae61a04045ff784033b3619a1cfdb81cff6f72bbdd78f85fffe9a9c9c6d173",
+      "bytes": 3532
     },
     {
       "path": "docs/报名流程重构建议.md",
@@ -371,13 +402,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "68d903da35f7b440ebe9f4bd5a10efa5b07fc1dcf8693f3e2b579310a65dac3b",
-      "bytes": 351
-    },
-    {
-      "path": "README.md",
-      "sha256": "55b3b15c03d7d852f0e1f44aab563486b47038cc5cc72bc879cd70cfa5633321",
-      "bytes": 31637
+      "sha256": "0b6d8f0291535c30843a3a9d4adb2dbdafcdd5834fb1e95541d6bdbed2bb4f4b",
+      "bytes": 362
     },
     {
       "path": "run.py",
@@ -435,9 +461,24 @@
       "bytes": 1307
     },
     {
+      "path": "tests/export_format.browser.test.mjs",
+      "sha256": "38b8423c3ab20f54ad584ef9fd3b600daf4de9817ecdde3cdf12eb30e62a721d",
+      "bytes": 11378
+    },
+    {
+      "path": "tests/export_order.browser.test.mjs",
+      "sha256": "ffc2c004edeed02f951045fda2b051e0d6b14bd4cc8365d0c53f0a0268963f64",
+      "bytes": 11452
+    },
+    {
       "path": "tests/group_draw.browser.test.mjs",
-      "sha256": "0dc18ed5d248001130538f9c356af40472984b4669d2957be43f31aac72dd8f5",
-      "bytes": 17031
+      "sha256": "ad65c41ddb637be1e3fda7e84551ffab7367944b6f934ed6604c707bbf52dad7",
+      "bytes": 17394
+    },
+    {
+      "path": "tests/group_roll.browser.test.mjs",
+      "sha256": "898cb0b07a12f2fcae63bc845bf4ad49cdebe4cda9d0774a1a785288e4d07651",
+      "bytes": 14383
     },
     {
       "path": "tests/helpers/historical_schedule.py",
@@ -466,8 +507,8 @@
     },
     {
       "path": "tests/individual_draw.browser.test.mjs",
-      "sha256": "41ebd744b8b31eb609e5e9e355edfffeb90ad74d1f98d7106ae86908a7b008c8",
-      "bytes": 12371
+      "sha256": "109dad5f349982a8bb5f036eb6a27e4897959a8f7735c9412fa5a75f4f8cfb54",
+      "bytes": 46126
     },
     {
       "path": "tests/individual_enrollment.browser.test.mjs",
@@ -476,13 +517,13 @@
     },
     {
       "path": "tests/permissions.browser.test.mjs",
-      "sha256": "3cb5f20464436f45aa79c641e46d9c523fcedbd8b2f2b8f524f86ac978d672e9",
-      "bytes": 24150
+      "sha256": "3752738426c24ef7bb05546bbe63c7dc03d4835ea3de2eb43fcd5f80c9bd2101",
+      "bytes": 27020
     },
     {
       "path": "tests/project_workspace.browser.test.mjs",
-      "sha256": "d2891ee5f98de097af5392e754760675f5fda06ba4fdcfa3aaf3c925cbd43ea1",
-      "bytes": 11812
+      "sha256": "ed74fe34501cd683e12da316f8fe95ce6f253062d23d84bb43243d32d991624e",
+      "bytes": 13145
     },
     {
       "path": "tests/responsive_dialog.browser.test.mjs",
@@ -541,8 +582,8 @@
     },
     {
       "path": "tests/setup_usability.browser.test.mjs",
-      "sha256": "d45f82580074c023f7308eb67ee5d6cefcaf2cd6c160651d7b6f2b56af4dceaa",
-      "bytes": 37846
+      "sha256": "06a92efe4b2d085672b745d08e96710484c77c048cca743b275a55d4931354ca",
+      "bytes": 38468
     },
     {
       "path": "tests/submission_recovery.test.mjs",
@@ -551,8 +592,8 @@
     },
     {
       "path": "tests/team_rules.browser.test.mjs",
-      "sha256": "e3f6c2dcf78c7ba34145fc8a9390b1d731213503c22190e84339b3abb316b0fd",
-      "bytes": 39826
+      "sha256": "e054ed51c5963a039cdeaa562024c52139c9b054309d71883e90b9fe1e8d4751",
+      "bytes": 46385
     },
     {
       "path": "tests/team_rules.test.mjs",
@@ -595,29 +636,59 @@
       "bytes": 6633
     },
     {
+      "path": "tests/test_export_format.py",
+      "sha256": "10adad7256e78e20d678a8259c696b25c579cb8b8f35d718242bc2e94c519a53",
+      "bytes": 13945
+    },
+    {
+      "path": "tests/test_export_order.py",
+      "sha256": "d6c0acf61359281073c942a48deaedadb44fa96082e07b75622a84b57219d7b3",
+      "bytes": 8900
+    },
+    {
       "path": "tests/test_frontend_guardrails.py",
       "sha256": "adf081ab6e0236ba60ab663471cebaa78cb4d69050e1b9428ed040023ffb5bc8",
       "bytes": 6231
     },
     {
+      "path": "tests/test_group_cycle_migration.py",
+      "sha256": "af7f935f86d16683514b13ae4462f754c18b04c74490d513d3016c3ad75b4848",
+      "bytes": 4339
+    },
+    {
       "path": "tests/test_group_draw.py",
-      "sha256": "a6ce079f8a07a9f991e1443f9001bb9167550e771b80f8f55f4bb6812a6713cd",
-      "bytes": 9905
+      "sha256": "3206c6f8154914dba58cbf625d1f75befa9d2c9267d27c23a37f708bfb85883f",
+      "bytes": 13727
     },
     {
       "path": "tests/test_imports_exports.py",
-      "sha256": "078dfd66a64728d8f20bd59ad1ba685ee9d5dbf884652a0ff9995fb9c2139316",
-      "bytes": 22102
+      "sha256": "d62ee4059d2a0e3dddea40916febaceea1ea77d971a6d2570e276da163dcb5a3",
+      "bytes": 22098
     },
     {
       "path": "tests/test_individual_draw_api.py",
-      "sha256": "9c8068734d2913f75eb58f80659d3aa451e19d32ff938583b2e71c0ce62a8671",
-      "bytes": 12807
+      "sha256": "f93c5f1f532defa66d35c69965d53bcf7344ac4ff39c26ee3ccd98a90ec2d135",
+      "bytes": 23082
     },
     {
       "path": "tests/test_individual_draw_model.py",
-      "sha256": "c47a4fcb50461ff7070f64f6024802afef66a7967102390cbe5240d52ba25536",
-      "bytes": 1321
+      "sha256": "23f796644e4bdf6f2c201b19d2595f9d215380cb6898892dc989a69ea13519ab",
+      "bytes": 4577
+    },
+    {
+      "path": "tests/test_individual_draw_session_api.py",
+      "sha256": "cda08ca03b3959ec909315df2a2767bb607a8638963bb8b45f3538925dc2ab7e",
+      "bytes": 36295
+    },
+    {
+      "path": "tests/test_individual_draw_session_store.py",
+      "sha256": "b32b280d6b3a61359d37e94ee90d2846dcc598d63fcec3d3d6305aa1627bda69",
+      "bytes": 10160
+    },
+    {
+      "path": "tests/test_individual_draw_session_upgrade.py",
+      "sha256": "3c5ab6b6b1ab0feb8891f83f3d9abf2b28c6817bc924a704fc7ca2c0b4101c1a",
+      "bytes": 6495
     },
     {
       "path": "tests/test_interaction_recovery.py",
@@ -686,13 +757,13 @@
     },
     {
       "path": "tests/ui_layout.browser.test.mjs",
-      "sha256": "2a097c815177a131c10bef0e180a19c4b8411682a9ce0166bc67899076d46feb",
-      "bytes": 12859
+      "sha256": "4a54ab4ddb5b426c5fb3b52890ab127270b8b2e4a2467a1c80bdd74095fb5464",
+      "bytes": 12979
     },
     {
       "path": "tests/ui_settings.browser.test.mjs",
-      "sha256": "cc68016dd2aa48b7ebb23d89c8c6118a04aa4bc780f996cd871e025a55aed93f",
-      "bytes": 41371
+      "sha256": "cbbb06bb5469c49dee56e3d408884fa8b244537e1b33812f854792c387cff39a",
+      "bytes": 42423
     },
     {
       "path": "tests/workspace_context.test.mjs",
@@ -726,8 +797,8 @@
     },
     {
       "path": "web/css/app.css",
-      "sha256": "91fdb5a4d54e71c9f960a616f5174da2908a8adb2dc9c3fb46f584fdd72c95e5",
-      "bytes": 81002
+      "sha256": "ac49e73a68e9b8ad9a58dabef8f7edad83efd5c244e4ee0d8d82082b55ab9c59",
+      "bytes": 86948
     },
     {
       "path": "web/index.html",
@@ -766,8 +837,8 @@
     },
     {
       "path": "web/js/groupDraw.js",
-      "sha256": "f92dc520f0601392783e40d2dc5f0791ec1d26ef1f740aba4260794066ca29a3",
-      "bytes": 12261
+      "sha256": "264079323efd0d78889fcb5d6098a240ce97c88255e3b8b28f05174fd5c6927b",
+      "bytes": 18542
     },
     {
       "path": "web/js/groupNames.js",
@@ -776,8 +847,8 @@
     },
     {
       "path": "web/js/individualDraw.js",
-      "sha256": "ca62f71017a75f8554eec8aa4aace2e70ca5349c8e00c7d2264b87ca4b88f3e8",
-      "bytes": 8530
+      "sha256": "565cb4cc0fa8ee88153baed318cccd8ba74863114e53e001f610a6a967347013",
+      "bytes": 41940
     },
     {
       "path": "web/js/labels.js",
@@ -786,8 +857,8 @@
     },
     {
       "path": "web/js/main.js",
-      "sha256": "1fca7420ead942153c130b34c00d18d9c1974648cb4894ecc929a87de39c2e61",
-      "bytes": 21094
+      "sha256": "4549f3e594b1dc6cfbaaf051f458ecb9eb977e00cf814b3e650e90f0cd231c66",
+      "bytes": 21853
     },
     {
       "path": "web/js/pendingRequests.js",
@@ -851,13 +922,13 @@
     },
     {
       "path": "web/js/ui.js",
-      "sha256": "064b01cc8d97ce6a9a6d7deb3758a565abe575b9e891054693a4849791f07565",
-      "bytes": 28156
+      "sha256": "a650a343db49eaed038dc3b5a36ecfe956cff918cfa884e8bdd3f388be9ff63c",
+      "bytes": 29520
     },
     {
       "path": "web/js/views/admin.js",
-      "sha256": "fafab709825184be28e6867b7d72d44f098f5af679ae74aa59393edd52059dcb",
-      "bytes": 37481
+      "sha256": "43693111ea9240c0a2b5d903da9b353334cf1aa001c5125d12a4d3009d6d4cf7",
+      "bytes": 37945
     },
     {
       "path": "web/js/views/bracket.js",
@@ -881,8 +952,8 @@
     },
     {
       "path": "web/js/views/individual.js",
-      "sha256": "440231840522033ee17038eaed6ef3307e1733d9f660419a3e283624bca49c1f",
-      "bytes": 21624
+      "sha256": "fca23e418d2e09df5a55be3c261e7c23f221377ddf95e8bb1d5ea36d579def7f",
+      "bytes": 21706
     },
     {
       "path": "web/js/views/matchAdmin.js",
@@ -891,8 +962,8 @@
     },
     {
       "path": "web/js/views/results.js",
-      "sha256": "ef6778d1a30d3e6e0357428dcd277112c8873e60b66e5d93d34e712304f603bc",
-      "bytes": 22815
+      "sha256": "ec9353d7a86f7ead20bf534dbe3cbae531644e9094d5717745e061dc15ba576e",
+      "bytes": 24220
     },
     {
       "path": "web/js/views/review.js",
@@ -906,8 +977,8 @@
     },
     {
       "path": "web/js/views/school.js",
-      "sha256": "d5dbaaa49ebf9b9fffceba49cc0d311c2953989d22fbb09a2643299e5f0425a8",
-      "bytes": 7213
+      "sha256": "bd2a5f659e1d68f5a91eb8ff28385fc1b000986a95e9c42bfb6c88facd16fe79",
+      "bytes": 7717
     },
     {
       "path": "web/js/views/schoolRegistration.js",
@@ -921,8 +992,8 @@
     },
     {
       "path": "web/js/views/setup.js",
-      "sha256": "0842e4446516c5c98d4d5530e0f31a0036042796a2e1357dfab6cdaacf05c8ae",
-      "bytes": 57615
+      "sha256": "7c07bc5d8b1123fb301deb1260818b4bb3f48130c6d837aa319924f7fe5f4462",
+      "bytes": 60802
     },
     {
       "path": "web/js/views/workspace.js",
@@ -941,8 +1012,8 @@
     },
     {
       "path": "web/sw.js",
-      "sha256": "c5711ac1ab4268e469795d87de7e3fa12cbbfadbb3f909ca1aade3ac77614c8c",
-      "bytes": 2435
+      "sha256": "f36ec1540a82fab7c687f53fded13076e01bdec24f20e3cb8766c4fb9c99f9ff",
+      "bytes": 2436
     },
     {
       "path": "web/vendor/tom-select/LICENSE",

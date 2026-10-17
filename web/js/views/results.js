@@ -9,7 +9,7 @@ import { mountIndividualDraw } from '../individualDraw.js';
 import {
   h, field, selectInput, textInput, table, toast, modal, confirmDialog, confirmAsync, clear,
   statusBadge, task, formDialog, searchSelect, emptyState, errorState, loadingState,
-  categoryLabel,
+  categoryLabel, exportOrderControl,
 } from '../ui.js';
 
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
@@ -40,6 +40,7 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
   const catId = Number(params.category || cats[0].id);
   const cat = cats.find((c) => c.id === catId);
   const embedded = params.embedded === 'workspace';
+  let resultOrder = 'asc';
   if (!cat) {
     /* 上下文非法时说明并给重新选择入口，不静默回退到第一个项目（§4.1） */
     el.append(errorState(new Error(`项目不存在或不属于本赛事（id=${catId}）`),
@@ -55,12 +56,20 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
         { onchange: (e) => { location.hash = `#/results?category=${e.target.value}`; } }))),
     h('div.row.tight',
       /* 导出范围写在按钮上（§13.4） */
+      canWrite() ? exportOrderControl((value) => { resultOrder = value; }) : null,
       canWrite() ? h('button.btn', {
         title: `只导出 ${categoryLabel(cat)} 的成绩`,
-        onclick: task(() => download('/api/exports/results.csv', { category_id: cat.id })),
+        onclick: task(() => download('/api/exports/results.csv', {
+          category_id: cat.id, order: resultOrder })),
       }, '导出本项目成绩 CSV') : null,
       canWrite() ? h('button.btn', {
-        onclick: task(() => openHtml('/api/exports/category-notice.html', { category_id: cat.id }, '项目成绩单')),
+        title: `只导出 ${categoryLabel(cat)} 的成绩（Excel）`,
+        onclick: task(() => download('/api/exports/results.xlsx', {
+          category_id: cat.id, order: resultOrder })),
+      }, '导出本项目成绩 XLSX') : null,
+      canWrite() ? h('button.btn', {
+        onclick: task(() => openHtml('/api/exports/category-notice.html', {
+          category_id: cat.id, order: resultOrder }, '项目成绩单')),
       }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null,
       h('span.small.muted', cat.kind === 'team'
         ? '小组排名依次比较：积分（胜 2、负 1、弃权 0）→ C 值（胜局/负局）→ Z 值（得分/失分）→ 现场抽签。计算使用精确比值。'
@@ -70,12 +79,20 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
     h('div.small.muted.grow', cat.kind === 'team'
       ? '排名依次比较积分、C 值、Z 值和现场抽签；正式名次以确认状态为准。'
       : '个人赛成绩与名次独立展示，不依赖三人赛编排方案。'),
+    canWrite() ? exportOrderControl((value) => { resultOrder = value; }) : null,
     canWrite() ? h('button.btn', {
       title: `只导出 ${categoryLabel(cat)} 的成绩`,
-      onclick: task(() => download('/api/exports/results.csv', { category_id: cat.id })),
+      onclick: task(() => download('/api/exports/results.csv', {
+        category_id: cat.id, order: resultOrder })),
     }, '导出本项目 CSV') : null,
     canWrite() ? h('button.btn', {
-      onclick: task(() => openHtml('/api/exports/category-notice.html', { category_id: cat.id }, '项目成绩单')),
+      title: `只导出 ${categoryLabel(cat)} 的成绩（Excel）`,
+      onclick: task(() => download('/api/exports/results.xlsx', {
+        category_id: cat.id, order: resultOrder })),
+    }, '导出本项目 XLSX') : null,
+    canWrite() ? h('button.btn', {
+      onclick: task(() => openHtml('/api/exports/category-notice.html', {
+        category_id: cat.id, order: resultOrder }, '项目成绩单')),
     }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null));
 
   if (cat.kind === 'individual') {
@@ -160,6 +177,7 @@ async function drawTeamStandings(container, cat, reload, params, client = scoped
 }
 
 async function drawPool(box, pool, redraw, client = scopedClient()) {
+  let poolOrder = 'asc';
   const data = await client.get(`/api/pools/${pool.id}/standings`);
   clear(box);
   if (data.needs_reconfirm) {
@@ -259,9 +277,15 @@ async function drawPool(box, pool, redraw, client = scopedClient()) {
         '确认后写入名次快照，用于解析后续对阵（小组第 N 名）与项目名次。并列未抽签的名次不能确认。',
         () => doConfirm({}), '确认名次'),
     }, pool.status === 'confirmed' ? '重新确认名次' : '确认小组名次'),
+    canWrite() ? exportOrderControl((value) => { poolOrder = value; }) : null,
     canWrite() ? h('button.btn', {
-      onclick: task(() => download('/api/exports/standings.csv', { pool_ids: pool.id })),
+      onclick: task(() => download('/api/exports/standings.csv', {
+        pool_ids: pool.id, order: poolOrder })),
     }, '导出该小组') : null,
+    canWrite() ? h('button.btn', {
+      onclick: task(() => download('/api/exports/standings.xlsx', {
+        pool_ids: pool.id, order: poolOrder })),
+    }, '导出该小组 XLSX') : null,
     blockers.length ? h('span.small.muted', `待处理：${blockers.join('；')}`) : null));
 }
 

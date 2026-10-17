@@ -253,7 +253,7 @@ class ImportExportsTest(unittest.TestCase):
         csv_text = self.req("GET", f"/api/exports/results.csv?category_id={cat_id}", raw=True)
         data = list(csv.DictReader(io.StringIO(csv_text)))
         self.assertEqual(len(data), 2)
-        self.assertEqual({r["有效次数"] for r in data}, {"0.0", "5.0"})
+        self.assertEqual({r["有效次数"] for r in data}, {"0", "5"})
         self.assertEqual({r["名次"] for r in data}, {"1", "2"})
         notice = self.req("GET", f"/api/exports/category-notice.html?category_id={cat_id}", raw=True)
         self.assertIn("个人赛成绩单", notice)

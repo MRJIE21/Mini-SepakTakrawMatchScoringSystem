@@ -3,6 +3,7 @@ import { api, download, openHtml } from '../api.js';
 import { registerView, state, loadStructure } from '../main.js';
 import {
   h, table, toast, modal, formDialog, clear, task, loadingState, errorState, categoryLabel,
+  exportOrderControl,
 } from '../ui.js';
 
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
@@ -12,6 +13,7 @@ async function render({ el, params }) {
   const structure = state.structure || await loadStructure();
   const groupId = Number(params.group || structure.groups[0]?.id);
   const group = structure.groups.find((g) => g.id === groupId) || structure.groups[0];
+  let exportOrder = 'asc';
 
   el.append(h('div.panel',
     h('div.panel-head',
@@ -22,12 +24,20 @@ async function render({ el, params }) {
           onclick: () => { location.hash = `#/school?group=${g.id}`; },
         }, g.name.split('：')[0])),
         /* 导出范围写在按钮旁，避免“写着当前组别却导出整届”（§13.4） */
+        canWrite() ? exportOrderControl((value) => { exportOrder = value; }) : null,
         canWrite() ? h('button.btn', {
           title: `只导出 ${group.name} 的学校总分`,
-          onclick: task(() => download('/api/exports/school-totals.csv', { group_id: group.id })),
+          onclick: task(() => download('/api/exports/school-totals.csv', {
+            group_id: group.id, order: exportOrder })),
         }, `导出 ${group.name.split('：')[0]} CSV`) : null,
         canWrite() ? h('button.btn', {
-          onclick: task(() => openHtml('/api/exports/school-notice.html', { group_id: group.id }, '学校团体总分表')),
+          title: `只导出 ${group.name} 的学校总分（Excel）`,
+          onclick: task(() => download('/api/exports/school-totals.xlsx', {
+            group_id: group.id, order: exportOrder })),
+        }, `导出 ${group.name.split('：')[0]} XLSX`) : null,
+        canWrite() ? h('button.btn', {
+          onclick: task(() => openHtml('/api/exports/school-notice.html', {
+            group_id: group.id, order: exportOrder }, '学校团体总分表')),
         }, '打印本组学校总分表') : null,
       )),
     h('div.small.muted', `${group.name} · 单项前八名积分 9、7、6、5、4、3、2、1，集体项目（三人赛）双倍计入；`

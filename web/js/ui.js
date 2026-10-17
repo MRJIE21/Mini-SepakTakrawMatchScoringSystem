@@ -133,6 +133,16 @@ export function selectInput(options, value, attrs = {}) {
   return el;
 }
 
+/* 成绩类导出的正/倒序选择；默认正序，切换只影响当前导出区域。 */
+export function exportOrderControl(onChange, value = 'asc') {
+  const control = selectInput([['asc', '正序'], ['desc', '倒序']], value, {
+    'aria-label': '导出排序',
+    onchange: (e) => onChange(e.target.value),
+  });
+  return h('label.small.row.tight', { style: 'align-items:center' },
+    h('span', '排序'), control);
+}
+
 export function checkbox(label, checked, attrs = {}) {
   const input = h('input', { type: 'checkbox', checked, ...attrs });
   const wrap = h('label.row.tight', { style: 'align-items:center' }, input, h('span', label));

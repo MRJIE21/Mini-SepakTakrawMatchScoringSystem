@@ -696,15 +696,14 @@ def recompute_category_points(conn, category_id: int) -> int:
     return count
 
 
-@route("GET", r"/api/groups/(?P<group_id>\d+)/school-totals")
-def school_totals(ctx):
-    group_id = int(ctx.params["group_id"])
-    group = get_or_404(ctx.conn, "groups", group_id, "大组别")
-    schools = db.q(ctx.conn,
+def group_school_totals(conn, group_id):
+    """学校团体总分汇总；接口与导出共用同一 pending 口径。"""
+    group = get_or_404(conn, "groups", group_id, "大组别")
+    schools = db.q(conn,
                    """SELECT s.id AS school_id, s.name, s.short_name FROM school_entries se
                         JOIN schools s ON s.id = se.school_id WHERE se.group_id = ? ORDER BY s.name""",
                    (group_id,))
-    rows = db.q(ctx.conn,
+    rows = db.q(conn,
                 """SELECT sp.school_id, sp.points, sp.rank_no, sp.base_points, sp.multiplier,
                            sp.category_id, c.name AS category_name, c.gender AS category_gender, c.kind,
                           COALESCE(t.name, a.name) AS participation_label
@@ -714,7 +713,7 @@ def school_totals(ctx):
                      LEFT JOIN teams t ON t.id = p.team_id
                      LEFT JOIN athletes a ON a.id = p.athlete_id
                     WHERE sp.group_id = ?""", (group_id,))
-    pending = db.q(ctx.conn,
+    pending = db.q(conn,
                    """SELECT COALESCE(t.school_id, a.school_id) AS school_id, c.name AS category_name,
                               c.gender AS category_gender,
                              COALESCE(t.name, a.name) AS participation_label
@@ -723,15 +722,24 @@ def school_totals(ctx):
                         LEFT JOIN placements pl ON pl.participation_id = p.id AND pl.category_id = c.id
                         LEFT JOIN teams t ON t.id = p.team_id
                         LEFT JOIN athletes a ON a.id = p.athlete_id
+                        LEFT JOIN individual_results ir
+                               ON ir.participation_id = p.id AND ir.category_id = c.id
                        WHERE c.group_id = ? AND p.status = 'active'
-                         AND (pl.id IS NULL OR pl.status <> 'confirmed')""", (group_id,))
+                         AND (pl.id IS NULL OR pl.status <> 'confirmed')
+                         AND NOT (c.kind = 'individual'
+                                  AND COALESCE(ir.result_status, '') IN ('dns', 'dnf', 'dsq'))""", (group_id,))
     tiebreaks = {r["school_id"]: r["manual_order"]
-                 for r in db.q(ctx.conn, "SELECT * FROM school_tiebreaks WHERE group_id = ?",
+                 for r in db.q(conn, "SELECT * FROM school_tiebreaks WHERE group_id = ?",
                                (group_id,))}
     result = points.compute_school_totals(db.rows_to_dicts(schools), db.rows_to_dicts(rows),
                                          db.rows_to_dicts(pending), tiebreaks)
     result["group"] = dict(group)
     return result
+
+
+@route("GET", r"/api/groups/(?P<group_id>\d+)/school-totals")
+def school_totals(ctx):
+    return group_school_totals(ctx.conn, int(ctx.params["group_id"]))
 
 
 @route("POST", r"/api/groups/(?P<group_id>\d+)/school-tiebreak", roles=ORG)

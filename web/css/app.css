@@ -1045,7 +1045,7 @@ tr.flash td { animation: rowflash 1400ms ease-out 1; }
 .setup-page .setup-current-event { color: inherit; font-size: inherit; }
 .setup-page .setup-intro { color: var(--muted); margin: 6px 0 0; font-size: 14px; }
 .setup-page .setup-page-tools { border: 0; padding: 0; margin-top: 20px; }
-.setup-page .setup-page-nav { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.setup-page .setup-page-nav { width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .setup-page .setup-page-nav .setup-nav-choice { display: flex; align-items: center; gap: 12px; text-align: left; padding: 13px 16px; }
 .setup-page .setup-nav-choice > span:last-child { min-width: 0; }
 .setup-page .setup-nav-choice b { color: var(--text); font-size: 14px; font-weight: 600; }
@@ -1100,6 +1100,9 @@ tr.flash td { animation: rowflash 1400ms ease-out 1; }
 .setup-page .setup-venue-advanced { margin-top: 14px; color: var(--muted); font-size: 13px; }
 .setup-page .setup-venue-advanced summary { cursor: pointer; }
 .setup-page .setup-venue-advanced > .field { margin-top: 12px; max-width: 180px; }
+@media (max-width: 1100px) {
+  .setup-page .setup-page-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 760px) {
   .setup-page .setup-page-nav { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .setup-page .setup-facts { grid-template-columns: minmax(0, 1fr); }
@@ -1155,10 +1158,9 @@ tr.flash td { animation: rowflash 1400ms ease-out 1; }
   table.roster-table .badge, table.scoring-match-table .badge { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 }
 /* One event-wide editor: quiet separators and progressive detail. */
-.team-rules-page { max-width:1100px; margin:0 auto; }
-.rules-page-heading { margin-bottom:28px; }
-.rules-page-heading h2 { font-size:24px; margin-bottom:6px; }
-.rules-page-heading p { color:var(--muted); margin:0; }
+.setup-page .setup-rules-panel .rules-project-card { padding:22px 26px; }
+.setup-page .setup-rules-panel .rules-project-title { font-size:18px; }
+.setup-page .setup-rules-panel .rules-project-card .team-rules-state { right:26px; top:24px; }
 .rules-project-card { position:relative; padding:28px 32px; border:1px solid var(--line); border-radius:12px; background:var(--panel); min-width:0; }
 .rules-project-heading { padding-bottom:24px; }
 .rules-project-title { font-size:20px; margin:0 0 12px; padding-right:112px; overflow-wrap:anywhere; }
@@ -1214,9 +1216,8 @@ tr.flash td { animation: rowflash 1400ms ease-out 1; }
   .team-rules-actions { justify-content:flex-end; }
 }
 @media (max-width:760px) {
-  .content:has(.team-rules-page) { padding:24px 16px 40px; }
-  .rules-page-heading { margin-bottom:24px; }
-  .rules-page-heading h2 { font-size:22px; }
+  .setup-page .setup-rules-panel .rules-project-card { padding:20px 18px; }
+  .setup-page .setup-rules-panel .rules-project-card .team-rules-state { right:18px; top:22px; }
   .rules-project-card { padding:22px 18px; }
   .rules-project-heading { padding-bottom:22px; }
   .rules-project-title { font-size:18px; padding-right:100px; }

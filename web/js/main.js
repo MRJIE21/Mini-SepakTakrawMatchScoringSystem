@@ -17,11 +17,11 @@ export const state = {
 };
 
 /* 一级导航（改进方案 §3.1）：日常项目任务统一进入工作台，维护类靠后。
-   学校报名不在侧栏重复出现，统一从工作台的“报名名单”进入。 */
+   学校报名与三人赛记录统一从工作台进入，记录员从现场任务进入。 */
 const NAV = [
-  { group: '赛事管理', items: ['dashboard', 'setup', 'teamRules'] },
+  { group: '赛事管理', items: ['dashboard', 'setup'] },
   { group: '比赛管理', items: ['workspace'] },
-  { group: '比赛执行', items: ['field', 'scoring'] },
+  { group: '比赛执行', items: ['field'] },
   { group: '成绩', items: ['school'] },
   { group: '系统维护', items: ['admin', 'users'] },
   { group: '个人', items: ['account'] },
@@ -85,11 +85,18 @@ function renderLogin(message) {
 }
 
 /* ------------------------------------------------------------------ 外壳 */
+function navigationView(name) {
+  if (name === 'scoring') return state.user.role === 'recorder' ? 'field' : 'workspace';
+  // 旧 teamRules 链接是赛事设置的渲染别名，侧栏高亮赛事设置。
+  if (name === 'teamRules') return 'setup';
+  return name;
+}
+
 function renderShell() {
   setStoreUser(state.user);
   const nav = document.getElementById('sidenav');
   clear(nav);
-  const activeView = location.hash.replace(/^#\/?/, '').split('?')[0];
+  const activeView = navigationView(location.hash.replace(/^#\/?/, '').split('?')[0]);
   for (const group of NAV) {
     const items = group.items.map((name) => state.views[name]).filter(Boolean)
       .filter((v) => canView(state.user.role, v.name) && !(state.user.role === 'recorder' && ['workspace','scoring'].includes(v.name)));
@@ -107,8 +114,17 @@ function renderShell() {
   if (!state.events.length) select.append(h('option', { value: '' }, '（尚未创建赛事）'));
   select.onchange = async () => {
     const nextEventId = Number(select.value);
-    const currentView = location.hash.replace(/^#\/?/, '').split('?')[0];
-    location.hash = `#/${currentView === 'teamRules' ? 'teamRules' : 'workspace'}?event=${nextEventId}`;
+    const [currentView, query] = location.hash.replace(/^#\/?/, '').split('?');
+    const params = new URLSearchParams(query || '');
+    if (currentView === 'setup' || currentView === 'teamRules') {
+      // 设置页内切换赛事保留当前合法分区；旧别名切到统一设置的第 4 个分区。
+      const step = currentView === 'teamRules' ? 'rules' : params.get('step');
+      const next = { event: nextEventId };
+      if (['event', 'structure', 'venues', 'rules'].includes(step)) next.step = step;
+      go('setup', next);
+      return;
+    }
+    go('workspace', { event: nextEventId });
   };
   const newEvent = document.getElementById('btn-new-event');
   const canCreateEvent = state.user.role === 'admin';
@@ -184,8 +200,9 @@ async function renderRoute(force = false, scope = null) {
     const params = Object.fromEntries(new URLSearchParams(query || ''));
     const view = state.views[name] || state.views.dashboard;
     if (!canView(state.user.role, view.name)) { location.hash = roleHome(); return; }
+    const activeView = navigationView(view.name);
     document.querySelectorAll('.sidenav a').forEach((a) => {
-      a.classList.toggle('active', a.dataset.view === view.name);
+      a.classList.toggle('active', a.dataset.view === activeView);
     });
     const host = document.getElementById('content');
     const content = h('div.route-content');

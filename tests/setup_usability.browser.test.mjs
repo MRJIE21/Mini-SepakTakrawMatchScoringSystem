@@ -104,16 +104,17 @@ try {
   assert.match(await page.locator('#setup-status-structure').textContent(), /2 个组别 · 6 个项目/);
   assert.match(await page.locator('#setup-status-venues').textContent(), /可后补/);
   assert.doesNotMatch(await page.locator('.setup-page').innerText(), /可开赛|100%/);
-  for (const id of ['setup-event', 'setup-structure', 'setup-venues']) assert.equal(await page.locator(`#${id}`).isVisible(), true);
+  for (const id of ['setup-event', 'setup-structure', 'setup-venues', 'setup-rules']) assert.equal(await page.locator(`#${id}`).isVisible(), true);
   await eventPanel.getByRole('button', { name: '修改资料', exact: true }).click();
   const eventName = eventPanel.getByLabel('赛事名称', { exact: true });
   await eventName.fill('尚未保存的赛事资料');
   const requests = [];
   const watcher = request => { if (request.url().startsWith(`${base}/api/`)) requests.push(request.url()); };
   page.on('request', watcher); const beforeUrl = page.url();
-  for (const [label, id] of [['组别与项目', 'setup-structure'], ['比赛场地', 'setup-venues'], ['赛事资料', 'setup-event']]) {
+  for (const [label, id] of [['组别与项目', 'setup-structure'], ['比赛场地', 'setup-venues'], ['三人赛规则', 'setup-rules'], ['赛事资料', 'setup-event']]) {
+    const beforeSection = page.url();
     await page.getByRole('navigation', { name: '赛事设置导航', exact: true }).getByRole('button', { name: label, exact: true }).click();
-    assert.equal(page.url(), beforeUrl);
+    if (label !== '三人赛规则') assert.equal(page.url(), beforeSection);
     assert.equal(await page.evaluate(id => document.activeElement.tagName === 'H3' && !!document.activeElement.closest(`#${id}`), id), true);
     assert.equal(await eventName.inputValue(), '尚未保存的赛事资料');
   }
@@ -358,16 +359,20 @@ try {
     const release = new Promise(resolve => { releaseResponse = resolve; });
     await page.route(groupUrl, async handler => { const response = await handler.fetch(); requestArrived(); await release; await handler.fulfill({ response }); });
     await delayedForm.getByRole('button', { name: '保存新组别', exact: true }).click(); await arrived;
+    // 保存进行中：整页聚合离开保护阻止切换赛事，顶栏恢复为当前赛事。
+    await page.locator('#event-select').selectOption(String(other.event_id));
+    await page.getByText('请先完成保存或核对保存结果', { exact: true }).waitFor();
+    assert.equal(await page.locator('#event-select').inputValue(), String(identity.event_id));
+    assert.ok(page.url().includes(`event=${identity.event_id}`));
+    releaseResponse();
+    await page.getByRole('status').filter({ hasText: /组别已添加/ }).waitFor();
     await page.locator('#event-select').selectOption(String(other.event_id));
     await page.waitForFunction(() => document.querySelector('#event-line')?.textContent === '切换后的对照赛事'
       && !document.querySelector('.content .spinner'));
-    const otherUrl = page.url(); releaseResponse();
-    await page.getByRole('status').filter({ hasText: /组别已添加/ }).waitFor();
-    assert.equal(page.url(), otherUrl);
     assert.equal(await page.locator('#event-line').textContent(), '切换后的对照赛事');
     assert.equal((await api('GET', `/api/events/${other.event_id}/structure`, undefined, other)).groups.length, 0);
     await page.unroute(groupUrl);
-    checks.push('late response cannot replace another event or its route');
+    checks.push('saving blocks event switch; late save response cannot replace another event or its route');
 
     await page.locator('.sidenav a[data-view="setup"]').click();
     await page.locator('#setup-status-structure').filter({ hasText: '先添加组别，再开设项目' }).waitFor();
@@ -384,7 +389,7 @@ try {
     await page.waitForFunction(id => document.querySelector('#event-select')?.value === String(id)
       && !document.querySelector('.content .spinner'), identity.event_id);
 
-    for (const [step, section] of [['groups', 'structure'], ['categories', 'structure'], ['event', 'event'], ['venues', 'venues']]) {
+    for (const [step, section] of [['groups', 'structure'], ['categories', 'structure'], ['event', 'event'], ['venues', 'venues'], ['rules', 'rules']]) {
       await route(`setup?step=${step}&group=${groups[0].id}`);
       await page.waitForFunction(id => document.activeElement.tagName === 'H3'
         && !!document.activeElement.closest(`#setup-${id}`), section);
@@ -410,8 +415,9 @@ try {
     };
     for (const width of [320, 390, 768, 1365, 2539]) {
       await page.setViewportSize({ width, height: 950 }); await assertBounds(`summary ${width}`);
-      const sections = await Promise.all(['event', 'structure', 'venues'].map(s => page.locator(`#setup-${s}`).boundingBox()));
-      assert.ok(sections[1].y >= sections[0].y + sections[0].height - 1 && sections[2].y >= sections[1].y + sections[1].height - 1, 'visual sequence matches DOM order');
+      const sections = await Promise.all(['event', 'structure', 'venues', 'rules'].map(s => page.locator(`#setup-${s}`).boundingBox()));
+      assert.ok(sections[1].y >= sections[0].y + sections[0].height - 1 && sections[2].y >= sections[1].y + sections[1].height - 1
+        && sections[3].y >= sections[2].y + sections[2].height - 1, 'visual sequence matches DOM order');
       await screenshot(`setup-summary-${width}.png`);
     }
     await page.setViewportSize({ width: 390, height: 950 });

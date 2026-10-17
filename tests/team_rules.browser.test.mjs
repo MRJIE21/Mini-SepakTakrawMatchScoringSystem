@@ -59,9 +59,10 @@ try {
     await emptyContext.addInitScript(token => localStorage.setItem('stss_token', token), token);
     const emptyPage = await emptyContext.newPage();
     await emptyPage.goto(`${base}/#/teamRules`);
-    await emptyPage.getByText('还没有赛事。请先在赛事设置中创建赛事。', { exact: true }).waitFor();
-    assert.equal(await emptyPage.getByRole('link', { name: '前往赛事设置', exact: true }).count(), 1);
-    await emptyContext.close(); pass('无赛事规则页给出明确创建提示');
+    await emptyPage.getByText('还没有赛事。请先创建赛事，再配置组别与项目。', { exact: true }).waitFor();
+    await emptyPage.getByRole('heading', { name: '创建首个赛事', exact: true }).waitFor();
+    assert.equal(await emptyPage.locator('#setup-rules').count(), 0);
+    await emptyContext.close(); pass('无赛事时旧链接给出明确创建赛事提示');
     identity = await api('POST', '/api/events', { name: '三人赛规则测试赛事' });
     identity.deployment_id = (await api('GET', '/api/events')).deployment_id;
     const group = (await api('POST', `/api/events/${identity.event_id}/groups`, { name: '甲组', code: '甲' })).group_id;
@@ -85,16 +86,20 @@ try {
     page.on('pageerror', e => errors.push(e.message));
     await page.goto(`${base}/#/setup?event=${identity.event_id}&group=${group}`);
     await page.locator('article[data-category-id]').first().waitFor();
-    assert.equal(await page.locator('.team-rules').count(), 0);
     const navigation = page.locator('#sidenav a');
     const labels = await navigation.allTextContents();
-    assert.equal(labels.indexOf('三人赛规则设置'), labels.indexOf('赛事设置') + 1);
-    await page.getByRole('link', { name: '三人赛规则设置', exact: true }).click();
-    await page.locator('.team-rules-page').waitFor();
-    assert.equal(await page.locator('#sidenav a.active').textContent(), '三人赛规则设置');
+    assert.equal(labels.includes('三人赛规则设置'), false);
+    assert.equal(await page.locator('.setup-page-nav .setup-nav-choice').count(), 4);
+    assert.equal(await page.locator('.team-rules').count(), 1, '规则作为设置第 4 分区同页呈现');
+    const setupNavigation = page.getByRole('navigation', { name: '赛事设置导航', exact: true });
+    await setupNavigation.getByRole('button', { name: '三人赛规则', exact: true }).click();
+    assert.equal(await page.evaluate(() => document.activeElement.tagName === 'H3'
+      && !!document.activeElement.closest('#setup-rules')), true);
+    assert.ok(new URL(page.url()).hash.includes('step=rules'));
+    assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
     const editor = () => page.locator(`section.team-rules[data-event-id="${identity.event_id}"]`);
     await editor().waitFor();
-    assert.equal(await page.locator(`.team-rules-page article[data-category-id="${personal}"]`).count(), 0);
+    assert.equal(await page.locator(`.setup-rules-panel article[data-category-id="${personal}"]`).count(), 0);
     assert.equal(await page.locator(`article[data-category-id="${personal}"] .team-rules`).count(), 0);
     const open = async () => { const detail = editor().locator('.team-rules-details').first(); if (!await detail.evaluate(el => el.open)) await detail.locator('summary').click(); };
     const waitSaved = () => page.waitForFunction(id => { const root = document.querySelector(`section.team-rules[data-event-id="${id}"]`); return root && !root.querySelector('.team-rules-save').disabled && root.querySelector('.setup-save-feedback')?.textContent.includes('比赛规则已保存'); }, identity.event_id);
@@ -144,7 +149,7 @@ try {
         outside: [...document.querySelectorAll('.team-rules input,.team-rules select,.team-rules button')]
           .filter(el => el.getClientRects().length).map(el => el.getBoundingClientRect()).filter(r => r.left < -1 || r.right > innerWidth + 1).length }));
       assert.ok(geometry.scroll <= width + 1, JSON.stringify(geometry)); assert.equal(geometry.outside, 0);
-      assert.equal(await page.locator('#sidenav a.active').textContent(), '三人赛规则设置');
+      assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: path.join(artifacts, `team-rules-settings-${width}.png`), fullPage: true });
     }
@@ -169,7 +174,7 @@ try {
     assert.equal(await editor().getByLabel('比赛局制', { exact: true }).isDisabled(), true);
     await page.getByRole('link', { name: '赛事设置', exact: true }).click();
     await page.getByText('请先完成保存或核对保存结果', { exact: true }).waitFor();
-    assert.ok(new URL(page.url()).hash.startsWith('#/teamRules'));
+    assert.ok(new URL(page.url()).hash.includes('step=rules'));
     await page.unroute('**' + pathRules);
     await feedback.getByRole('button', { name: '重新读取状态' }).click();
     await waitSaved();
@@ -235,7 +240,7 @@ try {
     await open(); await editor().getByLabel('比赛局制', { exact: true }).selectOption('custom');
     await editor().getByLabel('自定义最多局数', { exact: true }).fill('9');
     await page.getByRole('link', { name: '赛事设置', exact: true }).click();
-    await page.getByRole('dialog', { name: '离开三人赛规则设置' }).getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('dialog', { name: '离开赛事设置' }).getByRole('button', { name: '取消', exact: true }).click();
     assert.equal(await editor().getByLabel('自定义最多局数', { exact: true }).inputValue(), '9');
     const lateEvent = await api('POST', '/api/events', { name: '迟到响应隔离赛事' });
     let release, entered;
@@ -275,14 +280,15 @@ try {
     const readonly = await browser.newContext({ viewport: { width: 390, height: 900 } });
     await readonly.addInitScript(({ token, event }) => { localStorage.setItem('stss_token', token); localStorage.setItem('stss_event', String(event)); }, { token: viewer, event: identity.event_id });
     const readPage = await readonly.newPage(); await readPage.goto(`${base}/#/teamRules?event=${identity.event_id}`);
-    await readPage.locator('.team-rules-page article').first().waitFor();
-    assert.ok((await readPage.locator('.team-rules-page').innerText()).includes('9局5胜'));
+    await readPage.locator('#setup-rules .rules-readonly').waitFor();
+    assert.ok((await readPage.locator('#setup-rules').innerText()).includes('9局5胜'));
     assert.equal(await readPage.getByRole('button', { name: '保存规则', exact: true }).count(), 0);
+    assert.equal(await readPage.locator('#setup-rules .team-rules input, #setup-rules .team-rules select').count(), 0);
     await readPage.getByRole('link', { name: '赛事设置', exact: true }).click();
     await readPage.locator('.setup-readonly-group').first().waitFor();
-    assert.equal(await readPage.locator('.team-rules').count(), 0);
-    assert.equal((await readPage.locator('.setup-readonly-group').first().innerText()).includes('9局5胜'), false);
-    await readonly.close(); pass('查看角色规则专页显示摘要且无编辑入口');
+    assert.equal(await readPage.locator('#setup-rules .rules-readonly').count(), 1);
+    assert.ok((await readPage.locator('#setup-rules').innerText()).includes('9局5胜'));
+    await readonly.close(); pass('查看角色在赛事设置第 4 分区只读显示摘要且无编辑入口');
     for (const role of ['organizer', 'recorder']) {
       await api('POST', '/api/users', { username: `rules-${role}`, display_name: `规则${role}`, password: 'ViewerRules123', role, event_ids: [identity.event_id] });
       const roleToken = (await api('POST', '/api/login', { username: `rules-${role}`, password: 'ViewerRules123' })).token;
@@ -290,15 +296,15 @@ try {
       await roleContext.addInitScript(({ token, event }) => { localStorage.setItem('stss_token', token); localStorage.setItem('stss_event', String(event)); }, { token: roleToken, event: identity.event_id });
       const rolePage = await roleContext.newPage();
       await rolePage.goto(`${base}/#/teamRules?event=${identity.event_id}`);
-      await rolePage.locator('.team-rules-page article').first().waitFor();
-      assert.ok((await rolePage.locator('.team-rules-page').innerText()).includes('9局5胜'));
-      assert.equal(await rolePage.locator('.rules-project-card input,.rules-project-card select,.rules-project-card button').count(), 0);
+      await rolePage.locator('#setup-rules .rules-readonly').waitFor();
+      assert.ok((await rolePage.locator('#setup-rules').innerText()).includes('9局5胜'));
+      assert.equal(await rolePage.locator('#setup-rules .rules-project-card input, #setup-rules .rules-project-card select, #setup-rules .rules-project-card button').count(), 0);
       await rolePage.getByRole('link', { name: '赛事设置', exact: true }).click();
       await rolePage.locator('.setup-readonly-group').first().waitFor();
-      assert.equal((await rolePage.locator('.setup-readonly-group').first().innerText()).includes('9局5胜'), false);
+      assert.equal(await rolePage.locator('#setup-rules .rules-readonly').count(), 1);
       await roleContext.close();
     }
-    pass('编排和记录角色规则页只读，所有非管理员旧位置无规则摘要');
+    pass('编排和记录角色在赛事设置第 4 分区只读且无编辑入口');
     await page.goto(`${base}/#/teamRules?event=${identity.event_id}`); await editor().waitFor();
     const detail = editor().locator('.team-rules-details').first();
     if (await detail.evaluate(el => el.open)) await detail.locator('summary').click();
@@ -307,7 +313,7 @@ try {
     pass('比赛规则折叠区可键盘打开');
     await editor().getByLabel('普通局常用规则', { exact: true }).selectOption('0');
     await page.getByRole('link', { name: '赛事设置', exact: true }).click();
-    const leave = page.getByRole('dialog', { name: '离开三人赛规则设置', exact: true });
+    const leave = page.getByRole('dialog', { name: '离开赛事设置', exact: true });
     await leave.waitFor();
     await leave.getByRole('button', { name: '取消', exact: true }).click();
     assert.ok(new URL(page.url()).hash.startsWith('#/teamRules'));
@@ -315,15 +321,91 @@ try {
     await page.getByRole('link', { name: '赛事设置', exact: true }).click();
     await leave.getByRole('button', { name: '放弃并离开', exact: true }).click();
     await page.locator('.setup-basic-panel').waitFor();
-    assert.equal(await page.locator('.team-rules').count(), 0);
+    assert.equal(await page.locator('#setup-rules .team-rules').count(), 1);
+    assert.equal(await page.locator('#setup-rules .team-rules-state').innerText(), '已保存');
     await page.getByRole('button', { name: '修改资料', exact: true }).click();
     const eventName = page.getByLabel('赛事名称', { exact: true });
     await eventName.fill('资料输入仍可取消');
     await page.locator('.setup-basic-panel').getByRole('button', { name: '取消', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '放弃修改', exact: true }).click();
-    await page.getByRole('link', { name: '三人赛规则设置', exact: true }).click();
+    await page.getByRole('navigation', { name: '赛事设置导航', exact: true }).getByRole('button', { name: '三人赛规则', exact: true }).click();
     await editor().waitFor(); await open();
-    pass('未保存规则离开取消保留输入，放弃后旧设置无入口且赛事资料仍可编辑取消');
+    pass('未保存规则离开取消保留输入，放弃后同页恢复已保存值且赛事资料仍可编辑取消');
+
+    // 聚合离开保护：规则草稿与其它分区草稿由同一个页面级确认覆盖。
+    await page.goto(`${base}/#/teamRules?event=${identity.event_id}`); await editor().waitFor(); await open();
+    await editor().getByLabel('比赛局制', { exact: true }).selectOption('3');
+    await page.locator('#setup-event').getByRole('button', { name: '修改资料', exact: true }).click();
+    const combinedName = page.locator('#setup-event').getByLabel('赛事名称', { exact: true });
+    await combinedName.fill('聚合保护暂存名称');
+    await page.getByRole('link', { name: '赛事设置', exact: true }).click();
+    const combinedLeave = page.getByRole('dialog', { name: '离开赛事设置', exact: true });
+    await combinedLeave.waitFor();
+    await combinedLeave.getByRole('button', { name: '取消', exact: true }).click();
+    assert.equal(await editor().getByLabel('比赛局制', { exact: true }).inputValue(), '3');
+    assert.equal(await combinedName.inputValue(), '聚合保护暂存名称');
+    await page.getByRole('link', { name: '赛事设置', exact: true }).click();
+    await page.getByRole('dialog', { name: '离开赛事设置', exact: true }).getByRole('button', { name: '放弃并离开', exact: true }).click();
+    await page.locator('.setup-basic-panel').waitFor();
+    assert.equal(await page.locator('#setup-rules .team-rules-state').innerText(), '已保存');
+    pass('规则与其它分区草稿由同一离开确认聚合：取消保留双方输入，放弃后恢复已保存值');
+
+    // 保存规则只提交规则分区，未提交的赛事资料草稿保持。
+    await page.goto(`${base}/#/teamRules?event=${identity.event_id}`); await editor().waitFor(); await open();
+    const beforeIndependent = await api('GET', pathRules);
+    await page.locator('#setup-event').getByRole('button', { name: '修改资料', exact: true }).click();
+    const pendingName = page.locator('#setup-event').getByLabel('赛事名称', { exact: true });
+    await pendingName.fill('规则保存时不提交的资料草稿');
+    let independentEventPuts = 0;
+    const watchIndependentPuts = request => { if (request.method() === 'PUT' && request.url() === `${base}/api/events/${identity.event_id}`) independentEventPuts++; };
+    page.on('request', watchIndependentPuts);
+    await editor().getByLabel('普通局常用规则', { exact: true }).selectOption('0');
+    await save(); await confirm(); await waitSaved();
+    page.off('request', watchIndependentPuts);
+    assert.equal(independentEventPuts, 0);
+    assert.equal((await api('GET', `/api/events/${identity.event_id}/structure`)).event.name, '三人赛规则测试赛事');
+    assert.equal(await pendingName.inputValue(), '规则保存时不提交的资料草稿');
+    const changedRules = await api('GET', pathRules);
+    assert.equal(changedRules.rules.regular.target_points, 15);
+    await page.locator('#setup-event').getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('dialog', { name: '取消修改赛事资料', exact: true }).getByRole('button', { name: '放弃修改', exact: true }).click();
+    // 还原测试夹具规则，后续既有用例按原后台状态继续。
+    await api('PUT', pathRules, { rules: beforeIndependent.rules, expected_revision: changedRules.rules_revision, impact_token: changedRules.impact_token });
+    pass('保存规则不提交其它分区草稿，赛事资料仍保持未保存输入');
+
+    // 规则元数据非法：只在规则分区报错并禁写，其它设置保持可用。
+    const structurePath = `**/api/events/${identity.event_id}/structure`;
+    await page.goto(`${base}/#/teamRules?event=${identity.event_id}`); await editor().waitFor();
+    await page.route(structurePath, async route => {
+      const response = await route.fetch(); const payload = await response.json();
+      payload.team_rules = { ...payload.team_rules, rules_revision: 0 };
+      await route.fulfill({ response, json: payload });
+    });
+    await page.reload();
+    await page.locator('#setup-rules .setup-rules-error').waitFor();
+    assert.equal(await page.locator('#setup-rules').getByRole('button', { name: '保存规则', exact: true }).count(), 0);
+    await page.unroute(structurePath);
+    await page.locator('#setup-event').getByRole('button', { name: '修改资料', exact: true }).click();
+    assert.equal(await page.locator('#setup-event').getByLabel('赛事名称', { exact: true }).isVisible(), true);
+    await page.locator('#setup-event').getByRole('button', { name: '取消', exact: true }).click();
+    await page.locator('#setup-rules').getByRole('button', { name: '重新读取状态', exact: true }).click();
+    await editor().waitFor();
+    pass('规则元数据非法时规则分区局部报错禁写，其它设置可用并可重新核对');
+
+    // 显式赛事参数非法时不静默回退当前赛事。
+    await page.goto(`${base}/#/setup?event=999999`);
+    await page.getByText('链接中的赛事不存在或当前账号不可访问。', { exact: true }).waitFor();
+    assert.equal(await page.locator('.setup-page').count(), 0);
+    await page.goto(`${base}/#/teamRules?event=999999`);
+    await page.getByText('链接中的赛事不存在或当前账号不可访问。', { exact: true }).waitFor();
+    pass('非法赛事参数明确报错，不回退到当前赛事');
+
+    // 旧链接的过期组别/项目参数不再缩小规则范围。
+    await page.goto(`${base}/#/teamRules?event=${identity.event_id}&group=999999&category=888`);
+    await editor().waitFor();
+    assert.equal(new URL(page.url()).hash.includes('group='), false);
+    assert.equal(new URL(page.url()).hash.includes('category='), false);
+    pass('旧 teamRules 链接保留兼容并清理过期组别/项目参数');
 
     const originalIdentity = identity;
     const otherEvent = await api('POST', '/api/events', { name: '规则切换空赛事' });
@@ -335,14 +417,15 @@ try {
     await page.locator('#event-select').selectOption(String(otherEvent.event_id));
     const emptyEventEditor = page.locator(`section.team-rules[data-event-id="${otherEvent.event_id}"]`);
     await emptyEventEditor.waitFor();
-    assert.ok(new URL(page.url()).hash.startsWith('#/teamRules'));
+    assert.ok(new URL(page.url()).hash.startsWith('#/setup'));
+    assert.ok(new URL(page.url()).hash.includes('step=rules'));
     assert.equal(await page.locator('.team-rules').count(), 1);
     assert.ok((await page.locator('.rules-project-count').innerText()).includes('可以先保存规则'));
     assert.ok((await emptyEventEditor.innerText()).includes('3局2胜'));
-    assert.equal(await page.locator('#sidenav a.active').textContent(), '三人赛规则设置');
+    assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
     await page.locator('#event-select').selectOption(String(identity.event_id));
     await editor().waitFor(); await open();
-    assert.equal(await page.locator('#sidenav a.active').textContent(), '三人赛规则设置');
+    assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
     pass('刷新直达规则页，切换赛事保留专页，无三人赛项目也能预配置且规则独立');
 
     let releaseStructure, arrivedStructure;
@@ -358,9 +441,9 @@ try {
     await page.locator('#event-select').selectOption(String(identity.event_id));
     releaseStructure(); await page.unroute(otherStructure);
     await editor().waitFor();
-    assert.ok((await page.locator('.rules-page-heading p').innerText()).includes('三人赛规则测试赛事'));
+    assert.ok((await page.locator('.setup-page-head .setup-current-event').innerText()).includes('三人赛规则测试赛事'));
     assert.equal(await page.getByRole('heading', { name: '仅个人组', exact: true }).count(), 0);
-    assert.equal(await page.locator('#sidenav a.active').textContent(), '三人赛规则设置');
+    assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
     pass('切换赛事时迟到结构响应不污染新页面');
     await open();
 
@@ -379,7 +462,7 @@ try {
     assert.equal(await editor().getByRole('button', { name: '保存规则', exact: true }).isDisabled(), true);
     await page.getByRole('link', { name: '赛事设置', exact: true }).click();
     await page.getByText('请先完成保存或核对保存结果', { exact: true }).waitFor();
-    assert.ok(new URL(page.url()).hash.startsWith('#/teamRules'));
+    assert.ok(new URL(page.url()).hash.includes('step=rules'));
     await page.evaluate(async () => { const client = await import('/js/api.js'); client.setToken('changed-session-for-test'); });
     releaseRead(); await readFinished; await page.unroute('**' + pathRules);
     assert.equal(await page.getByRole('dialog', { name: '确认修改比赛规则' }).count(), 0);
@@ -388,7 +471,7 @@ try {
     page.once('dialog', dialog => dialog.accept());
     await page.reload(); await editor().waitFor();
     assert.equal(await page.locator('.rules-project-card').count(), 1);
-    assert.equal(await page.locator('#sidenav a.active').textContent(), '三人赛规则设置');
+    assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
     await open();
     assert.equal(await editor().getByRole('button', { name: '保存规则', exact: true }).isEnabled(), true);
     assert.equal(await editor().getByLabel('普通局目标分', { exact: true }).inputValue(), '2');
@@ -440,11 +523,11 @@ try {
         const card = document.querySelector('.rules-project-card'), section = document.querySelector('.team-rules-section');
         const controls = [...document.querySelectorAll('.team-rules button,.team-rules select,.rules-context select')]
           .filter(el => el.getClientRects().length).map(el => el.getBoundingClientRect());
-        return { scroll: document.documentElement.scrollWidth, width: innerWidth, page: document.querySelector('.team-rules-page').getBoundingClientRect().width,
+        return { scroll: document.documentElement.scrollWidth, width: innerWidth, panel: document.querySelector('#setup-rules').getBoundingClientRect().width,
           outside: controls.some(r => r.left < 0 || r.right > innerWidth + 1), short: controls.some(r => r.height < 43.5),
           sectionPadding: parseFloat(getComputedStyle(section).paddingTop), cardPadding: parseFloat(getComputedStyle(card).paddingLeft) };
       });
-      assert.ok(geometry.scroll <= width + 1 && geometry.page <= 1100.5 && !geometry.outside && !geometry.short, JSON.stringify(geometry));
+      assert.ok(geometry.scroll <= width + 1 && geometry.panel <= width + 1 && !geometry.outside && !geometry.short, JSON.stringify(geometry));
       assert.ok(geometry.sectionPadding >= 24); if (width <= 760) assert.ok(geometry.cardPadding <= 18);
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: path.join(artifacts, `team-rules-custom-${width}.png`), fullPage: true });
@@ -453,7 +536,7 @@ try {
     await page.setViewportSize({ width: 1365, height: 1000 });
     await page.reload(); await editor().waitFor();
     assert.equal(await editor().getByLabel('自定义最多局数', { exact: true }).inputValue(), '7');
-    pass('四宽度长赛事名/自定义参数、1100阅读宽度、24分区间距和44像素控件通过');
+    pass('四宽度长赛事名/自定义参数、分区无横向溢出、24分区间距和44像素控件通过');
     // Build actual mixed legacy SQLite data, then exercise the one-time unification UI.
     const legacyFixture = spawnSync(process.env.STSS_PYTHON || 'python', ['-B', '-c', `
 import sys
