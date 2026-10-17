@@ -264,6 +264,10 @@ let modalDepth = 0;
 const activeModals = [];
 let pageLeaveGuard = null;
 let pageHasUnsaved = null;
+/* 站内路由守卫：只用于“正在进行、必须等结果”的操作（如后台抽取/保存请求）。
+   应用内切换菜单时，route() 在 abort 旧视图之前先询问这里，因此绝不能在这里弹确认框：
+   那会拦下每一次菜单跳转；离开页面的提醒由上方 pageLeaveGuard/beforeunload 负责。 */
+let routerBlockGuard = null;
 
 /* 路由在重新渲染前会清空旧守卫。但旧页面此刻仍然挂在屏幕上（新页面还要等接口），
    这时清掉守卫就会出现“界面还显示未提交修改、离开确认却不再触发”的空窗。
@@ -275,7 +279,7 @@ export function markPageLeaveGuardPending() {
 }
 
 export function settlePageLeaveGuard() {
-  if (pendingNavigation) { pageLeaveGuard = null; pageHasUnsaved = null; }
+  if (pendingNavigation) { pageLeaveGuard = null; pageHasUnsaved = null; routerBlockGuard = null; }
   pendingNavigation = false;
 }
 
@@ -286,15 +290,28 @@ export function setPageLeaveGuard(guard, hasUnsaved = null, isCurrent = null) {
   pageLeaveGuard = guard && (async () => !isCurrent || isCurrent() ? guard() : true);
   pageHasUnsaved = hasUnsaved && (() => (!isCurrent || isCurrent()) && hasUnsaved());
 }
+
+/* 返回 false 才拦下站内路由；未设置时站内跳转不受影响。 */
+export function setRouterBlockGuard(guard = null, isCurrent = null) {
+  if (isCurrent && !isCurrent()) return;
+  if (guard === null && pendingNavigation) return;
+  routerBlockGuard = guard && ((() => (!isCurrent || isCurrent()) && guard()));
+}
 window.addEventListener('beforeunload', (event) => {
   if (pageHasUnsaved?.()) { event.preventDefault(); event.returnValue = ''; }
 });
 
 /* 路由切换与浏览器前进/后退统一经过当前弹窗的离开保护。
-   保存进行中返回 false；有未保存输入时 formDialog 会先让用户选择。 */
+   站内跳转只受 routerBlockGuard（进行中的请求）限制，不弹离开确认；
+   有未保存输入时由 formDialog 自己先让用户选择。 */
 export async function prepareNavigation() {
   const top = activeModals[activeModals.length - 1];
   if (top && !await top.requestClose()) return false;
+  if (routerBlockGuard) {
+    const allowed = await routerBlockGuard();
+    if (allowed === false) return false;
+    return true;
+  }
   return pageLeaveGuard ? pageLeaveGuard() : true;
 }
 

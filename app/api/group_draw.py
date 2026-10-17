@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 from .. import db, idempotency, security
-from ..domain.group_draw import draw_groups
+from ..domain.group_draw import draw_groups, method_label
 from ..domain.slots import pool_name
 from ..errors import bad_request, conflict, forbidden, not_found
 from ..http_server import route
@@ -194,7 +194,7 @@ def print_draw(ctx):
     rows = [[group['name'], index + 1, member['school_name'],
              f"第{member['pot']}档" if member['pot'] else '—', member['seed_no'] or '—']
             for group in detail['groups'] for index, member in enumerate(group['members'])]
-    note = (f"抽签编号：{draw['id']}；方式：{'种子分档' if draw['method'] == 'seeded' else '完全随机'}；"
+    note = (f"抽签编号：{draw['id']}；方式：{method_label(draw['method'])}；"
             f"确认人：{detail['confirmed_by_name']}；确认时间：{draw['confirmed_at']}。")
     return _print_response(ctx, '学校小组抽签分组表', cat['event_name'],
                            f"{cat['group_name']} · {_category_label(cat['name'], cat['gender'])}",

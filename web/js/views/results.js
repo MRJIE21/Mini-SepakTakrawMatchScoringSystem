@@ -5,6 +5,7 @@
 import { api, download, openHtml, captureRequestContext } from '../api.js';
 import { registerView, state, loadStructure, go } from '../main.js';
 import { workspaceLink } from '../workspaceContext.js';
+import { mountIndividualDraw } from '../individualDraw.js';
 import {
   h, field, selectInput, textInput, table, toast, modal, confirmDialog, confirmAsync, clear,
   statusBadge, task, formDialog, searchSelect, emptyState, errorState, loadingState,
@@ -77,6 +78,15 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
       onclick: task(() => openHtml('/api/exports/category-notice.html', { category_id: cat.id }, '项目成绩单')),
     }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null));
 
+  if (cat.kind === 'individual') {
+    const drawBox = h('div'); el.append(drawBox);
+    /* 只读角色（viewer/recorder）不操作抽签：面板对它们只读取正式签表，
+       不会因为 GET /session 的 403 报错。 */
+    try {
+      await mountIndividualDraw({ container: drawBox, category: cat, canManage: canWrite(),
+        requestContext, signal, isCurrent });
+    } catch (error) { if (isCurrent()) drawBox.append(errorState(error)); }
+  }
   const standingsBox = h('div');
   const placementBox = h('div');
   el.append(standingsBox, placementBox);

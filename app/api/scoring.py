@@ -398,6 +398,9 @@ def _submit_individual(ctx):
                        detail={"errors": errors})
     existing = db.q1(ctx.conn, "SELECT * FROM individual_results WHERE category_id = ? AND participation_id = ?",
                      (cat["id"], pid))
+    if not existing:
+        from ..individual_draw_store import guard_recording
+        guard_recording(ctx.conn, cat['id'])
     base_version = require_version(payload)
     current_version = existing["version"] if existing else 0
     if base_version != current_version:

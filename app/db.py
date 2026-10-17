@@ -77,6 +77,11 @@ def get_event_conn(event_id: int) -> sqlite3.Connection:
         if not path.exists():
             raise FileNotFoundError(f"赛事数据库不存在：{path.name}")
         conn = connect(path, existing=True)
+        if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='individual_draw_sessions'").fetchone():
+            conn.close()
+            init_db(path)
+            conn = connect(path, existing=True)
         conns[event_id] = conn
     return conn
 
@@ -242,11 +247,52 @@ def init_db(db_path: Path | str | None = None) -> None:
     conn = connect(db_path)
     try:
         from . import team_rules_store
+        from . import individual_draw_store
+        from . import individual_draw_session_store
+        individual_draw_store.backup_before_upgrade(conn)
+        individual_draw_session_store.backup_before_upgrade(conn)
         team_rules_store.backup_before_upgrade(conn)
         conn.executescript(schema)
         _migrate(conn)
+        _migrate_group_draw_method(conn)
     finally:
         conn.close()
+
+
+def _migrate_group_draw_method(conn: sqlite3.Connection) -> None:
+    """旧库的 group_draws 只允许 random/seeded，新增循环落位需要重建表。
+
+    SQLite 无法修改 CHECK 约束，只能新建同构表→复制数据→替换。
+    升级前先留 .sqlite 快照（serve() 只扫描 event_*.db，不会误升级快照）。
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='group_draws'").fetchone()
+    if not row or "'cycle'" in (row['sql'] or ''):
+        return
+    from .team_rules_store import _backup
+    _backup(conn, '.before-group-cycle-v1.sqlite')
+    conn.executescript('''
+        CREATE TABLE group_draws_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+          method TEXT NOT NULL CHECK (method IN ('random','seeded','cycle')),
+          status TEXT NOT NULL DEFAULT 'drawing' CHECK (status IN ('drawing','complete','confirmed','cancelled')),
+          rev INTEGER NOT NULL DEFAULT 1,
+          revealed INTEGER NOT NULL DEFAULT 0,
+          capacities_json TEXT NOT NULL,
+          roster_json TEXT NOT NULL,
+          steps_json TEXT NOT NULL,
+          created_by INTEGER REFERENCES users(id),
+          created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+          confirmed_by INTEGER REFERENCES users(id),
+          confirmed_at TEXT,
+          cancel_reason TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO group_draws_new SELECT * FROM group_draws;
+        DROP TABLE group_draws;
+        ALTER TABLE group_draws_new RENAME TO group_draws;
+        CREATE INDEX IF NOT EXISTS idx_group_draws_category ON group_draws(category_id, id);
+    ''')
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

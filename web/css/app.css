@@ -533,6 +533,10 @@ table.roster-table .roster-actions { width: 130px; }
 .draw-reveal { text-align: center; padding: 28px 16px; margin-bottom: 18px; background: #f1f6ff; border: 1px solid #d7e3f6; border-radius: 12px; }
 .draw-school { font-size: clamp(24px, 4vw, 40px); font-weight: 700; margin: 10px 0; overflow-wrap: anywhere; }
 .draw-destination { font-size: 20px; color: var(--brand); font-weight: 600; }
+/* 小组抽签滚动揭晓：只换文字、不换背景，避免闪烁；滚动期间不播报姓名 */
+.draw-school-roll-label { font-size: 13px; font-weight: 600; color: var(--brand-dark); }
+.draw-school-rolling { color: var(--brand); }
+.group-draw[data-draw-rolling="true"] .draw-reveal { background: #eef4ff; }
 .draw-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px; }
 .draw-group { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; }
 .draw-group ol { padding-left: 24px; margin: 12px 0 0; }
@@ -546,6 +550,97 @@ table.roster-table .roster-actions { width: 130px; }
 .group-draw:fullscreen .draw-history, .group-draw:fullscreen .draw-log { display: none; }
 @media (max-width: 900px) {
   .group-draw { scroll-margin-top: 64px; }
+}
+
+/* 个人赛逐人抽签：主卡滚动 / 逐人揭晓 / 进度与名单（窄屏主卡与名单上下排列） */
+.individual-draw { min-width: 0; overflow-wrap: anywhere; }
+.individual-draw .panel-head { gap: 12px; }
+.individual-draw .draw-progress { align-items: baseline; margin: 12px 0; }
+.draw-progress-count { font-weight: 700; }
+.draw-body { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 14px; }
+.draw-main-card {
+  min-width: 0; padding: 20px 16px; text-align: center; border-radius: 12px;
+  background: linear-gradient(180deg, #f7faff, #eef4ff); border: 1px solid #d7e3f6;
+}
+.draw-main-label { font-size: 15px; font-weight: 700; color: var(--brand-dark); overflow-wrap: anywhere; }
+.draw-roll { margin-top: 12px; }
+.draw-roll-name { margin: 0; font-size: clamp(26px, 7vw, 44px); font-weight: 700; line-height: 1.2; color: var(--brand); overflow-wrap: anywhere; }
+.draw-roll-school { margin-top: 6px; font-size: clamp(14px, 3.4vw, 20px); color: var(--text); overflow-wrap: anywhere; }
+.draw-roll-static { margin-top: 12px; font-size: 18px; font-weight: 700; color: var(--brand-dark); overflow-wrap: anywhere; }
+.draw-wait { margin-top: 14px; font-size: 15px; color: var(--muted); }
+/* .draw-reveal 与小组抽签共用基础样式，这里只覆盖本面板的间距，避免影响小组抽签 */
+.individual-draw .draw-reveal { margin: 14px 0 0; padding: 22px 14px; }
+.draw-reveal-order { font-size: 13px; letter-spacing: .04em; color: var(--muted); }
+.draw-reveal-name { margin: 6px 0 4px; font-size: clamp(26px, 7vw, 42px); font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+.draw-reveal-school { font-size: clamp(14px, 3.4vw, 20px); color: var(--text); overflow-wrap: anywhere; }
+.draw-columns { display: grid; gap: 12px; min-width: 0; }
+.draw-card { min-width: 0; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.draw-card .panel-head { margin-bottom: 8px; }
+.draw-card h4 { margin: 0; }
+.draw-candidates, .draw-revealed {
+  min-width: 0; margin: 0; padding: 0; list-style: none;
+  max-height: min(320px, 42vh); overflow: auto; overscroll-behavior: contain;
+}
+.draw-candidates li, .draw-revealed li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  padding: 7px 2px; border-bottom: 1px solid var(--line); font-size: 13px; min-width: 0;
+}
+.draw-candidates li:last-child, .draw-revealed li:last-child { border-bottom: none; }
+.draw-candidate-name, .draw-person { font-weight: 600; overflow-wrap: anywhere; }
+.draw-revealed li[data-draw-new="true"] { background: #eef6ff; }
+.draw-order { flex: 0 0 auto; min-width: 3.4em; font-weight: 700; color: var(--brand); }
+.draw-live { margin-top: 14px; }
+.draw-live-status { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.draw-live .warn-box, .draw-live .info-box { margin-top: 8px; }
+.draw-actions { flex-wrap: wrap; }
+.draw-actions .btn { min-height: 40px; }
+.draw-official summary { cursor: pointer; padding: 8px 0; }
+.individual-draw [hidden] { display: none !important; }
+
+/* 操作区固定位置：进度与操作栏排在所有可变内容之前，动态区域各自预留高度，
+   状态切换只在这些区域内变化，按钮不会随提示增减或内容换行而移动。 */
+.individual-draw .draw-progress { min-height: 34px; }
+.individual-draw .draw-actions {
+  align-items: center; min-height: 44px; margin-top: 8px; margin-bottom: 4px;
+}
+.individual-draw .draw-main-card { min-height: 148px; }
+.individual-draw .draw-roll-name, .individual-draw .draw-reveal-name { min-height: 1.3em; }
+.individual-draw .draw-roll-school, .individual-draw .draw-reveal-school { min-height: 1.2em; }
+.individual-draw .draw-roll, .individual-draw .draw-reveal, .individual-draw .draw-wait {
+  min-height: 76px;
+}
+.individual-draw .draw-live { min-height: 40px; }
+.individual-draw .draw-columns { align-items: start; }
+
+/* 全屏显示：面板铺满视口并保持内部滚动，四档宽度与窄屏纵排沿用既有规则。 */
+.individual-draw:fullscreen {
+  width: 100%; height: 100%; max-height: 100%; overflow: auto;
+  margin: 0; border-radius: 0; border: none; padding: 16px 18px 24px;
+  background: var(--panel, #fff); overscroll-behavior: contain;
+}
+/* 全屏面板会自身滚动，头部必须常驻，否则退出全屏与“刷新状态”会被滚出视野。 */
+.individual-draw:fullscreen .panel-head {
+  position: sticky; top: -16px; z-index: 3; margin: -16px -18px 0; padding: 12px 18px;
+  background: var(--panel, #fff); border-bottom: 1px solid var(--line);
+}
+.individual-draw:fullscreen .draw-body { align-items: start; }
+.individual-draw:fullscreen .draw-candidates,
+.individual-draw:fullscreen .draw-revealed { max-height: min(48vh, 420px); }
+.individual-draw:-webkit-full-screen {
+  width: 100%; height: 100%; overflow: auto; padding: 16px 18px 24px;
+}
+.individual-draw:-webkit-full-screen .panel-head {
+  position: sticky; top: -16px; z-index: 3; margin: -16px -18px 0; padding: 12px 18px;
+  background: var(--panel, #fff); border-bottom: 1px solid var(--line);
+}
+
+@media (max-width: 900px) {
+  .draw-body { grid-template-columns: minmax(0, 1fr); }
+  .draw-candidates, .draw-revealed { max-height: none; }
+}
+@media (max-width: 420px) {
+  .draw-main-card { padding: 16px 12px; }
+  .draw-actions .btn { width: 100%; }
 }
 
 /* 更多菜单：次要/危险操作不与主操作混排（§6.1、Q13） */

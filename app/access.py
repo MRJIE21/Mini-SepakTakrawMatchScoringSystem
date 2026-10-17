@@ -56,8 +56,10 @@ def _claim(ctx, kind, sid, transfer=False):
         if blocker:
             raise conflict(blocker, code='plan_not_locked')
     else:
-        row = db.q1(ctx.conn, "SELECT p.id FROM participations p JOIN categories c ON c.id=p.category_id WHERE p.id=? AND c.kind='individual' AND p.status='active'", (sid,))
+        row = db.q1(ctx.conn, "SELECT p.id,p.category_id FROM participations p JOIN categories c ON c.id=p.category_id WHERE p.id=? AND c.kind='individual' AND p.status='active'", (sid,))
         if not row: raise not_found('个人赛报名不存在')
+        from .individual_draw_store import guard_recording
+        guard_recording(ctx.conn, row['category_id'])
         if db.q1(ctx.conn, 'SELECT id FROM individual_results WHERE participation_id=?', (sid,)):
             raise conflict('已提交成绩请通过更正流程修改')
     old = assignment(ctx.conn, kind, sid)
@@ -117,7 +119,7 @@ def authorize(ctx, scope):
         if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
             return
         raise forbidden('当前角色没有该操作权限')
-    shared = [r'/api/events/\d+/structure', r'/api/events/\d+/team-rules', r'/api/events/\d+/venues', r'/api/matches', r'/api/matches/\d+', r'/api/receipts/[\w.-]+', r'/api/categories/\d+/team-rules']
+    shared = [r'/api/events/\d+/structure', r'/api/events/\d+/team-rules', r'/api/events/\d+/venues', r'/api/matches', r'/api/matches/\d+', r'/api/receipts/[\w.-]+', r'/api/categories/\d+/team-rules', r'/api/categories/\d+/individual-draw']
     recorder = [r'/api/scoring/queue', r'/api/scoring/match/\d+', r'/api/submissions/[\w.-]+',
                 r'/api/matches/\d+/submissions', r'/api/categories/\d+/participations', r'/api/categories/\d+/individual-results']
     viewer = [r'/api/categories/\d+/(?:plan|schedule)', r'/api/plans/\d+', r'/api/pools/\d+/standings',

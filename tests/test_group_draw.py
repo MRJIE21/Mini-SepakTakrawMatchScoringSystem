@@ -35,6 +35,63 @@ class DrawRulesTest(unittest.TestCase):
                     for step in steps:
                         self.assertEqual(step['pot'], step['participation_id'] // groups + 1)
 
+    def test_cycle_places_schools_round_robin_and_keeps_existing_methods(self):
+        """循环落位：每签随机抽一所，再按 A,B,C,A,B… 轮流落组；既有两个方式输出不变。"""
+        from app.domain.group_draw import method_label
+        roster = [{'id': i} for i in range(1, 13)]
+        for caps, expected in (([6, 6], [0, 1] * 6),
+                               ([4, 4, 4], [0, 1, 2] * 4),
+                               ([1] * 12, list(range(12)))):
+            for seed in range(20):
+                steps = draw_groups(roster, 'cycle', caps, random.Random(seed))
+                self.assertEqual([s['group'] for s in steps], expected)
+                self.assertEqual(sorted(s['participation_id'] for s in steps), list(range(1, 13)))
+                self.assertEqual([sum(s['group'] == g for s in steps) for g in range(len(caps))], caps)
+                self.assertTrue(all(s['pot'] is None for s in steps))
+        # 名额不等时靠前小组先满，满员组被跳过
+        small = [{'id': i} for i in range(1, 9)]
+        groups = [s['group'] for s in draw_groups(small, 'cycle', [5, 3], random.Random(3))]
+        self.assertEqual(sorted(groups), [0] * 5 + [1] * 3)
+        self.assertEqual(groups[:6], [0, 1, 0, 1, 0, 1])
+        # 单组退化
+        self.assertEqual([s['group'] for s in draw_groups(small, 'cycle', [8], random.Random(1))], [0] * 8)
+        # 方式名称统一映射；未知值回退原样，历史方式名称不变
+        self.assertEqual(method_label('cycle'), '循环落位')
+        self.assertEqual(method_label('random'), '完全随机')
+        self.assertEqual(method_label('seeded'), '种子分档')
+        self.assertEqual(method_label('legacy'), 'legacy')
+        # 非法方式被拒
+        with self.assertRaises(ValueError): draw_groups(small, 'cycle-x', [4, 4])
+        # 既有 random / seeded 分支未改动：相同随机源下结果确定且满足原不变量
+        seeded = [{'id': i, 'seed_no': i + 1} for i in range(8)]
+        first = draw_groups(seeded, 'seeded', [4, 4], random.Random(7))
+        again = draw_groups(seeded, 'seeded', [4, 4], random.Random(7))
+        self.assertEqual(first, again)
+        self.assertEqual(sorted(s['participation_id'] for s in first), list(range(8)))
+        self.assertEqual([sum(s['group'] == g for s in first) for g in range(2)], [4, 4])
+        self.assertEqual(sorted(s['pot'] for s in first if s['group'] == 0), [1, 2, 3, 4])
+        self.assertEqual(sorted(s['pot'] for s in first if s['group'] == 1), [1, 2, 3, 4])
+        rand_first = draw_groups([{'id': i} for i in range(8)], 'random', [4, 4], random.Random(7))
+        rand_again = draw_groups([{'id': i} for i in range(8)], 'random', [4, 4], random.Random(7))
+        self.assertEqual(rand_first, rand_again)
+
+    def test_cycle_uses_one_random_choice_per_school(self):
+        """每签只向随机源要一次，且候选恰为尚未抽到的学校。"""
+        class Chooser:
+            def __init__(self):
+                self.pools = []
+            def choice(self, pool):
+                self.pools.append(sorted(p['id'] for p in pool))
+                return pool[0]
+        chooser = Chooser()
+        roster = [{'id': i} for i in range(1, 6)]
+        steps = draw_groups(roster, 'cycle', [3, 2], chooser)
+        self.assertEqual(len(chooser.pools), 5)
+        self.assertEqual([len(pool) for pool in chooser.pools], [5, 4, 3, 2, 1])
+        self.assertEqual([s['participation_id'] for s in steps], [1, 2, 3, 4, 5])
+        self.assertEqual([s['group'] for s in steps], [0, 1, 0, 1, 0])
+
+
     def test_invalid_settings_and_missing_or_duplicate_seeds(self):
         roster = [{'id': i, 'seed_no': i + 1} for i in range(8)]
         for caps in ([], [3, 3], [0, 8], [-1, 9], [4.0, 4], [True, 7]):

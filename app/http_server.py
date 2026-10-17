@@ -504,4 +504,4 @@ def serve(host: str | None = None, port: int | None = None):
 
 def load_routes():
     """导入所有接口模块以注册路由。"""
-    from .api import auth, catalog, scheduling, schedule, auto_schedule, matches, scoring, standings, exports, admin, imports, school_registration, school_import, group_draw  # noqa: F401
+    from .api import auth, catalog, scheduling, schedule, auto_schedule, individual_draw, matches, scoring, standings, exports, admin, imports, school_registration, school_import, group_draw  # noqa: F401

@@ -1022,7 +1022,11 @@ def list_participations(ctx):
             item["task_status"] = "有待记录场次" if ready["n"] else "等待后续场次"
             item["task_status_kind"] = "info" if ready["n"] else ""
         out.append(item)
-    return {"category": cat, "participations": out}
+    result = {"category": cat, "participations": out}
+    if cat['kind'] == 'individual':
+        from ..individual_draw_store import attach
+        result['individual_draw'] = attach(ctx.conn, category_id, out)
+    return result
 
 
 @route("POST", r"/api/categories/(?P<category_id>\d+)/participations", roles=ORG)
@@ -1548,6 +1552,8 @@ def delete_participation(ctx):
         raise conflict("该参赛主体已有名次记录，请先删除名次或改用“退出”标记", code="in_use")
     if db.q1(ctx.conn, "SELECT id FROM individual_results WHERE participation_id = ?", (pid,)):
         raise conflict("该参赛主体已有成绩记录，不能删除；请改用“退出”标记", code="in_use")
+    if part['athlete_id']:
+        registration.guard_change(ctx.conn, part['category_id'])
     with db.tx(ctx.conn):
         db.run(ctx.conn, "DELETE FROM pool_members WHERE participation_id = ?", (pid,))
         subject = get_or_404(ctx.conn, 'teams' if part['team_id'] else 'athletes', part['team_id'] or part['athlete_id'], '参赛主体')

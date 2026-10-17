@@ -116,8 +116,15 @@ try {
   assert.equal((await drafts()).filter(d => d.kind === 'individual').length, 0);
   pass('个人赛仅提供提交，关闭可放弃未提交输入');
   const firstRow = () => page.getByRole('row').filter({ hasText: '选手1' });
+  const resultText = async row => {
+    await row.waitFor();
+    const headings = await row.locator('xpath=ancestor::table').getByRole('columnheader').allTextContents();
+    const index = headings.findIndex(text => text === '最终成绩');
+    assert.ok(index >= 0, '个人赛表格必须保留最终成绩列');
+    return row.getByRole('cell').nth(index).innerText();
+  };
   assert.ok(!(await firstRow().textContent()).includes('本机待提交'));
-  assert.equal(await firstRow().getByRole('cell').nth(3).innerText(), '未录入');
+  assert.equal(await resultText(firstRow()), '未录入');
   await firstRow().getByRole('button', { name: '首次录入', exact: true }).click();
   dialog = page.getByRole('dialog').first();
   assert.equal(await dialog.locator('[data-field=result_value]').inputValue(), '', 'unsynced input is not restored into a reopened editor');
@@ -304,7 +311,7 @@ try {
   }, { participationId: people[1], categoryId: individual.id });
   await page.reload();
   const secondRow = page.getByRole('row').filter({ hasText: '选手2' });
-  assert.equal(await secondRow.getByRole('cell').nth(3).innerText(), '20');
+  assert.equal(await resultText(secondRow), '20');
   await secondRow.getByRole('button', { name: '修改正式成绩', exact: true }).click();
   dialog = page.getByRole('dialog').first();
   assert.equal(await dialog.locator('[data-field=result_value]').inputValue(), '20', 'backend result overrides a cached correction input');
@@ -340,7 +347,7 @@ try {
   await page.unroute('**/api/scoring/individual');
   await page.reload();
   let row2 = page.getByRole('row').filter({ hasText: '选手2' });
-  assert.equal(await row2.getByRole('cell').nth(3).innerText(), '56');
+  assert.equal(await resultText(row2), '56');
   await row2.getByRole('button', { name: '修改正式成绩', exact: true }).click();
   dialog = page.getByRole('dialog').first();
   await dialog.locator('[data-field=result_value]').waitFor();
@@ -362,7 +369,7 @@ try {
   await page.unroute('**/api/scoring/individual');
   await page.reload();
   row2 = page.getByRole('row').filter({ hasText: '选手2' });
-  assert.equal(await row2.getByRole('cell').nth(3).innerText(), '56');
+  assert.equal(await resultText(row2), '56');
   await row2.getByRole('button', { name: '修改正式成绩', exact: true }).click();
   await page.getByRole('dialog', { name: '上次提交结果待核实', exact: true }).waitFor();
   assert.equal((await drafts()).find(d => d.kind === 'individual' && d.participation_id === people[1]).payload.submission_uid, originalPacket.submission_uid);

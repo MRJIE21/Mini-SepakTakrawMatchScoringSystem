@@ -204,7 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_plans_cat ON plans(category_id, status);
 CREATE TABLE IF NOT EXISTS group_draws (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
-  method TEXT NOT NULL CHECK (method IN ('random','seeded')),
+  method TEXT NOT NULL CHECK (method IN ('random','seeded','cycle')),
   status TEXT NOT NULL DEFAULT 'drawing' CHECK (status IN ('drawing','complete','confirmed','cancelled')),
   rev INTEGER NOT NULL DEFAULT 1,
   revealed INTEGER NOT NULL DEFAULT 0,
@@ -479,6 +479,40 @@ CREATE TABLE IF NOT EXISTS schedule_policies (
   settings_json TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+-- 出场抽签与种子、成绩名次分别保存；名单快照不随删除报名丢失。
+CREATE TABLE IF NOT EXISTS individual_draws (
+  category_id INTEGER PRIMARY KEY REFERENCES categories(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  roster_json TEXT NOT NULL,
+  order_json TEXT NOT NULL,
+  confirmed_by INTEGER REFERENCES users(id),
+  confirmed_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  request_uid TEXT NOT NULL
+);
+-- 逐人抽取过程：名单快照与已揭晓顺序独立于正式签表，确认后才写入 individual_draws。
+-- 每项目至多一份进行中/已完成待确认会话，由部分唯一索引强制。
+CREATE TABLE IF NOT EXISTS individual_draw_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  roster_json TEXT NOT NULL,
+  order_json TEXT NOT NULL DEFAULT '[]',
+  -- roster_hash 绑定开始时的完整活动名单与正式签表修订；任何变化使本轮失效。
+  roster_hash TEXT NOT NULL,
+  base_revision INTEGER NOT NULL DEFAULT 0 CHECK(base_revision >= 0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+  status TEXT NOT NULL DEFAULT 'drawing'
+    CHECK(status IN ('drawing','complete','confirmed','cancelled')),
+  created_by INTEGER REFERENCES users(id),
+  picked_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  confirmed_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_individual_draw_sessions_active
+  ON individual_draw_sessions(category_id) WHERE status IN ('drawing','complete');
+CREATE INDEX IF NOT EXISTS idx_individual_draw_sessions_category
+  ON individual_draw_sessions(category_id, id);
 CREATE TABLE IF NOT EXISTS match_schedule_meta (
   match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
   duration_minutes INTEGER NOT NULL CHECK(duration_minutes > 0),

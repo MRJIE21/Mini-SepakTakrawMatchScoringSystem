@@ -74,6 +74,14 @@ try {
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto(`${base}/#/workspace?event=${event.event_id}&group=${group.id}&category=${cat.id}&tab=schedule&view=groups`);
   const panel = page.getByRole('region', { name: '学校小组抽签', exact: true });
+  const startBtn = (target) => target.getByRole('button', { name: /^开始抽签/, exact: false });
+  const stopBtn = (target) => target.getByRole('button', { name: '停止并揭晓', exact: true });
+  /* 手动起止：点开始进入滚动，点停止才揭晓该次结果 */
+  const rollOnce = async (target = panel) => {
+    await startBtn(target).click();
+    await stopBtn(target).waitFor();
+    await stopBtn(target).click();
+  };
   assert.equal(await panel.getByLabel('小组数量', { exact: true }).getAttribute('min'), '1');
   assert.equal(await panel.getByLabel('小组数量', { exact: true }).getAttribute('max'), null);
   await panel.getByLabel('小组数量', { exact: true }).fill('1');
@@ -86,7 +94,9 @@ try {
   await panel.getByLabel('抽签方式', { exact: true }).selectOption('seeded');
   await panel.getByRole('button', { name: '开始小组抽签', exact: true }).click();
   await panel.getByText('0 / 10 所学校已揭晓', { exact: true }).waitFor();
-  await panel.getByRole('button', { name: '抽下一所学校', exact: true }).evaluate((button) => { button.click(); button.click(); });
+  await startBtn(panel).evaluate((button) => { button.click(); button.click(); });
+  await stopBtn(panel).waitFor();
+  await stopBtn(panel).evaluate((button) => { button.click(); button.click(); });
   await panel.getByText('1 / 10 所学校已揭晓', { exact: true }).waitFor();
   const drawPath = `/api/categories/${cat.id}/group-draw`;
   const first = (await api('GET', drawPath)).draw.steps[0];
@@ -97,15 +107,16 @@ try {
   await other.goto(page.url());
   const otherPanel = other.getByRole('region', { name: '学校小组抽签', exact: true });
   await otherPanel.getByText('1 / 10 所学校已揭晓', { exact: true }).waitFor();
-  await panel.getByRole('button', { name: '抽下一所学校', exact: true }).click();
+  await rollOnce(panel);
   await panel.getByText('2 / 10 所学校已揭晓', { exact: true }).waitFor();
-  await otherPanel.getByRole('button', { name: '抽下一所学校', exact: true }).click();
+  await rollOnce(otherPanel);
   await otherPanel.getByText('其他设备已更新抽签，请刷新后继续', { exact: true }).waitFor();
   assert.equal((await api('GET', drawPath)).draw.revealed, 2);
   await other.close();
   // 服务器已落库但响应丢失：原操作重试应重放，不能又抽出一校。
   await page.route('**/group-draw/next', async (route) => { await route.fetch(); await route.abort('failed'); });
-  await panel.getByRole('button', { name: '抽下一所学校', exact: true }).click();
+  await startBtn(panel).click();
+  await stopBtn(panel).click();
   await panel.getByText('操作结果待核实。请刷新抽签状态，或用原操作重试。', { exact: true }).waitFor();
   assert.equal((await api('GET', drawPath)).draw.revealed, 3);
   await page.unroute('**/group-draw/next');

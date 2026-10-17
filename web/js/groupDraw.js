@@ -3,7 +3,10 @@ import { api, newUid, openHtml } from './api.js';
 import { groupName } from './groupNames.js';
 import { h, clear, field, selectInput, textInput, numberInput, table, statusBadge, toast, confirmAsync, promptDialog, categoryLabel } from './ui.js';
 
+const METHOD_LABELS = { random: '完全随机', seeded: '种子分档', cycle: '循环落位' };
+const methodLabel = (value) => METHOD_LABELS[value] || value || '';
 const STATUS = { drawing: ['抽签进行中', 'info'], complete: ['已抽完 · 待确认', 'warn'], confirmed: ['分组已确认', 'ok'], cancelled: ['已撤销', ''] };
+const ROLL_INTERVAL_MS = 125; /* 每秒最多 8 次，避免闪动 */
 
 export function renderGroupDraw(cat, initial, onChange, { client = api, isCurrent = () => true,
   openNotice = path => openHtml(path, {}, '小组抽签分组表') } = {}) {
@@ -23,9 +26,122 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
   let busy = false;
   const retries = new Map();
   let groups = initial.draw?.capacities.length || Math.min(2, Math.max(1, initial.roster.length));
-  let method = initial.draw?.method || 'random';
+  let method = initial.draw?.method || 'cycle';
   let sizesText = '';
   const errorBox = h('div.warn-box.hidden', { role: 'alert' });
+  /* 滚动揭晓只做过程呈现：句柄由组件持有，停止、响应到达、重绘、撤销与卸载时统一清理 */
+  let rollFrame = 0;
+  let rollTick = 0;
+  let rollIndex = 0;
+  let rollPool = [];
+  let rollNameEl = null;
+  /* 手动起止的揭晓状态：idle 待揭晓 / rolling 滚动中 / picking 已停止待结果 / revealed 已定格 */
+  let revealState = 'idle';
+  let pendingResult = null;
+  let awaitingResult = false;
+  const reducedMotion = () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+
+  function stopRoll() {
+    if (rollFrame) cancelAnimationFrame(rollFrame);
+    rollFrame = 0;
+    rollTick = 0;
+  }
+
+  function clearRoll() {
+    stopRoll();
+    rollNameEl = null;
+    rollPool = [];
+    pendingResult = null;
+    awaitingResult = false;
+    revealState = 'idle';
+  }
+
+  /* 尚未揭晓的候选学校：滚动只展示它们，不参与结果决定 */
+  function rollCandidates() {
+    const taken = new Set((data.draw?.steps || []).map((step) => step.school_name));
+    return data.roster.filter((school) => !taken.has(school.school_name)).map((school) => school.school_name);
+  }
+
+  function startRoll(pool) {
+    stopRoll();
+    rollPool = pool.filter(Boolean);
+    if (!rollPool.length || reducedMotion() || document.hidden) {
+      /* 候选为空、减少动态效果或页面隐藏时不循环姓名，显示稳定提示 */
+      if (rollNameEl) rollNameEl.textContent = reducedMotion() ? '已按“减少动态效果”停用姓名滚动，待揭晓' : '正在抽签…';
+      return;
+    }
+    rollIndex = 0;
+    const tick = (now) => {
+      rollFrame = 0;
+      if (!rollNameEl?.isConnected || document.hidden) return;
+      if (!rollTick || now - rollTick >= ROLL_INTERVAL_MS) {
+        rollTick = now;
+        rollNameEl.textContent = rollPool[rollIndex % rollPool.length];
+        rollIndex += 1;
+      }
+      rollFrame = requestAnimationFrame(tick);
+    };
+    rollFrame = requestAnimationFrame(tick);
+  }
+
+  /* 用户点“开始抽签”：进入滚动并发起该次抽签请求 */
+  async function startReveal() {
+    if (busy || !isCurrent() || (revealState !== 'idle' && revealState !== 'revealed')) return;
+    const draw = data.draw;
+    if (!draw || draw.status !== 'drawing' || draw.stale || data.blocked_reason) return;
+    clearRoll();
+    revealState = 'rolling';
+    awaitingResult = true;
+    panel.dataset.drawRolling = 'true';
+    drawPanel();
+    startRoll(rollCandidates());
+    await mutate('next');
+  }
+
+  /* 用户点“停止并揭晓”：停止滚动；结果已到就立即定格，未到则等待 */
+  function stopReveal() {
+    if (revealState !== 'rolling') return;
+    stopRoll();
+    if (pendingResult) {
+      applyPendingResult();
+      return;
+    }
+    if (!awaitingResult) {
+      /* 请求已结束但没有结果（失败/失效）：回到稳定态并保留既有错误提示 */
+      clearRoll();
+      drawPanel();
+      return;
+    }
+    revealState = 'picking';
+    drawPanel();
+  }
+
+  function applyPendingResult() {
+    const result = pendingResult;
+    pendingResult = null;
+    awaitingResult = false;
+    revealState = 'revealed';
+    delete panel.dataset.drawRolling;
+    rollNameEl = null;
+    if (result) { data = result; onChange(data.draw); }
+    drawPanel();
+  }
+
+  document.addEventListener('visibilitychange', onVisibility);
+
+  function onVisibility() {
+    /* 标签隐藏时停止滚动；回到页面处于稳定态，由用户重新开始，不自动抽签 */
+    if (document.hidden && revealState === 'rolling') {
+      stopRoll();
+      revealState = awaitingResult ? 'picking' : 'idle';
+      drawPanel();
+    }
+  }
+
+  function cleanup() {
+    clearRoll();
+    document.removeEventListener('visibilitychange', onVisibility);
+  }
 
   async function leaveFullscreen() {
     if (document.fullscreenElement === panel) await document.exitFullscreen();
@@ -48,14 +164,24 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
     const key = JSON.stringify([action, body]);
     const uid = retries.get(key) || newUid('draw');
     retries.set(key, uid);
-    const controls = [...panel.querySelectorAll('button,input,select')];
-    const disabled = controls.map((control) => control.disabled);
-    controls.forEach((control) => { control.disabled = true; });
+    const reveal = action === 'next';
     try {
       const path = `/api/categories/${cat.id}/group-draw${action === 'start' ? '' : `/${action}`}`;
       await client.post(path, { ...body, request_uid: uid });
-      await reload();
+      const fresh = await client.get(`/api/categories/${cat.id}/group-draw`);
+      if (!isCurrent()) return;
       retries.delete(key);
+      if (reveal && (revealState === 'rolling' || revealState === 'picking')) {
+        /* 手动起止：结果先保存，等用户点“停止并揭晓”才定格 */
+        pendingResult = fresh;
+        awaitingResult = false;
+        if (revealState === 'picking') applyPendingResult();
+        else drawPanel();
+      } else {
+        data = fresh;
+        onChange(data.draw);
+        drawPanel();
+      }
       if (action === 'confirm') toast('抽签分组已确认，可在比赛赛程建立小组赛阶段', 'ok');
       if (action === 'cancel') toast('已撤销本次抽签，原记录保留', 'ok');
     } catch (error) {
@@ -64,7 +190,14 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
       errorBox.classList.remove('hidden');
     } finally {
       busy = false;
-      controls.forEach((control, i) => { if (control.isConnected) control.disabled = disabled[i]; });
+      if (reveal) {
+        /* 请求结束但用户仍在滚动：保留滚动，等用户停止；用户已停止则立刻定格 */
+        awaitingResult = false;
+        if (revealState === 'picking' && pendingResult) applyPendingResult();
+        else if (isCurrent()) drawPanel();
+      } else if (isCurrent()) {
+        drawPanel();
+      }
     }
   }
 
@@ -119,7 +252,7 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
         } catch (error) { preview.append(h('span.small', error.message)); start.disabled = true; }
       };
       panel.append(h('div.form-grid',
-        field('抽签方式', selectInput([['random', '完全随机'], ['seeded', '种子分档']], method, {
+        field('抽签方式', selectInput([['cycle', '循环落位'], ['random', '完全随机'], ['seeded', '种子分档']], method, {
           'aria-label': '抽签方式',
           disabled: !!data.blocked_reason, onchange: (event) => { method = event.target.value; update(); },
         })),
@@ -127,20 +260,36 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
           oninput: (event) => { groups = Number(event.target.value); update(); } })),
         field('各组人数（可选）', textInput(sizesText, { 'aria-label': '各组人数（可选）', placeholder: '例如 4,4,3；留空按人数均分', disabled: !!data.blocked_reason,
           oninput: (event) => { sizesText = event.target.value; update(); } }), { hint: '按 A、B、C…组的顺序填写' })), preview,
-        h('p.small.muted', '种子分档：按种子序号从小到大，每档包含与小组数量相同的学校，每组每档最多一校；最后一档可不足。'),
+        h('p.small.muted', '循环落位：每签先从剩余学校中随机抽一所，再按 A、B、C… 顺序依次落组，某组满员后跳过。'),
+        h('p.small.muted', '完全随机：学校与组内位置都随机；种子分档：按种子序号分档，每档内抽签，每组每档最多一校。'),
         h('details.draw-roster', h('summary', `核对参赛学校与种子（${data.roster.length} 校）`),
           h('div.table-scroll', table([{ label: '学校', key: 'school_name' }, { label: '种子序号', render: (p) => p.seed_no || '未设置' }], data.roster))),
         h('div.row.mt', start));
       update();
     } else {
+      const rolling = revealState === 'rolling';
+      const picking = revealState === 'picking';
       panel.append(h('div.draw-progress', h('span', `${draw.revealed} / ${draw.total} 所学校已揭晓`),
-        h('span.small.muted', `${draw.method === 'seeded' ? '种子分档' : '完全随机'} · 开始于 ${draw.created_at}`)));
+        h('span.small.muted', `${methodLabel(draw.method)} · 开始于 ${draw.created_at}`)));
       const board = h('div.draw-board');
       const latest = draw.steps.at(-1);
-      board.append(h('div.draw-reveal', { 'aria-live': 'polite', 'aria-atomic': 'true' },
-        h('div.small.muted', latest ? `第 ${latest.number} 签${latest.pot ? ` · 第 ${latest.pot} 档` : ''}` : '准备揭晓'),
-        h('div.draw-school', latest?.school_name || '等待第一所学校'),
-        h('div.draw-destination', latest ? `进入 ${groupName(latest.group)}` : '点击“抽下一所学校”开始')));
+      const reveal = h('div.draw-reveal', { 'aria-live': 'polite', 'aria-atomic': 'true' });
+      if (rolling || picking) {
+        /* 滚动只展示尚未揭晓的候选；结果已在后台保存，等用户点“停止并揭晓”才定格 */
+        reveal.append(h('div.draw-school-roll-label', rolling
+          ? `正在滚动 · 第 ${draw.revealed + 1} 签`
+          : `正在揭晓 · 第 ${draw.revealed + 1} 签`));
+        rollNameEl = h('div.draw-school.draw-school-rolling', rollPool[0] || '正在抽签…');
+        reveal.append(rollNameEl,
+          h('div.draw-destination', rolling ? '点“停止并揭晓”完成本次抽签' : '已停止，等待结果…'));
+        if (!picking) startRoll(rollPool);
+      } else {
+        reveal.append(
+          h('div.small.muted', latest ? `第 ${latest.number} 签${latest.pot ? ` · 第 ${latest.pot} 档` : ''}` : '准备揭晓'),
+          h('div.draw-school', latest?.school_name || '等待第一所学校'),
+          h('div.draw-destination', latest ? `进入 ${groupName(latest.group)}` : '点击“开始抽签”后滚动，再点“停止并揭晓”'));
+      }
+      board.append(reveal);
       board.append(h('div.draw-groups', ...draw.groups.map((group) => h('section.draw-group',
         h('div.panel-head', h('h4', group.name), h('span.small.muted', `${group.members.length} / ${group.capacity}`)),
         h('ol', ...Array.from({ length: group.capacity }, (_, i) => {
@@ -150,11 +299,15 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
         }))))));
       panel.append(board);
       const actions = h('div.row.mt');
-      const disabled = !!data.blocked_reason || draw.stale;
+      /* 滚动/等待揭晓期间冻结抽签相关按钮：面板会随滚动重绘，必须在这里重新套用禁用状态 */
+      const locked = !!data.blocked_reason || draw.stale || busy || rolling || picking;
       if (draw.status === 'drawing') actions.append(
-        h('button.btn.btn-primary', { disabled, onclick: () => mutate('next') }, '抽下一所学校'),
-        h('button.btn', { disabled, onclick: () => mutate('complete') }, '一键完成抽签'));
-      if (draw.status === 'complete') actions.append(h('button.btn.btn-primary', { disabled,
+        rolling
+          ? h('button.btn.btn-primary', { onclick: () => stopReveal() }, '停止并揭晓')
+          : h('button.btn.btn-primary', { disabled: locked, onclick: () => startReveal() },
+            draw.revealed ? '开始抽签（下一所）' : '开始抽签'),
+        h('button.btn', { disabled: locked, onclick: () => mutate('complete') }, '一键完成抽签'));
+      if (draw.status === 'complete') actions.append(h('button.btn.btn-primary', { disabled: locked,
         onclick: async () => {
           await leaveFullscreen();
           if (await confirmAsync('确认抽签分组', '确认后在比赛赛程引用此分组，重新抽签须填写撤销原因。', '确认分组')) await mutate('confirm');

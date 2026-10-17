@@ -1,4 +1,5 @@
 import { transferButton } from '../recordingOwner.js';
+import { mountIndividualDraw } from '../individualDraw.js';
 /* 个人赛成绩录入：只录最终成绩与确认名次，不记录过程（设计大纲 6.2、改进方案 §7）。
 
    与旧版的区别：
@@ -33,7 +34,8 @@ const SYNC = {
   pending: ['服务器已保存，成绩待确认', 'warn'],
 };
 
-async function render({ el, params }) {
+async function render({ el, params, signal, requestContext = captureRequestContext(), isCurrent = () => true }) {
+  const alive = () => el.isConnected && !signal?.aborted && isCurrent();
   if (!state.eventId) throw new Error('请先在“赛事首页”中创建赛事');
   const structure = state.structure || await loadStructure();
   const cats = [];
@@ -69,6 +71,9 @@ async function render({ el, params }) {
   else el.append(h('div.workspace-note',
     '仅录入最终成绩、结果状态和正式名次；同成绩时按现场确认结果录入。'));
 
+  const drawBox = h('div');
+  el.append(drawBox);
+  let drawControl = null;
   const listBox = h('div');
   const panel = h('div.panel', h('h3', '成绩与名次'), listBox);
   el.append(panel);
@@ -84,8 +89,9 @@ async function render({ el, params }) {
     let results;
     let offline = false;
     try {
-      data = await api.get(`/api/categories/${cat.id}/participations`);
-      results = (await api.get(`/api/categories/${cat.id}/individual-results`)).results;
+      data = await api.get(`/api/categories/${cat.id}/participations`, { context: requestContext, signal });
+      results = (await api.get(`/api/categories/${cat.id}/individual-results`, { context: requestContext, signal })).results;
+      if (!alive()) return;
       await localStore.put({ key: cacheKey, kind: 'package', event_identity: identity, saved_at: Date.now(), data, results });
     } catch (err) {
       if (!err.offline) {
@@ -101,6 +107,16 @@ async function render({ el, params }) {
       results = cached.results || [];
       offline = true;
     }
+    if (!alive()) return;
+    /* 逐人抽签面板自己读取 /individual-draw/session；这里只提供报名名单与正式签表初值。 */
+    if (!drawControl) drawControl = await mountIndividualDraw({ container: drawBox, category: cat,
+      roster: data.participations,
+      initialData: data.individual_draw || { status: 'none', revision: 0, entries: [] },
+      initialOffline: offline,
+      canManage: ['admin', 'organizer'].includes(state.user.role),
+      requestContext, signal, isCurrent: alive, onSaved: load });
+    if (data.individual_draw) await drawControl.update(data.individual_draw, offline);
+    if (!alive()) return;
     const resultMap = new Map(results.map((r) => [r.participation_id, r]));
     const rows = data.participations.map((p) => ({
       ...p,
@@ -132,6 +148,8 @@ async function render({ el, params }) {
       return rows;
     }
     listBox.append(h('div.table-scroll', table([
+      { label: '出场序号', render: (r) => r.draw_order == null ? '未抽签'
+        : `${r.draw_order}${r.draw_status === 'stale' ? '（待重抽）' : ''}${r.status !== 'active' ? '（已退出）' : ''}`, align: 'num' },
       { label: '种子', render: (r) => r.seed_no ?? '', align: 'num' },
       { label: '学校', render: (r) => r.school_short || r.school_name },
       { label: '运动员', key: 'subject' },
@@ -170,7 +188,9 @@ async function render({ el, params }) {
       },
       {
         label: '操作',
-        render: (r) => h('div.row', !r.result ? transferButton('individual',r.id) : null, (canEdit(r)
+        render: (r) => r.status !== 'active' ? h('span.muted', '已退出')
+          : r.draw_status === 'stale' && !r.result ? h('span.muted', '须先重新核对出场顺序')
+          : h('div.row', !r.result ? transferButton('individual',r.id) : null, (canEdit(r)
           ? h('button.btn.small', { onclick: task(() => openEditor(r, cat, load, rows)) },
             r.result ? (isOfficial(r.result) ? '修改正式成绩' : '继续核对成绩') : '首次录入')
           : h('span.muted', canWrite() ? (r.result ? '已提交；更正请联系成绩人员' : `由 ${r.recorder_name || '其他记录员'} 负责`) : '只读'))),
