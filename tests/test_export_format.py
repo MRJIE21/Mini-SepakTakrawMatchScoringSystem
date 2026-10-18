@@ -87,7 +87,9 @@ class ExportFormatTest(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(self.text(f'/api/exports/results.csv?category_id={cat}'))))
         self.assertEqual({row['名次'] for row in rows}, {'待确认'})
         totals = self.ok('GET', f'/api/groups/{group_id}/school-totals')
-        self.assertEqual(sum(len(row['pending']) for row in totals['rows']), 6)
+        # REQ-008：完全未开赛的组别不产生名次，也不把“尚未开赛”列成待确认名次。
+        self.assertFalse(totals['started'])
+        self.assertEqual(sum(len(row['pending']) for row in totals['rows']), 0)
 
         for part, value in zip(parts[:4], (21, 19, 15, 12)):
             self.submit_individual(part, value)

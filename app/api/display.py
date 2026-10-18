@@ -63,14 +63,13 @@ def console(ctx):
         raise not_found("赛事不存在")
     _check_event_scope(ctx, event_id)
     event_conn = _event_conn(event_id)
-    display_store.purge_expired(event_conn)
     config = display_store.get_config(event_conn)
     screens = db.rows_to_dicts(db.q(
         ctx.conn,
         "SELECT id, name, event_id, created_at, last_seen_at, revoked_at FROM display_screens "
         "WHERE event_id = ? ORDER BY id", (event_id,)))
     for screen in screens:
-        screen["online"] = display_store.screen_online(screen)
+        screen["online"] = display_store.screen_online(screen, ctx.conn)
     return {"event": {"id": event["id"], "name": event["name"]}, "config": config, "screens": screens}
 
 

@@ -104,7 +104,8 @@ class DisplayStoreTest(unittest.TestCase):
             display_store.claim_pair(self.conn, started["code"], 1, "重复")
 
         expired = display_store.start_pair(self.conn, "device-secret-expired")
-        db.run(self.conn, "UPDATE display_pair_codes SET expires_at = '2000-01-01 00:00:00' WHERE id = ?",
+        db.run(self.conn, "UPDATE display_pair_codes SET expires_at = '2000-01-01 00:00:00', "
+                          "expires_at_epoch = 0 WHERE id = ?",
                (expired["id"],))
         with self.assertRaises(ApiError) as ctx:
             display_store.claim_pair(self.conn, expired["code"], 1, "过期屏")
@@ -128,7 +129,8 @@ class DisplayStoreTest(unittest.TestCase):
         self.assertIsNotNone(display_store.screen_for_token(self.conn, claimed["token"]))
         self.assertTrue(display_store.screen_online(display_store.screen_by_id(
             self.conn, claimed["screen"]["id"])))
-        db.run(self.conn, "UPDATE display_screens SET last_seen_at = '2000-01-01 00:00:00' WHERE id = ?",
+        db.run(self.conn, "UPDATE display_screens SET last_seen_at = '2000-01-01 00:00:00', "
+                          "last_seen_epoch = 0 WHERE id = ?",
                (claimed["screen"]["id"],))
         self.assertFalse(display_store.screen_online(display_store.screen_by_id(
             self.conn, claimed["screen"]["id"])))

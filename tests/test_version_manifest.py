@@ -16,16 +16,24 @@ def sha(path: Path) -> str:
 class VersionManifestTest(unittest.TestCase):
     def test_version_and_cache_are_bumped(self):
         package = json.loads((PRODUCT / 'package.json').read_text(encoding='utf-8'))
-        self.assertEqual(package['version'], '1.3.14')
+        self.assertEqual(package['version'], '1.3.16')
         sw = (PRODUCT / 'web/sw.js').read_text(encoding='utf-8')
-        self.assertIn("const CACHE = 'stss-shell-v75'", sw)
+        self.assertIn("const CACHE = 'stss-shell-v77'", sw)
         readme = (PRODUCT / 'README.md').read_text(encoding='utf-8')
-        self.assertIn('1.3.14', readme.splitlines()[0])
+        self.assertIn('1.3.16', readme.splitlines()[0])
         changelog = (PRODUCT / 'CHANGELOG.md').read_text(encoding='utf-8')
-        self.assertIn('## 1.3.14', changelog)
+        self.assertIn('## 1.3.16', changelog)
         usage = (PRODUCT / 'docs/体育馆大屏使用说明-20261017.md').read_text(encoding='utf-8')
-        self.assertIn('1.3.14', usage)
-        self.assertIn('stss-shell-v75', usage)
+        self.assertIn('1.3.16', usage)
+        self.assertIn('stss-shell-v77', usage)
+
+    def test_role_documentation_matches_readonly_setup_roles(self):
+        readme = (PRODUCT / 'README.md').read_text(encoding='utf-8')
+        for role in ['赛事管理员', '编排与成绩人员', '场地记录员', '成绩查看者', '大屏操作员']:
+            self.assertIn(role, readme)
+        self.assertIn('赛事设置只读', readme)
+        admin_js = (PRODUCT / 'web/js/views/admin.js').read_text(encoding='utf-8')
+        self.assertIn('大屏操作员', admin_js)
 
     def test_release_manifest_matches_files_and_source_manifest(self):
         manifest = json.loads((PRODUCT / 'release-manifest.json').read_text(encoding='utf-8'))

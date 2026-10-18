@@ -1,10 +1,11 @@
 /* 离线页面资源：在线时优先取最新页面，断网时回退到已缓存副本（设计大纲 9.1、9.2）。
    比赛数据不在这里缓存：提交结果以服务器为准，未提交记录保存在 IndexedDB。 */
-const CACHE = 'stss-shell-v75';
+const CACHE = 'stss-shell-v77';
 const SHELL = [
-  '/', '/index.html', '/display.html', '/css/app.css', '/manifest.webmanifest',
+  '/', '/index.html', '/display.html', '/print.html', '/css/app.css', '/manifest.webmanifest',
+  '/favicon.svg', '/favicon.ico',
   '/js/main.js', '/js/api.js', '/js/store.js', '/js/ui.js', '/js/labels.js', '/js/scoring.js',
-  '/js/dateTime.js', '/js/display.js', '/js/displaySync.js',
+  '/js/dateTime.js', '/js/display.js', '/js/displaySync.js', '/js/print.js',
   '/js/workspaceContext.js',
   '/js/autoSchedule.js',
   '/js/individualDraw.js',

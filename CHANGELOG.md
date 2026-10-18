@@ -1,3 +1,36 @@
+## 1.3.16 — 全系统仿真 P2-B 安全/运维加固 · 2026-10-18
+
+- CORS 默认收紧为同源（`STSS_CORS_ORIGINS` 显式白名单，反向代理可用 `STSS_PUBLIC_ORIGIN` 识别同源）；所有响应统一增加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Content-Security-Policy: frame-ancestors 'none'`、`Referrer-Policy: same-origin`；过载拒绝响应同样补齐。
+- 登录令牌改为 sha256 哈希存储（列名兼容），启动时单事务幂等迁移既有明文令牌且现有会话保持有效；明文只出现在登录响应与客户端。过期令牌不再在业务请求中惰性删除。
+- 会话治理：自助改密保留当前设备并吊销该账号其他设备；管理员重置口令吊销该账号全部会话；新增 `POST /api/me/logout-all` 与账号页“退出所有设备”（返回吊销数量并审计）。
+- 时间口径统一 UTC：新增 `app/clock.py` 与 tokens/display_screens/display_pair_codes/display_live 的 epoch 列迁移（旧本地时间字符串保留兼容解析、不批量改写）；令牌过期、大屏在线、备份/下载文件名使用 UTC，持久化高水位防止时钟回拨让过期令牌复活；服务器时间改为 UTC ISO8601。
+- 请求头大小写不敏感：`Context.headers` 统一为小写索引 Mapping，小写 `authorization`/`x-event-id`/`content-type` 下登录、鉴权、登出、备份文件名与审计行为正确。
+- 审计补齐：登出、删除运动员/项目名单/名次、清除总分并列现场结果、删除场地、批量排场写审计；新增 `GET /api/audit-logs?scope=registry` 查看登录/登出/账号类记录，审计页增加赛事/账号范围切换与动作中文标签。
+- `/api/events` 计数改为进程内 TTL 缓存（默认 3 秒，可配）并在创建/改名/结构变更/赛事写操作后显式失效；返回字段不变，10 赛事冷 72ms→热 11.6ms。
+- 删除场地：同事务统计受影响场次、置为未安排并递增各场 `schedule_revision/updated_at`、写审计，返回 `affected_matches`；前端提示影响数量。比赛排场批量接口支持可选逐场 `base_schedule_revisions`，事务内全量校验，冲突 409 `stale_revision` 且零写入、写 `bulk_schedule` 审计。
+- 新增成套 `python run.py backup / verify / restore`：registry + 全部赛事库 SQLite 在线快照、manifest sha256/bytes/完整性/外键/关键计数、停服恢复、恢复前快照、恢复后自动 verify，清单外旧文件只告警不删；备份归档不含明文令牌。
+- 新增默认关闭的数据保留维护 `python run.py maintenance [--apply] [--retention-days N]`：dry-run 不写库，apply 需停服并写 `maintenance_cleanup` 审计；清理过期令牌/配对码/直播快照/超期请求记录，不删成绩、报名、赛事结构与审计。
+- 运维：同一数据目录增加 OS 级单实例锁（PID/端口/崩溃自动释放）；移除静默端口回退并给出 netstat 提示；新增 `app/logging_setup.py` 日志落盘 `data/logs/server.log` 按大小轮转、可配目录/级别/份数，目录不可写回退控制台。
+- 前端：401 统一单飞回登录页并防循环；单场保存遇 `stale_revision` 提示并“重新读取最新安排”保留输入；自动编排 `preview_changed/preview_expired` 提示“重新生成预览”并禁用保存；SW 缓存升级为 `stss-shell-v77`。
+- 测试：新增 `test_p2b_http/sessions/utc/events/concurrency/audit/startup/backup/maintenance` 与 `p2b_session`、`p2b_schedule_conflict` 浏览器套件；全量回归覆盖 Python 与浏览器；无新增运行依赖。
+- 版本 1.3.16、缓存 `stss-shell-v77`；README、CHANGELOG、新增安全加固与运维说明、备份恢复与回滚演练、发布清单同步。
+
+## 1.3.15 — 全系统仿真 P2-A 体验与正确性修复 · 2026-10-18
+
+- 大屏可读性：8 窗口状态标签、各局小分与局标签增加 12px 绝对下限（1920×1080 约 17px、1366×768 约 12px），小分标签允许换行且不溢出、不与比分重叠；大比分字号改为 1/2/3/4/8 窗口 14/9.2/8.4/7.8/7.2rem 的单调阶梯，3/4 窗口不再小于 8 窗口。
+- 大屏预览：预览页显示“预览模式 · 已推送 vN”角标，有未推送修改时提示不会显示；预览无效赛事/参数时按 400/404 给出具体原因与“返回控制台”并停止重连；刷新间隔非法时输入旁即时提示并禁用推送。
+- 新增 favicon.svg/favicon.ico 与 manifest 图标，页面加载不再出现 favicon 404；Service Worker 缓存升级为 stss-shell-v76 并纳入打印页与图标资源。
+- 个人赛抽签面板读取服务端 `can_draw/block_reason`：已有正式签表且有领取/成绩/名次时显示“正式出场顺序已确认”，禁用重新抽签并说明原因；无签表仍可正常抽取，服务端 409 兜底保留。
+- 淘汰及评次图补齐 `custom` 自定义阶段：按轮次/双方/比分/状态列出场次，空阶段显示“暂无自定义比赛”，淘汰/小组渲染不变。
+- 未开赛组别名次口径：组内没有任何已开赛场次时，学校总分榜名次列显示“未开赛/无成绩”或“—”，CSV/XLSX/打印公告同口径且不再输出第 1、2 名；已开赛但全 0 分的组别仍按原规则排名。新增 `group_started` 单一判定，页面、导出与打印共用。
+- 移动端成绩表：小组排名固定“名次/参赛主体”与“积分”，项目名次固定“名次/参赛主体”与“计入积分”列；需要横向滚动时显示“横向滚动查看完整数据”提示，桌面不受影响。
+- 删除有比赛数据的学校时，后台返回结构化原因（已有成绩/赛程锁定/仅有报名）与可执行步骤，页面逐条展示；删除规则本身不变。
+- 打印页稳定地址：学校总分与项目成绩打印改用 `/print.html?type=...`（URL 只含业务参数，令牌走同源 localStorage+Authorization），可复制、可刷新；倒序打印时只反转已确认名次，待确认名次固定追加并单独分组；跨浏览器复制需重新登录。
+- 界面一致性：账号权限说明补全大屏操作员等 5 个角色，README 补“赛事设置只读”；顶栏显示名与角色名相同时不再重复；赛程状态筛选无结果提供“清除筛选”；新建赛事向导第 3 步支持一键添加常用四项；学校总分空态给出下一步入口。
+- URL 赛事上下文单一来源：`?event=` 与当前赛事不一致时统一切换并提示，非法/不可见值回退当前赛事并保留其它参数，避免控制台与列表跨赛事混用；服务端赛事隔离与权限不变。
+- 测试：新增 `test_p2a_results.py`、`test_p2a_delete.py` 与 8 个真实浏览器套件（大屏字号/预览/资源、自定义阶段、移动端表格、打印 URL、删除提示、UI 一致性），全量回归覆盖 Python 与浏览器；无 schema 变更，无新增运行依赖。
+- 版本 1.3.15、缓存 `stss-shell-v76`；README、CHANGELOG、相关使用说明、发布清单同步。
+
 ## 1.3.14 — 全系统仿真 P1 缺陷修复 · 2026-10-18
 
 - 大屏状态增加显式 `state_version`（已推送 revision、模式、轮询间隔与每个槽位的场次/状态/更新时间/可见性摘要）：直播快照过期后大屏自动显示“数据暂未同步”，已上屏场次被删除后自动显示“场次不存在”，取消/作废与恢复同步后自动重绘，无需刷新浏览器；保留旧 `revision` 字段兼容。新增真实浏览器回归覆盖 stale/missing 自动重绘。

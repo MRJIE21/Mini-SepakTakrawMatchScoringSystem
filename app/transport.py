@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -85,6 +86,10 @@ class DeadlineReader:
 
 class BoundedHTTPServer(HTTPServer):
     """固定 worker、独立队列过期回收；一个连接只由一个拥有者处理。"""
+    # Windows 的 SO_REUSEADDR 语义与 POSIX 不同：允许两个进程绑定同一地址端口，
+    # 会让“端口被占用”静默成功。P2-B 在 Windows 关闭复用，保证第二个实例绑定失败。
+    allow_reuse_address = os.name != 'nt'
+
     def __init__(self, address, handler_cls, *, limits=None, background_sync=True):
         self.limits = default_limits()
         self.limits.update(limits or {})
@@ -146,9 +151,13 @@ class BoundedHTTPServer(HTTPServer):
     def _reject(self, request):
         body = json.dumps(dict(ok=False, code="server_busy", message="服务器繁忙，请稍后重试",
                                outcome="not_admitted"), ensure_ascii=False).encode("utf-8")
-        reply = (b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 1\r\n"
-                 b"Content-Type: application/json; charset=utf-8\r\nContent-Length: " + str(len(body)).encode()
-                 + b"\r\nAccess-Control-Allow-Origin: *\r\n\r\n" + body)
+        from . import web_security
+        header_lines = [b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 1\r\n",
+                        b"Content-Type: application/json; charset=utf-8\r\n",
+                        b"Content-Length: " + str(len(body)).encode() + b"\r\n"]
+        for key, value in web_security.security_headers().items():
+            header_lines.append(f"{key}: {value}\r\n".encode("utf-8"))
+        reply = b"".join(header_lines) + b"\r\n" + body
         try:
             request.setblocking(False)
             request.send(reply)  # 尽力发送；绝不阻塞接入/过期调度。

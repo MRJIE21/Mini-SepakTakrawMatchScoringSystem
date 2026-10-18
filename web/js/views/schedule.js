@@ -1,5 +1,5 @@
 /* One schedule, explicit stage sources, on-demand editors. */
-import { api, captureRequestContext, newUid, openHtml } from '../api.js';
+import { api, captureRequestContext, newUid, openHtml, getToken } from '../api.js';
 import { state, registerView, go, replaceViewParams } from '../main.js';
 import { workspaceLink } from '../workspaceContext.js';
 import { renderGroupDraw } from '../groupDraw.js';
@@ -7,10 +7,13 @@ import { openAutoSchedule } from '../autoSchedule.js';
 import { stageLabel, sourceLabel, rankRange } from '../scheduleStageModel.js';
 import { readPendingRequest, writePendingRequest, removePendingRequest, capturePendingRequestScope } from '../pendingRequests.js';
 import { h, clear, field, selectInput, textInput, numberInput, dateTimeInput, formDialog,
-  modal, toast, confirmAsync, promptDialog, statusBadge, matchStatusBadge, loadingState, errorState, emptyState, setPageLeaveGuard } from '../ui.js';
+  modal, toast, confirmAsync, promptDialog, statusBadge, matchStatusBadge, loadingState, errorState, emptyState,
+  filteredEmptyState, setPageLeaveGuard } from '../ui.js';
 
 async function render({ el, params, signal, requestContext = captureRequestContext(), isCurrent = () => true }) {
   const alive = () => el.isConnected && !signal?.aborted && isCurrent();
+  /* 401 已由全局处理器清会话并回登录页，页面内不再追加错误提示。 */
+  const report = (error) => { if (alive() && getToken()) toast(error.message, 'error'); };
   const cat = state.structure?.groups.flatMap(g => g.categories.map(c => ({ ...c, group_id: g.id, event_id: state.eventId })))
     .find(c => c.id === Number(params.category));
   if (!cat) throw new Error('请先选择三人赛项目');
@@ -65,7 +68,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
     recovery.append(h('div.panel', h('div.warn-box', '有一份赛程操作结果待核实。请核实原请求后继续。'),
       h('button.btn.mt', { disabled: busy, onclick: async () => {
         try { await send(pending); if (alive()) { toast('原操作已核实', 'ok'); await load(); } }
-        catch (e) { if (alive()) toast(e.message, 'error'); }
+        catch (e) { report(e); }
       } }, '核实并重试原操作')));
   }
   async function load() {
@@ -94,7 +97,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
               try { const result = await client.post(`/api/categories/${cat.id}/schedule/stages`, { base_revision: 0,
                 definition: { purpose: 'group', name: '小组赛', draw_id: drawData.draw.id } });
                 if (alive()) { stageId = result.stage_id; await load(); await openPreview(result.stage_id, result.revision); }
-              } catch (e) { if (alive()) toast(e.message, 'error'); }
+              } catch (e) { report(e); }
             } }, '建立小组赛阶段')));
         } else body.append(h('div.panel', h('p.muted', '尚未确认学校分组。可先完成分组，再建立小组赛阶段；手工比赛仍可按组委会安排录入。'),
           h('a.btn', { href: workspaceLink(cat, 'groups') }, '前往分组')));
@@ -130,7 +133,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
           h('div.row.tight', data.state === 'draft' ? [data.definition.purpose !== 'group' ? h('button.btn.small', { onclick: () => openSettings(stage) }, '编辑设置') : null,
             h('button.btn.small', { onclick: () => openPreview(stage.id, data.revision) }, '核对阶段'),
             h('button.btn.small', { onclick: async () => { if (await confirmAsync('删除阶段草稿', `删除“${stage.name}”草稿？`, '删除')) {
-              try { await client.del(`/api/schedule-stages/${stage.id}`, { category_id: cat.id, base_revision: data.revision }); await load(); } catch (e) { toast(e.message, 'error'); }
+              try { await client.del(`/api/schedule-stages/${stage.id}`, { category_id: cat.id, base_revision: data.revision }); await load(); } catch (e) { report(e); }
             } } }, '删除草稿')] : administrator ? h('button.btn.small', { onclick: () => retract(stage) }, '撤回确认') : null)));
       }
       const list = h('div.schedule-match-list'); body.append(list);
@@ -142,13 +145,16 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       const page = await client.get(`/api/matches?${query}`);
       if (!alive() || gen !== generation) return;
       listRevision = page.list_revision;
-      if (!page.matches.length) list.append(emptyState({ text: stage?.params?.schedule_meta?.state === 'draft' ? '核对并确认阶段后显示正式比赛' : '当前没有比赛',
-        hint: status || venue ? '可以调整状态和场地筛选。' : '先在“分组”确认学校分组，再在“赛程”建立小组赛阶段并新增比赛。' }));
-      else renderMatches(list, page.matches, stage);
+      if (!page.matches.length) {
+        if (status || venue) list.append(filteredEmptyState(() => { status = ''; venue = ''; resetPage(); }));
+        else list.append(emptyState({ text: stage?.params?.schedule_meta?.state === 'draft' ? '核对并确认阶段后显示正式比赛' : '当前没有比赛',
+          hint: '先在“分组”确认学校分组，再在“赛程”建立小组赛阶段并新增比赛。' }));
+      } else renderMatches(list, page.matches, stage);
       if (page.total > 100) body.append(h('div.row.mt', h('button.btn', { disabled: !offset, onclick: () => { offset = Math.max(0, offset - 100); load(); } }, '上一页'),
         h('span.small.muted', `${offset + 1}—${offset + page.matches.length} / ${page.total}`), h('button.btn', { disabled: !page.has_more, onclick: () => { offset += 100; load(); } }, '下一页')));
     } catch (error) {
       if (!alive() || gen !== generation) return;
+      if (!getToken()) return;         // 401 已由全局处理器回到登录页
       clear(body); body.append(errorState(error, () => { offset = 0; listRevision = null; load(); }));
     }
   }
@@ -179,7 +185,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
         canManage ? h('div.row.tight.mt', h('button.btn.small', { onclick: () => openTime(match) }, '调整场地时间'),
           !['single_elim', 'placement'].includes(stage?.kind) && match.status !== 'finished'
             ? h('button.btn.small', { onclick: async () => { if (await confirmAsync('删除比赛', `删除 ${match.public_code}？已领取、计分或存在后续依赖时不能删除。`, '删除')) {
-              try { await client.del(`/api/matches/${match.id}`, { category_id: cat.id }); await load(); } catch (e) { toast(e.message, 'error'); }
+              try { await client.del(`/api/matches/${match.id}`, { category_id: cat.id }); await load(); } catch (e) { report(e); }
             } } }, '删除') : null) : null);
     })));
     root.append(grid);
@@ -189,7 +195,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       hint: `将移除本阶段 ${stage.match_count} 场未开始比赛。有领取、计分、成绩或其他阶段依赖时不能撤回。`, okLabel: '撤回确认' });
     if (!reason || !alive()) return;
     try { await client.post(`/api/schedule-stages/${stage.id}/unconfirm`, { base_revision: stage.params.schedule_meta.revision, reason }); await load(); }
-    catch (e) { if (alive()) toast(e.message, 'error'); }
+    catch (e) { report(e); }
   }
   function guardClose() { if (pending || busy) { toast('请先核实原操作结果；原请求已保留，也可刷新页面继续核实。', 'warn'); return false; } return true; }
   async function openSettings(stage = null) {
@@ -273,7 +279,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
           basis_hash: preview.basis_hash, approved_byes: graph.byes });
         if (alive()) { stageId = id; toast('阶段已确认', 'ok'); await load(); }
       } }] : [] });
-    } catch (e) { if (alive()) toast(e.message, 'error'); }
+    } catch (e) { report(e); }
   }
   async function openAdd() {
     const participations = (await client.get(`/api/categories/${cat.id}/participations`)).participations.filter(p => p.status === 'active');
@@ -305,14 +311,50 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       if (alive()) { stageId = result.stage_id; await load(); }
     } }] });
   }
-  function openTime(match) {
-    const venue = selectInput([[0, '暂不安排'], ...venues.map(v => [v.id, v.name])], match.venue_id || 0);
-    const time = dateTimeInput((match.scheduled_at || '').replace(' ', 'T'));
-    const note = textInput(match.manual_note || '');
-    formDialog({ title: `调整场地时间 · ${match.public_code}`, onBeforeClose: guardClose, width: 'min(520px,94vw)', sections: [{ body: h('div.form-grid',
-      field('场地', venue, { name: 'venue_id' }), field('时间', time, { name: 'scheduled_at' }), field('备注', note, { name: 'note' })) }],
-      actions: [{ label: '保存安排', primary: true, run: async () => { await client.put(`/api/matches/${match.id}`, { venue_id: Number(venue.value) || null,
-        scheduled_at: time.value.replace('T', ' '), note: note.value.trim(), base_schedule_revision: match.schedule_revision }); if (alive()) await load(); } }] });
+  /* 调整场地时间：409 stale_revision 时保留输入，展示“重新读取最新安排”动作；
+     重新读取后再用最新版本 + 用户原输入重开编辑框，避免用户重填。 */
+  function openTime(match, preserved = null) {
+    const venue = selectInput([[0, '暂不安排'], ...venues.map(v => [v.id, v.name])],
+      preserved?.venue ?? match.venue_id ?? 0);
+    const time = dateTimeInput((preserved?.time ?? (match.scheduled_at || '')).replace(' ', 'T'));
+    const note = textInput(preserved?.note ?? match.manual_note ?? '');
+    const current = () => ({ venue: venue.value, time: time.value, note: note.value });
+    let dialog = null;
+    const stale = h('div.warn-box.hidden.mt', { role: 'alert' },
+      h('div', '比赛安排已被其他操作更新，当前保存未生效。'),
+      h('div.small.muted', '请先重新读取最新安排，核对后再保存；你的输入会保留。'),
+      h('button.btn.mt', { onclick: async () => {
+        const kept = current();
+        dialog?.close();
+        try {
+          await load();
+          if (!alive()) return;
+          const fresh = (await client.get(`/api/matches/${match.id}`)).match;
+          if (!alive()) return;
+          openTime(fresh, kept);
+        } catch (error) { report(error); }
+      } }, '重新读取最新安排'));
+    dialog = formDialog({ title: `调整场地时间 · ${match.public_code}`, onBeforeClose: guardClose, width: 'min(520px,94vw)',
+      sections: [{ body: h('div', h('div.form-grid',
+        field('场地', venue, { name: 'venue_id' }), field('时间', time, { name: 'scheduled_at' }), field('备注', note, { name: 'note' })),
+        stale) }],
+      actions: [{ label: '保存安排', primary: true, keepOpen: true, run: async ({ close }) => {
+        try {
+          await client.put(`/api/matches/${match.id}`, { venue_id: Number(venue.value) || null,
+            scheduled_at: time.value.replace('T', ' '), note: note.value.trim(), base_schedule_revision: match.schedule_revision });
+        } catch (error) {
+          if (error.code === 'stale_revision') {
+            stale.classList.remove('hidden');
+            stale.scrollIntoView({ block: 'nearest' });
+            return;
+          }
+          throw error;
+        }
+        stale.classList.add('hidden');
+        close();
+        if (alive()) await load();
+      } }] });
+    return dialog;
   }
   await load();
 }

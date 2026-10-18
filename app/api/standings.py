@@ -563,6 +563,11 @@ def delete_placement(ctx):
     with db.tx(ctx.conn):
         db.run(ctx.conn, "DELETE FROM placements WHERE id = ?", (placement["id"],))
         recompute_category_points(ctx.conn, placement["category_id"])
+        security.audit(ctx.conn, ctx.user, "delete_placement", "placement", placement["id"],
+                       {"category_id": placement["category_id"],
+                        "participation_id": placement["participation_id"],
+                        "rank_no": placement["rank_no"], "status": placement["status"],
+                        "source": placement["source"]})
     return {"message": "已删除"}
 
 
@@ -799,9 +804,48 @@ def recompute_category_points(conn, category_id: int) -> int:
     return count
 
 
+def group_started(conn, group_id) -> bool:
+    """大组别是否已开赛的唯一判定口径。
+
+    只有确实产生过程分/提交/结果、已有记录领取，或已有已确认名次/个人成绩时
+    才算“已开赛”；仅生成赛程、等待记录（无任何过程数据）不算。页面、CSV/XLSX
+    与打印公告都通过本函数判断，避免各处二次判定产生分叉。
+    """
+    category_ids = [r["id"] for r in db.q(
+        conn, "SELECT id FROM categories WHERE group_id = ?", (group_id,))]
+    if not category_ids:
+        return False
+    marks = ",".join("?" * len(category_ids))
+    args = tuple(category_ids)
+    if db.q1(conn, f"""SELECT 1 FROM matches m
+             WHERE m.category_id IN ({marks}) AND m.reset_state IN ('none', 'active')
+               AND m.status <> 'void'
+               AND (m.result_version > 0 OR m.status = 'finished'
+                    OR EXISTS (SELECT 1 FROM score_events e WHERE e.match_id = m.id)
+                    OR EXISTS (SELECT 1 FROM match_sets st WHERE st.match_id = m.id)
+                    OR EXISTS (SELECT 1 FROM submissions sub WHERE sub.match_id = m.id)
+                    OR EXISTS (SELECT 1 FROM settings s
+                               WHERE s.k = 'recording:match:' || m.id))
+             LIMIT 1""", args) is not None:
+        return True
+    if db.q1(conn, f"""SELECT 1 FROM placements pl
+             WHERE pl.category_id IN ({marks}) AND pl.status = 'confirmed' LIMIT 1""", args) is not None:
+        return True
+    if db.q1(conn, f"""SELECT 1 FROM individual_results ir
+             JOIN participations p ON p.id = ir.participation_id
+             WHERE p.category_id IN ({marks}) LIMIT 1""", args) is not None:
+        return True
+    if db.q1(conn, f"""SELECT 1 FROM settings s
+             WHERE s.k IN (SELECT 'recording:individual:' || p.id FROM participations p
+                            WHERE p.category_id IN ({marks})) LIMIT 1""", args) is not None:
+        return True
+    return False
+
+
 def group_school_totals(conn, group_id):
-    """学校团体总分汇总；接口与导出共用同一 pending 口径。"""
+    """学校团体总分汇总；接口与导出共用同一 pending/已开赛口径。"""
     group = get_or_404(conn, "groups", group_id, "大组别")
+    started = group_started(conn, group_id)
     schools = db.q(conn,
                    """SELECT s.id AS school_id, s.name, s.short_name FROM school_entries se
                         JOIN schools s ON s.id = se.school_id WHERE se.group_id = ? ORDER BY s.name""",
@@ -835,7 +879,8 @@ def group_school_totals(conn, group_id):
                  for r in db.q(conn, "SELECT * FROM school_tiebreaks WHERE group_id = ?",
                                (group_id,))}
     result = points.compute_school_totals(db.rows_to_dicts(schools), db.rows_to_dicts(rows),
-                                         db.rows_to_dicts(pending), tiebreaks)
+                                         db.rows_to_dicts(pending), tiebreaks, started=started)
+    result["started"] = bool(started)
     result["group"] = dict(group)
     return result
 
@@ -873,35 +918,26 @@ def set_school_tiebreak(ctx):
 @route("DELETE", r"/api/groups/(?P<group_id>\d+)/school-tiebreak", roles=ORG)
 def clear_school_tiebreak(ctx):
     group_id = int(ctx.params["group_id"])
-    db.run(ctx.conn, "DELETE FROM school_tiebreaks WHERE group_id = ?", (group_id,))
+    with db.tx(ctx.conn):
+        removed = db.q1(ctx.conn, "SELECT COUNT(*) AS n FROM school_tiebreaks WHERE group_id = ?",
+                        (group_id,))["n"]
+        db.run(ctx.conn, "DELETE FROM school_tiebreaks WHERE group_id = ?", (group_id,))
+        security.audit(ctx.conn, ctx.user, "clear_school_tiebreak", "group", group_id,
+                       {"removed": removed})
     return {"message": "已清除现场确认结果"}
 
 
 @route("GET", r"/api/events/(?P<event_id>\d+)/school-totals")
 def event_school_totals(ctx):
-    """三个大组别独立汇总，一次返回，便于赛事概览展示。"""
+    """各大组别独立汇总，一次返回，便于赛事概览展示。
+
+    直接复用 group_school_totals：概览与详情、导出、打印公告保持同一口径。
+    """
     event_id = int(ctx.params["event_id"])
-    groups = db.q(ctx.conn, "SELECT * FROM groups WHERE event_id = ? ORDER BY seq", (event_id,))
+    groups = db.q(ctx.conn, "SELECT id FROM groups WHERE event_id = ? ORDER BY seq", (event_id,))
     out = []
     for g in groups:
-        schools = db.q(ctx.conn,
-                       """SELECT s.id AS school_id, s.name, s.short_name FROM school_entries se
-                            JOIN schools s ON s.id = se.school_id WHERE se.group_id = ? ORDER BY s.name""",
-                       (g["id"],))
-        rows = db.q(ctx.conn,
-                    """SELECT sp.school_id, sp.points, sp.rank_no, sp.base_points, sp.multiplier,
-                               sp.category_id, c.name AS category_name, c.gender AS category_gender, c.kind,
-                              COALESCE(t.name, a.name) AS participation_label
-                         FROM school_points sp
-                         JOIN categories c ON c.id = sp.category_id
-                         JOIN participations p ON p.id = sp.participation_id
-                         LEFT JOIN teams t ON t.id = p.team_id
-                         LEFT JOIN athletes a ON a.id = p.athlete_id
-                        WHERE sp.group_id = ?""", (g["id"],))
-        tiebreaks = {r["school_id"]: r["manual_order"]
-                     for r in db.q(ctx.conn, "SELECT * FROM school_tiebreaks WHERE group_id = ?",
-                                   (g["id"],))}
-        result = points.compute_school_totals(db.rows_to_dicts(schools), db.rows_to_dicts(rows),
-                                              [], tiebreaks)
-        out.append({"group": dict(g), "rows": result["rows"], "unresolved": result["unresolved"]})
+        result = group_school_totals(ctx.conn, g["id"])
+        out.append({"group": result["group"], "rows": result["rows"],
+                    "unresolved": result["unresolved"], "started": result["started"]})
     return {"groups": out}

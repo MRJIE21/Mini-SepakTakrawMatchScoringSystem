@@ -5,12 +5,23 @@ import os
 import sqlite3
 import tempfile
 
-from .. import db, security, access
+from .. import clock, db, security, access
 from ..errors import bad_request, conflict
 from ..http_server import Response, route
 from .common import get_or_404
 
 ADMIN = ("admin",)
+
+
+def _invalidate_event_cache():
+    """账号赛事分配影响 /api/events 过滤结果，缓存必须失效（REQ-004）。"""
+    try:
+        from . import catalog
+        invalidate = getattr(catalog, "invalidate_event_stats", None)
+        if invalidate is not None:
+            invalidate()
+    except Exception:
+        pass
 
 
 @route("GET", r"/api/users", roles=ADMIN, scope="registry")
@@ -42,6 +53,7 @@ def create_user(ctx):
     uid = security.create_user(ctx.conn, username, password, role,
                                ctx.body.get("display_name") or username)
     access.set_events(ctx.conn, uid, ctx.body.get('event_ids', []))
+    _invalidate_event_cache()
     db.sync_user_to_event_databases(ctx.conn, uid)
     security.audit(ctx.conn, ctx.user, "create_user", "user", uid, {"role": role})
     return {"user_id": uid, "snapshot_sync_pending": True}
@@ -56,9 +68,10 @@ def reset_password(ctx):
         raise bad_request("密码至少 6 位")
     security.set_password(ctx.conn, user_id, password)
     db.sync_user_to_event_databases(ctx.conn, user_id)
-    db.run(ctx.conn, "DELETE FROM tokens WHERE user_id = ?", (user_id,))
-    security.audit(ctx.conn, ctx.user, "reset_password", "user", user_id)
-    return {"message": "密码已重置，该账号需重新登录", "snapshot_sync_pending": True}
+    revoked = security.revoke_user_tokens(ctx.conn, user_id)
+    security.audit(ctx.conn, ctx.user, "reset_password", "user", user_id, {"revoked": revoked})
+    return {"message": "密码已重置，该账号所有设备需重新登录", "revoked": revoked,
+            "snapshot_sync_pending": True}
 
 
 @route("PUT", r"/api/users/(?P<user_id>\d+)", roles=ADMIN, scope="registry")
@@ -76,6 +89,7 @@ def update_user(ctx):
         fields["active"] = 1 if ctx.body["active"] else 0
     if 'event_ids' in ctx.body:
         access.set_events(ctx.conn, user_id, ctx.body['event_ids'])
+        _invalidate_event_cache()
         security.audit(ctx.conn, ctx.user, 'set_event_access', 'user', user_id, {'event_ids': ctx.body['event_ids']})
     if fields:
         db.update(ctx.conn, "users", user_id, fields)
@@ -98,12 +112,23 @@ def audit_logs(ctx):
         where.append("a.action = ?")
         args.append(ctx.arg("action"))
     limit = int(ctx.arg("limit") or 200)
-    rows = db.q(ctx.conn,
-                f"""SELECT a.*, u.display_name AS user_name FROM audit_logs a
-                      LEFT JOIN users u ON u.id = a.user_id
-                     WHERE {' AND '.join(where)} ORDER BY a.id DESC LIMIT ?""",
-                args + [limit])
-    return {"logs": db.rows_to_dicts(rows)}
+    scope = (ctx.arg("scope") or "event").strip().lower()
+    close_conn = False
+    conn = ctx.conn
+    if scope == "registry":
+        # 登录/登出/账号类审计写在索引库；赛事库范围看不到它们。
+        conn = db.connect()
+        close_conn = True
+    try:
+        rows = db.q(conn,
+                    f"""SELECT a.*, u.display_name AS user_name FROM audit_logs a
+                          LEFT JOIN users u ON u.id = a.user_id
+                         WHERE {' AND '.join(where)} ORDER BY a.id DESC LIMIT ?""",
+                    args + [limit])
+        return {"logs": db.rows_to_dicts(rows), "scope": scope}
+    finally:
+        if close_conn:
+            conn.close()
 
 
 @route("GET", r"/api/admin/backup", roles=ADMIN)
@@ -113,7 +138,7 @@ def backup(ctx):
     使用 sqlite3 的在线备份接口生成一致快照：直接复制数据库文件会漏掉 WAL 中
     尚未合并的写入，得到损坏或过期的副本。迁移到 PostgreSQL 后改用 pg_dump 定期备份。
     """
-    stamp = db.now(ctx.conn).replace(":", "").replace(" ", "_").replace("-", "")
+    stamp = clock.utc_iso().replace(":", "").replace("-", "").replace("Z", "")[:15]
     event_id = ctx.headers.get("X-Event-ID") or "current"
     with tempfile.TemporaryDirectory(prefix="stss_backup_") as tmp:
         snapshot = os.path.join(tmp, f"event_{event_id}_backup_{stamp}.db")

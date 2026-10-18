@@ -16,6 +16,9 @@ async function render({ el }) {
   const ctx = { draft: null, config: null, screens: [], matches: [], dirty: false, busy: false, pushMessage: null };
   let screenTimer = null;
   let screenRefreshing = false;
+  let pollError = null;
+  let pushButton = null;
+  let pushHint = null;
   await load();
   screenTimer = setInterval(refreshScreenStatus, 5000);
   window.addEventListener('beforeunload', () => clearInterval(screenTimer));
@@ -123,7 +126,12 @@ async function render({ el }) {
     box.append(
       h('div.panel-head', h('h2', '大屏控制台'), h('div.row.tight',
         h('button.btn', {
-          onclick: () => window.open(`/display.html?preview=1&event_id=${state.eventId}`, '_blank', 'noopener'),
+          onclick: () => {
+            const revision = Number(ctx.config?.revision || 0);
+            const dirty = ctx.dirty ? 1 : 0;
+            window.open(`/display.html?preview=1&event_id=${state.eventId}&v=${revision}&dirty=${dirty}`,
+              '_blank', 'noopener');
+          },
         }, '预览当前大屏'),
         h('button.btn', { onclick: load }, '刷新'),
         h('span.small.muted', `已推送 v${ctx.config?.revision || 0}`))),
@@ -138,6 +146,8 @@ async function render({ el }) {
     main.append(slotsPanel(), pushPanel());
     workspace.append(controls, main);
     box.append(workspace);
+    // 重绘后同步原地校验状态（刷新间隔/窗口数/重复场次），避免按钮与错误提示滞后。
+    syncPushState();
     if (preserveScroll) {
       requestAnimationFrame(() => window.scrollTo(0, scrollY));
     }
@@ -224,11 +234,16 @@ async function render({ el }) {
       type: 'number', min: '100', max: '1000', step: '50',
       value: String(ctx.draft.poll_ms),
       oninput: (event) => {
-        ctx.draft.poll_ms = Number(event.target.value);
+        // 只做就地校验，不重绘（重绘会丢焦点）；推送按钮与错误提示在此同步。
+        const raw = String(event.target.value).trim();
+        const value = raw === '' ? NaN : Number(raw);
+        ctx.draft.poll_ms = Number.isInteger(value) ? value : NaN;
         markDirty();
+        syncPushState();
       },
     });
-    card.append(h('div.field.mt', h('label', '比分刷新间隔（100–1000ms）'), poll,
+    pollError = h('div.field-error.hidden', '刷新间隔需为 100–1000 的整数毫秒');
+    card.append(h('div.field.mt', h('label', '比分刷新间隔（100–1000ms）'), poll, pollError,
       h('div.small.muted', '默认 500ms；仅比分模式生效，公告/待机固定 2 秒。')));
     const title = h('input.input', {
       value: ctx.draft.announcement_title, placeholder: '公告标题',
@@ -320,20 +335,48 @@ async function render({ el }) {
     return card;
   }
 
-  function pushPanel() {
-    const row = h('div.panel.display-push-panel');
-    const visible = ctx.draft.layout === 8 ? listRange(8) : [...ctx.draft.visible_slots];
+  function validity() {
+    const layout = ctx.draft.layout;
+    const visible = layout === 8 ? listRange(8) : [...ctx.draft.visible_slots];
     const pollValid = Number.isInteger(ctx.draft.poll_ms)
       && ctx.draft.poll_ms >= 100 && ctx.draft.poll_ms <= 1000;
-    const valid = visible.length === ctx.draft.layout
-      && pollValid
-      && new Set(ctx.draft.slots.filter(Boolean).map((item) => item.match_id)).size
-        === ctx.draft.slots.filter(Boolean).length;
-    row.append(h('div.row.tight', h('button.btn.btn-primary.btn-lg', {
-      disabled: ctx.busy || !valid,
+    const assigned = ctx.draft.slots.filter(Boolean);
+    const noDup = new Set(assigned.map((item) => item.match_id)).size === assigned.length;
+    return {
+      visible,
+      pollValid,
+      noDup,
+      visibleOk: visible.length === layout,
+      valid: visible.length === layout && pollValid && noDup,
+    };
+  }
+
+  function pushHintText(check) {
+    if (check.valid) return '推送后大屏会在 1 秒内应用。';
+    if (!check.pollValid) return '请先修正刷新间隔（100–1000 的整数毫秒）。';
+    return '请先按布局勾选正确数量的窗口，并避免重复场次。';
+  }
+
+  function syncPushState() {
+    const check = validity();
+    if (pollError) pollError.classList.toggle('hidden', check.pollValid);
+    if (pushButton) {
+      pushButton.disabled = ctx.busy || !check.valid;
+      pushButton.textContent = ctx.busy ? '推送中…' : '推送到大屏';
+    }
+    if (pushHint) pushHint.textContent = pushHintText(check);
+    updateStatus();
+  }
+
+  function pushPanel() {
+    const row = h('div.panel.display-push-panel');
+    const check = validity();
+    pushButton = h('button.btn.btn-primary.btn-lg', {
+      disabled: ctx.busy || !check.valid,
       onclick: push,
-    }, ctx.busy ? '推送中…' : '推送到大屏'), h('span.small.muted',
-      valid ? '推送后大屏会在 1 秒内应用。' : '请先按布局勾选正确数量的窗口，并避免重复场次。')));
+    }, ctx.busy ? '推送中…' : '推送到大屏');
+    pushHint = h('span.small.muted', pushHintText(check));
+    row.append(h('div.row.tight', pushButton, pushHint));
     if (ctx.pushMessage) {
       row.append(h('div.small.mt',
         { class: ctx.pushMessage.kind === 'error' ? 'field-error' : '' },
@@ -344,6 +387,16 @@ async function render({ el }) {
 
   async function push() {
     if (ctx.busy) return;
+    const check = validity();
+    if (!check.valid) {
+      ctx.pushMessage = {
+        kind: 'error',
+        text: check.pollValid ? '请先按布局勾选正确数量的窗口，并避免重复场次。'
+          : '刷新间隔需为 100–1000 的整数毫秒',
+      };
+      draw();
+      return;
+    }
     ctx.busy = true;
     ctx.pushMessage = { kind: 'info', text: '正在推送…' };
     draw();

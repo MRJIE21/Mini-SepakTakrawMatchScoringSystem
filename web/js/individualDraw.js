@@ -143,7 +143,15 @@ export async function mountIndividualDraw({ container, category, roster: initial
   const blockedReason = () => (session && (session.stale || session.block_reason)
     ? (session.block_reason || '报名名单或正式签表已变化，本轮抽取已失效，请核对后撤销并重新开始')
     : '');
-  const canAct = () => canManage && !offline && !busy && !pending;
+  /* 服务端 GET /individual-draw 已下发 can_draw/block_reason（有领取/成绩时锁定）；
+     面板必须据此禁用不可用操作，而不是等 POST 后 409 才发现。 */
+  const officialLocked = () => !session && rows(official?.entries).length > 0
+    && official?.can_draw === false;
+  const lockReason = () => (session ? blockedReason()
+    : (official && official.can_draw === false
+      ? (official.block_reason || '已有成绩或记录任务领取，不能重新抽签') : ''));
+  const canAct = () => canManage && !offline && !busy && !pending
+    && !(!session && official?.can_draw === false);
 
   function applySession(next, { revealId = null } = {}) {
     session = next || null;
@@ -542,6 +550,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
   function mainLabel(total, picked) {
     const next = Math.min(picked + 1, Math.max(total, 1));
     if (!total) return '当前没有有效报名，不能抽签';
+    if (officialLocked() && phase === 'idle') return '正式出场顺序已确认';
     if (phase === 'starting') return '正在建立抽取过程…';
     if (phase === 'rolling') return `正在抽第 ${next} 位`;
     if (phase === 'picking') return `正在揭晓第 ${next} 位…`;
@@ -593,13 +602,17 @@ export async function mountIndividualDraw({ container, category, roster: initial
     }
     const panel = existing;
     panelElement = panel;
+    const locked = officialLocked();
     panel.dataset.drawPhase = phase;
     panel.dataset.drawPicked = String(picked);
     panel.dataset.drawTotal = String(total);
+    panel.dataset.drawLock = locked ? 'true' : 'false';
     fullscreenButtonEl = null;
 
     panel.append(h('div.panel-head',
-      h('div', h('h3', '个人赛出场顺序'),
+      h('div', h('h3', locked
+          ? `正式出场顺序已确认（${total} 人 · 第 ${official.revision} 版）`
+          : '个人赛出场顺序'),
         h('div.small.muted', `${categoryLabel(category, { withGroup: true })} · 共 ${total || '—'} 人`)),
       h('div.row.tight',
         official?.entries?.length ? statusBadge(`正式签表 · 第 ${official.revision} 版`, 'ok') : statusBadge('尚未保存正式顺序', ''),
@@ -614,8 +627,11 @@ export async function mountIndividualDraw({ container, category, roster: initial
     /* 操作区固定在进度条正下方、所有可变内容之前：状态提示与名单只在它之后变化，
        因此从开始抽签到确认全程按钮停在同一条水平线上。 */
     panel.append(h('div.draw-progress',
-      h('span.draw-progress-count', { dataset: { drawCount: String(picked) } }, `已抽 ${picked} / ${total} 人`),
-      h('span.small.muted', `未抽候选 ${Math.max(total - picked, 0)} 人`)));
+      h('span.draw-progress-count', { dataset: { drawCount: String(picked) } },
+        locked ? `已确认 ${total} 人` : `已抽 ${picked} / ${total} 人`),
+      h('span.small.muted', locked
+        ? `第 ${official.revision} 版 · 已有成绩不可重抽`
+        : `未抽候选 ${Math.max(total - picked, 0)} 人`)));
 
     const actions = h('div.row.tight.draw-actions.mt', { dataset: { drawActions: 'true' } });
     if (canManage) {
@@ -625,8 +641,9 @@ export async function mountIndividualDraw({ container, category, roster: initial
       } else if (phase === 'idle') {
         actions.append(h('button.btn.btn-primary', {
           disabled: !canAct() || !total,
+          title: lockReason() || null,
           onclick: () => startRound(),
-        }, rows(official?.entries).length ? '重新抽签' : '开始抽签'));
+        }, locked ? '重新抽签（已有成绩不可重抽）' : (rows(official?.entries).length ? '重新抽签' : '开始抽签')));
       } else if (phase === 'rolling') {
         actions.append(h('button.btn.btn-primary', { disabled: busy || offline || !!pending,
           onclick: () => stopAndReveal() }, '停止并揭晓'));
@@ -676,6 +693,15 @@ export async function mountIndividualDraw({ container, category, roster: initial
         blockedReason(),
         h('div.small.muted', '抽取与确认已禁用。请核对报名名单；如确认本轮作废，可“放弃本次抽取”后重新开始。')));
     }
+    /* 只读角色不显示锁定横幅（它们本来就没有操作按钮）；有管理权限时说明为何不能操作。
+       can_draw=false 但没有正式签表（先领取/先有成绩）时也显示原因，避免按钮无故禁用。 */
+    if (canManage && !session && !offline && lockReason()) {
+      panel.append(h('div.warn-box.mb', { dataset: { drawLocked: 'true' } },
+        locked
+          ? `正式出场顺序已确认（第 ${official.revision} 版），已有成绩不可重抽。`
+          : '当前状态已锁定，不能开始抽签。',
+        lockReason() ? h('div.small.muted', lockReason()) : null));
+    }
     if (offline) {
       panel.append(h('div.warn-box.mb', { dataset: { drawOffline: 'true' } },
         `当前离线：显示 ${cachedAt ? `${cachedAt} ` : ''}读取的只读缓存，抽取与确认已禁用。`
@@ -717,7 +743,11 @@ export async function mountIndividualDraw({ container, category, roster: initial
       card.append(h('div.small.muted', '结果待核实：请先用原请求核实，核实前不会继续抽取。'));
     } else {
       card.append(h('div.small.muted', total
-        ? `尚未开始：共 ${total} 位运动员，点击“开始抽签”后逐人揭晓，出场顺序以后台抽取结果为准。`
+        ? (locked
+          ? `共 ${total} 位运动员的出场顺序已确认（第 ${official.revision} 版）。已有成绩或记录任务领取，不能重新抽签。`
+          : lockReason()
+            ? `当前状态已锁定：${lockReason()}`
+            : `尚未开始：共 ${total} 位运动员，点击“开始抽签”后逐人揭晓，出场顺序以后台抽取结果为准。`)
         : '当前没有有效报名，不能抽签。'));
     }
     body.append(card);

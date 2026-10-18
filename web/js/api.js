@@ -4,6 +4,9 @@ let eventContext = null;
 let readScope = null;
 let apiUser = null;
 let verifiedToken = '';
+let unauthorizedHandler = null;
+/* 会话失效统一交给应用入口处理（清令牌、回登录页），api 层只负责通知一次。 */
+export function setUnauthorizedHandler(handler) { unauthorizedHandler = handler; }
 export function setApiUser(user) { apiUser = user ? { id: user.id, username: user.username } : null; verifiedToken = getToken(); }
 export function setApiReadScope(scope) { readScope = scope; }
 export function captureRequestContext() {
@@ -91,6 +94,10 @@ async function request(method, path, body, options = {}) {
     e.cancelled = cancelled;
     e.offline = !cancelled && !timedOut && e.status === 0;
     if (method !== 'GET' && (e.status === 0 || e.status >= 500 && !e.not_committed || e.code === 'invalid_response')) e.outcome_unknown = true;
+    /* 登录接口自身的 401 是账号密码错误，不能触发全局登出；其它 401 由入口统一回收会话。 */
+    if (e.status === 401 && path !== '/api/login' && unauthorizedHandler) {
+      try { unauthorizedHandler(); } catch { /* 登录页渲染异常不能掩盖原始 401 */ }
+    }
     throw e;
   } finally {
     clearTimeout(deadline);
@@ -238,6 +245,24 @@ export async function openHtml(path, query = {}, title = '', options = {}) {
   win.document.write(html);
   win.document.close();
   if (title) win.document.title = title;
+  return win;
+}
+
+/* 稳定打印入口：打开同源 /print.html?type=...。URL 只带业务参数（不带令牌），
+   打印页自己从 localStorage 取登录令牌并用 Authorization 头请求导出接口，
+   因此地址可复制、可刷新，权限仍由原接口校验。 */
+export function openPrint(type, params = {}) {
+  const query = new URLSearchParams();
+  query.set('type', type);
+  for (const key of ['category_id', 'group_id', 'event', 'order']) {
+    const value = params[key];
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  }
+  const win = window.open(`/print.html?${query.toString()}`, '_blank');
+  if (!win) {
+    throw new ApiError(0, { code: 'popup_blocked',
+      message: '浏览器拦截了新窗口，请允许弹出窗口后重试' });
+  }
   return win;
 }
 

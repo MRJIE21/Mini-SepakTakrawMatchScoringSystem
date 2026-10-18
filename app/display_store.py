@@ -14,7 +14,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 
-from . import db
+from . import clock, db
 from .errors import ApiError, bad_request, conflict, not_found
 
 LAYOUTS = (1, 2, 3, 4, 8)
@@ -62,11 +62,31 @@ def _rate_check(key: str, limit: int, window: int) -> None:
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """本地展示文本（判定一律用 epoch）。"""
+    return datetime.fromtimestamp(clock.utc_epoch()).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _after(seconds: int) -> str:
-    return (datetime.now() + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(clock.utc_epoch() + int(seconds)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _epoch_now(conn: sqlite3.Connection) -> int:
+    return int(clock.wall_epoch(conn))
+
+
+def _row_epoch(row, epoch_field: str, text_field: str) -> int:
+    try:
+        value = row[epoch_field]
+    except (KeyError, IndexError):
+        value = 0
+    if value:
+        return int(value)
+    try:
+        text = row[text_field]
+    except (KeyError, IndexError):
+        text = ""
+    parsed = clock.parse_local_text(text)
+    return int(parsed) if parsed else 0
 
 
 def _digest(value: str) -> str:
@@ -113,10 +133,13 @@ def screen_for_token(conn: sqlite3.Connection, token: str | None) -> dict | None
     if row is None:
         return None
     screen = dict(row)
-    if _should_touch(screen.get("last_seen_at") or ""):
-        db.run(conn, "UPDATE display_screens SET last_seen_at = ? WHERE id = ?",
-               (_now(), screen["id"]))
-        screen["last_seen_at"] = _now()
+    if _should_touch(screen):
+        now_text = _now()
+        now_epoch = _epoch_now(conn)
+        db.run(conn, "UPDATE display_screens SET last_seen_at = ?, last_seen_epoch = ? WHERE id = ?",
+               (now_text, now_epoch, screen["id"]))
+        screen["last_seen_at"] = now_text
+        screen["last_seen_epoch"] = now_epoch
     return screen
 
 
@@ -131,33 +154,28 @@ def revoke_screen(conn: sqlite3.Connection, screen_id: int) -> dict:
     row = db.q1(conn, "SELECT * FROM display_screens WHERE id = ?", (int(screen_id),))
     if row is None:
         raise not_found("大屏不存在")
-    db.run(conn, "UPDATE display_screens SET revoked_at = ?, last_seen_at = '' WHERE id = ?",
+    db.run(conn, "UPDATE display_screens SET revoked_at = ?, last_seen_at = '', last_seen_epoch = 0 WHERE id = ?",
            (_now(), int(screen_id)))
     db.run(conn, "UPDATE display_pair_codes SET token_once = '' WHERE screen_id = ?", (int(screen_id),))
     return {"id": int(screen_id), "revoked": True}
 
 
-def _should_touch(last_seen: str) -> bool:
-    if not last_seen:
+def _should_touch(screen) -> bool:
+    value = dict(screen or {})
+    previous = _row_epoch(value, "last_seen_epoch", "last_seen_at")
+    if not previous:
         return True
-    try:
-        previous = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return True
-    return (datetime.now() - previous).total_seconds() >= LAST_SEEN_WRITE_SECONDS
+    return (clock.utc_epoch() - previous) >= LAST_SEEN_WRITE_SECONDS
 
 
-def screen_online(screen) -> bool:
+def screen_online(screen, conn: sqlite3.Connection | None = None) -> bool:
     """A screen is online only after it has polled state within the window."""
     value = dict(screen or {})
-    last_seen = value.get("last_seen_at") or ""
-    if not last_seen:
+    previous = _row_epoch(value, "last_seen_epoch", "last_seen_at")
+    if not previous:
         return False
-    try:
-        previous = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return False
-    return (datetime.now() - previous).total_seconds() <= ONLINE_WINDOW_SECONDS
+    current = clock.wall_epoch(conn) if conn is not None else clock.utc_epoch()
+    return (current - previous) <= ONLINE_WINDOW_SECONDS
 
 
 def _client_key(client_ip: str | None) -> str:
@@ -171,8 +189,7 @@ def start_pair(conn: sqlite3.Connection, device_secret: str, client_ip: str | No
     ip = _client_key(client_ip)
     _rate_check(f"pair-start:{ip}", PAIR_START_PER_IP, PAIR_START_WINDOW)
     _rate_check("pair-start:global", PAIR_START_GLOBAL, PAIR_START_WINDOW)
-    now = _now()
-    db.run(conn, "DELETE FROM display_pair_codes WHERE expires_at < ?", (now,))
+    # P2-B：过期配对码不再在业务请求中顺带删除，交给 run.py maintenance 处理。
     code = ""
     for _ in range(12):
         candidate = "".join(secrets.choice("0123456789") for _ in range(6))
@@ -187,6 +204,7 @@ def start_pair(conn: sqlite3.Connection, device_secret: str, client_ip: str | No
         "screen_id": None,
         "event_id": None,
         "expires_at": _after(PAIR_TTL_SECONDS),
+        "expires_at_epoch": int(clock.utc_epoch()) + PAIR_TTL_SECONDS,
         "claimed_at": None,
         "token_once": "",
     })
@@ -201,7 +219,7 @@ def pair_status(conn: sqlite3.Connection, pair_id: int, device_secret: str,
         raise not_found("配对请求不存在")
     if not isinstance(device_secret, str) or _digest(device_secret.strip()) != row["device_hash"]:
         raise bad_request("设备标识不匹配")
-    if row["expires_at"] < _now() and not row["claimed_at"]:
+    if _row_epoch(row, "expires_at_epoch", "expires_at") <= _epoch_now(conn) and not row["claimed_at"]:
         return {"status": "expired"}
     if row["claimed_at"] and row["screen_id"]:
         return {"status": "claimed", "screen_id": row["screen_id"], "token": row["token_once"] or ""}
@@ -222,11 +240,11 @@ def claim_pair(conn: sqlite3.Connection, code: str, event_id: int, name: str,
                 (_digest(code),))
     if row is None:
         raise not_found("配对码不存在或已被使用")
-    if row["expires_at"] < _now():
+    if _row_epoch(row, "expires_at_epoch", "expires_at") <= _epoch_now(conn):
         raise conflict("配对码已过期，请在大屏上重新生成", code="pair_expired")
     # 单屏：重新配对替换该赛事原有的有效凭据，旧大屏会立即回到配对界面。
     now = _now()
-    db.run(conn, "UPDATE display_screens SET revoked_at = ?, last_seen_at = '' "
+    db.run(conn, "UPDATE display_screens SET revoked_at = ?, last_seen_at = '', last_seen_epoch = 0 "
                  "WHERE event_id = ? AND revoked_at IS NULL", (now, int(event_id)))
     db.run(conn, "UPDATE display_pair_codes SET token_once = '' WHERE screen_id IN "
                  "(SELECT id FROM display_screens WHERE event_id = ? AND revoked_at = ?)",
@@ -428,6 +446,7 @@ def sync_live(conn: sqlite3.Connection, match_id: int, payload: dict) -> dict:
         "draft_uid": draft_uid[:80],
         "updated_at": _now(),
         "expires_at": _after(LIVE_TTL_SECONDS),
+        "expires_at_epoch": int(clock.utc_epoch()) + LIVE_TTL_SECONDS,
     }
     if existing is None:
         db.insert(conn, "display_live", values)
@@ -435,18 +454,18 @@ def sync_live(conn: sqlite3.Connection, match_id: int, payload: dict) -> dict:
         db.run(conn,
                "UPDATE display_live SET revision=?, event_seq=?, status=?, current_set=?, home_points=?, "
                "away_points=?, home_sets=?, away_sets=?, sets_json=?, lineup_hash=?, recorder_id=?, "
-               "draft_uid=?, updated_at=?, expires_at=? WHERE match_id=?",
+               "draft_uid=?, updated_at=?, expires_at=?, expires_at_epoch=? WHERE match_id=?",
                (values["revision"], values["event_seq"], values["status"], values["current_set"],
                 values["home_points"], values["away_points"], values["home_sets"], values["away_sets"],
                 values["sets_json"], values["lineup_hash"], values["recorder_id"],
-                values["draft_uid"], values["updated_at"], values["expires_at"], match_id))
+                values["draft_uid"], values["updated_at"], values["expires_at"],
+                values["expires_at_epoch"], match_id))
     return live_row(conn, match_id)
 
 
 def live_row(conn: sqlite3.Connection, match_id: int) -> dict | None:
-    row = db.q1(conn, "SELECT * FROM display_live WHERE match_id = ? AND expires_at > ?",
-                (int(match_id), _now()))
-    if row is None:
+    row = db.q1(conn, "SELECT * FROM display_live WHERE match_id = ?", (int(match_id),))
+    if row is None or _row_epoch(row, "expires_at_epoch", "expires_at") <= _epoch_now(conn):
         return None
     out = dict(row)
     try:
@@ -457,9 +476,12 @@ def live_row(conn: sqlite3.Connection, match_id: int) -> dict | None:
 
 
 def live_rows(conn: sqlite3.Connection) -> list[dict]:
-    rows = db.q(conn, "SELECT * FROM display_live WHERE expires_at > ? ORDER BY match_id", (_now(),))
+    rows = db.q(conn, "SELECT * FROM display_live ORDER BY match_id")
+    now = _epoch_now(conn)
     out = []
     for row in rows:
+        if _row_epoch(row, "expires_at_epoch", "expires_at") <= now:
+            continue
         item = dict(row)
         try:
             item["sets"] = json.loads(item.pop("sets_json") or "[]")

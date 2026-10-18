@@ -793,6 +793,85 @@ try {
   await page.context().setOffline(false);
   pass('离线显示带读取时间的只读缓存，抽取与确认禁用');
 
+  /* 16. 正式签表 + 记录领取：面板消费服务端 can_draw/block_reason 并锁定（REQ-006） */
+  const legacyGroup = structure[1];
+  const legacyUrl = (tab = 'entry') => base + '/#/workspace?' + new URLSearchParams({
+    event: String(event.event_id), group: String(legacyGroup.id),
+    category: String(legacy.id), tab }).toString();
+  const legacyRoster = (await api('GET', `/api/categories/${legacy.id}/participations`)).participations;
+  const lockPage = await makePage(token);
+  await lockPage.goto(legacyUrl());
+  await lockPage.locator('.individual-draw').waitFor();
+  const lockButton = (name) => lockPage.getByRole('button', { name, exact: true });
+  const lockPhase = (name) => lockPage.waitForFunction(
+    (value) => document.querySelector('.individual-draw')?.dataset.drawPhase === value, name);
+  const lockPicked = (count) => lockPage.waitForFunction((value) => {
+    const text = document.querySelector('.draw-progress-count')?.textContent?.trim() || '';
+    const m = /^已抽 (\d+) \/ (\d+) 人$/.exec(text);
+    return !!m && Number(m[1]) === value;
+  }, count);
+  await lockButton('开始抽签').click();
+  await lockPhase('rolling');
+  await lockButton('停止并揭晓').click();
+  await lockPicked(1);
+  await lockButton('抽下一位').click();
+  await lockPhase('rolling');
+  await lockButton('停止并揭晓').click();
+  await lockPicked(2);
+  await lockButton('确认保存出场顺序').click();
+  await lockPage.locator('.draw-official').waitFor();
+  const legacySaved = await officialOf(legacy.id);
+  assert.equal(legacySaved.revision, 1);
+  assert.equal(legacySaved.entries.length, 2);
+  assert.equal(legacySaved.can_draw, true, '未领取/无成绩时仍允许重新抽签');
+  assert.equal(await lockPage.getByRole('button', { name: '重新抽签', exact: true }).count(), 1,
+    '未锁定状态保持现有“重新抽签”可用流程');
+  /* 领取记录任务 → 服务端 can_draw=false；面板刷新后禁用重抽并说明原因。 */
+  await api('POST', `/api/recording/individual/${legacyRoster[0].id}/claim`, {});
+  const lockedDraw = await officialOf(legacy.id);
+  assert.equal(lockedDraw.can_draw, false);
+  assert.ok(lockedDraw.block_reason.includes('领取') || lockedDraw.block_reason.includes('成绩'),
+    lockedDraw.block_reason);
+  await lockPage.reload();
+  await lockPage.locator('.individual-draw').waitFor();
+  const lockedBanner = lockPage.locator('[data-draw-locked="true"]');
+  await lockedBanner.waitFor();
+  assert.ok((await lockedBanner.innerText()).includes('已有成绩不可重抽'));
+  const lockedTitle = await lockPage.locator('.individual-draw h3').innerText();
+  assert.ok(lockedTitle.includes('正式出场顺序已确认'), lockedTitle);
+  assert.ok(lockedTitle.includes('2 人'), lockedTitle);
+  assert.ok(lockedTitle.includes('第 1 版'), lockedTitle);
+  const lockedProgress = await lockPage.locator('.draw-progress').innerText();
+  assert.ok(!lockedProgress.includes('等待开始'), lockedProgress);
+  assert.ok(!lockedProgress.includes('未抽候选'), lockedProgress);
+  assert.ok(lockedProgress.includes('已确认 2 人'), lockedProgress);
+  assert.equal((await lockPage.locator('.draw-main-label').innerText()).trim(), '正式出场顺序已确认');
+  assert.equal(await lockPage.locator('.individual-draw').getAttribute('data-draw-phase'), 'idle');
+  const lockedButton = lockPage.getByRole('button', { name: '重新抽签（已有成绩不可重抽）', exact: true });
+  assert.equal(await lockedButton.count(), 1);
+  assert.equal(await lockedButton.isDisabled(), true, '锁定后重新抽签按钮必须禁用');
+  const lockedStart = await raw('POST', `/api/categories/${legacy.id}/individual-draw/session/start`,
+    { event_identity: identity, request_uid: 'locked-start-must-409' });
+  assert.equal(lockedStart.status, 409, JSON.stringify(lockedStart.body));
+  assert.equal(lockedStart.body.code, 'individual_draw_locked', '服务端 individual_draw_locked 仍是兜底');
+  /* 只读角色：可查看正式签表，但不显示锁定横幅，也没有可点的抽取按钮。 */
+  await api('POST', '/api/users', { username: 'draw-lock-viewer', password: 'LockViewer123',
+    role: 'viewer', display_name: '锁定只读', event_ids: [event.event_id] });
+  const lockViewerToken = (await api('POST', '/api/login',
+    { username: 'draw-lock-viewer', password: 'LockViewer123' })).token;
+  const lockViewer = await makePage(lockViewerToken);
+  try {
+    await lockViewer.goto(legacyUrl('results'));
+    await lockViewer.locator('.individual-draw').waitFor();
+    const viewerTitle = await lockViewer.locator('.individual-draw h3').innerText();
+    assert.ok(viewerTitle.includes('正式出场顺序已确认'), viewerTitle);
+    assert.equal(await lockViewer.locator('[data-draw-locked="true"]').count(), 0,
+      '只读角色不显示锁定横幅');
+    assert.equal(await extractCount(lockViewer), 0, '只读角色没有锁定/抽取操作按钮');
+  } finally { await lockViewer.context().close(); }
+  await lockPage.context().close();
+  pass('正式签表+记录领取后面板锁定：标题/进度为已确认状态、重抽禁用并说明原因、横幅可读、409 兜底；只读角色无锁定横幅');
+
   assert.deepEqual(errors, [], `浏览器控制台错误：${JSON.stringify(errors)}`);
   await writeFile(path.join(artifacts, 'individual-draw-process-report.json'),
     JSON.stringify({ status: 'PASS', checks, geometry, errors }, null, 2));

@@ -19,8 +19,41 @@ def backups_dir() -> Path:
         return Path(override)
     return DB_PATH.parent / "backups"
 
+
+def logs_dir() -> Path:
+    override = os.environ.get("STSS_LOG_DIR")
+    if override:
+        return Path(override)
+    return DATA_DIR / "logs"
+
+
+def service_lock_path() -> Path:
+    """同一数据目录只允许一个服务进程；锁文件不放进 events/ 以免被赛事扫描匹配。"""
+    override = os.environ.get("STSS_LOCK_FILE")
+    if override:
+        return Path(override)
+    return DATA_DIR / "stss.instance.lock"
+
+
 HOST = os.environ.get("STSS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("STSS_PORT", "8000"))
+
+# CORS：默认同源（不使用 *）；需要跨源部署时用逗号白名单显式放行。
+CORS_ORIGINS = [item.strip().rstrip("/") for item in
+                os.environ.get("STSS_CORS_ORIGINS", "").split(",") if item.strip()]
+# 反向代理（https）部署时可填公网 Origin，用于识别同源请求。
+PUBLIC_ORIGIN = os.environ.get("STSS_PUBLIC_ORIGIN", "").rstrip("/")
+
+# /api/events 计数缓存秒数（0 表示不缓存；行数据始终实时查询）
+EVENT_STATS_TTL = float(os.environ.get("STSS_EVENT_STATS_TTL", "3"))
+
+# 维护任务保留期（天）；维护任务默认 dry-run 且需停服 apply。
+RETENTION_DAYS = int(os.environ.get("STSS_RETENTION_DAYS", "30"))
+
+# 日志落盘：data/logs/server.log，按大小轮转。
+LOG_LEVEL = os.environ.get("STSS_LOG_LEVEL", "INFO").upper()
+LOG_MAX_BYTES = int(os.environ.get("STSS_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.environ.get("STSS_LOG_BACKUP_COUNT", "5"))
 
 # 令牌有效期（小时）
 TOKEN_TTL_HOURS = int(os.environ.get("STSS_TOKEN_TTL", "24"))

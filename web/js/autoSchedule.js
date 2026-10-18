@@ -1,5 +1,6 @@
 /* The existing schedule owns navigation and write recovery; this is its editor. */
 import { h, clear, field, numberInput, dateTimeInput, table, toast, confirmAsync, loadingState } from './ui.js';
+import { getToken } from './api.js';
 
 export function openAutoSchedule({ root, category, plan, venues, initialStage, event, client, previewRequest, isCurrent, onBack, onSaved }) {
   const section = h('section.auto-schedule', { 'aria-label': '自动编排赛程' }); clear(root); root.append(section);
@@ -12,7 +13,7 @@ export function openAutoSchedule({ root, category, plan, venues, initialStage, e
   const steps = h('div.auto-steps', h('strong', '1　编排规则'), h('span.muted', '2　预览确认'));
   const errors = h('div.warn-box.hidden', { role: 'alert' }), body = h('div');
   section.append(heading, steps, errors, body); body.append(loadingState('正在读取编排规则…'));
-  function error(message) { if (alive()) { errors.textContent = message; errors.classList.remove('hidden'); errors.scrollIntoView({ block: 'nearest' }); } }
+  function error(message) { if (alive() && getToken()) { errors.textContent = message; errors.classList.remove('hidden'); errors.scrollIntoView({ block: 'nearest' }); } }
   function clearError() { errors.textContent = ''; errors.classList.add('hidden'); }
   const stages = (plan?.stages || []).filter(s => s.params?.schedule_meta?.state === 'confirmed');
   let chosen = [], duration, rest, modeFill, modeReplan, venueEditors = [], form;
@@ -105,16 +106,23 @@ export function openAutoSchedule({ root, category, plan, venues, initialStage, e
       { label: '场地', key: 'venue' }, { label: '预计时间', render: r => unplaced.has(r.id) ? '待安排' : h('div', r.start || '待安排', h('div.small.muted', r.end ? `至 ${r.end}` : '')) },
       { label: '休息核对', render: r => unplaced.has(r.id) ? '待安排' : r.action === '保留' ? '固定占用保留' : `已预留≥${r.rest_minutes}分钟` },
     ], p.schedule, { responsive: true, class: 'auto-table' })));
+    const restartButton = h('button.btn.hidden', { onclick: () => { if (!saving && alive()) renderRules(p.settings); } }, '重新生成预览');
     const saveButton = h('button.btn.btn-primary', { disabled: !p.complete, onclick: async () => {
       if (saving || previewInvalid) return;
       saving = true; saveButton.disabled = true; backButton.disabled = true; clearError();
       try { const result = await client.post(path + '/confirm', { preview_id: p.preview_id });
         dirty = false; if (alive()) { toast(result.message, 'ok'); onSaved(); }
-      } catch (e) { if (['preview_changed','preview_expired'].includes(e.code)) previewInvalid = true; error(e.message); }
+      } catch (e) {
+        if (['preview_changed', 'preview_expired'].includes(e.code)) {
+          previewInvalid = true;
+          restartButton.classList.remove('hidden');
+          error(`${e.message}；请点击“重新生成预览”核对最新分组、场地与比赛状态后重试。`);
+        } else error(e.message);
+      }
       finally { saving = false; saveButton.disabled = !p.complete || previewInvalid; backButton.disabled = false; }
     } }, p.complete ? (p.changed ? `确认并保存${p.changed}场安排` : '确认并保存编排规则') : '需调整规则后保存');
     const backButton = h('button.btn', { onclick: () => renderRules(p.settings) }, '返回修改规则');
-    body.append(h('div.auto-footer', h('span.small.muted', '确认时将再次核对分组、场地占用和比赛状态。'), backButton, saveButton));
+    body.append(h('div.auto-footer', h('span.small.muted', '确认时将再次核对分组、场地占用和比赛状态。'), restartButton, backButton, saveButton));
     section.scrollIntoView({ block: 'start' });
   }
   client.get(path).then(r => { if (alive()) renderRules(r.settings); }).catch(e => { if (alive()) { clear(body); error(e.message); } });

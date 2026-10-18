@@ -1,16 +1,33 @@
 /* 学校总分页：本大组别总分榜与分项目积分明细（设计大纲 7.2、8）。 */
-import { api, download, openHtml } from '../api.js';
+import { api, download, openPrint } from '../api.js';
 import { registerView, state, loadStructure } from '../main.js';
 import {
-  h, table, toast, modal, formDialog, clear, task, loadingState, errorState, categoryLabel,
-  exportOrderControl,
+  h, table, toast, modal, formDialog, clear, task, loadingState, errorState, emptyState,
+  categoryLabel, exportOrderControl,
 } from '../ui.js';
 
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
 
+function registrationLink(groupId) {
+  const params = new URLSearchParams({ event: String(state.eventId), group: String(groupId),
+    tab: 'registration' });
+  return `#/workspace?${params.toString()}`;
+}
+
 async function render({ el, params }) {
   if (!state.eventId) throw new Error('请先在“赛事首页”中创建赛事');
   const structure = state.structure || await loadStructure();
+  if (!structure.groups.length) {
+    /* REQ-017：空赛事不显示 NaN 组别与只有表头的表格，给出下一步入口。 */
+    el.append(h('div.panel',
+      h('div.panel-head', h('h2', '学校团体总分')),
+      emptyState({
+        text: '暂无组别/学校',
+        hint: '还没有建立大组别或学校。请先在“赛事设置”中建立组别并完成学校报名。',
+        action: h('a.btn.btn-primary', { href: '#/setup?step=structure' }, '去赛事设置'),
+      })));
+    return;
+  }
   const groupId = Number(params.group || structure.groups[0]?.id);
   const group = structure.groups.find((g) => g.id === groupId) || structure.groups[0];
   let exportOrder = 'asc';
@@ -36,8 +53,8 @@ async function render({ el, params }) {
             group_id: group.id, order: exportOrder })),
         }, `导出 ${group.name.split('：')[0]} XLSX`) : null,
         canWrite() ? h('button.btn', {
-          onclick: task(() => openHtml('/api/exports/school-notice.html', {
-            group_id: group.id, order: exportOrder }, '学校团体总分表')),
+          onclick: task(() => openPrint('school-notice', {
+            group_id: group.id, order: exportOrder, event: state.eventId })),
         }, '打印本组学校总分表') : null,
       )),
     h('div.small.muted', `${group.name} · 单项前八名积分 9、7、6、5、4、3、2、1，集体项目（三人赛）双倍计入；`
@@ -66,10 +83,12 @@ async function render({ el, params }) {
       for (const item of all.groups) {
         overviewPanel.append(h('div.stage-block',
           h('h4', item.group.name),
-          item.rows.length
-            ? h('div.small', item.rows.slice(0, 8)
-              .map((r) => `${r.rank ?? '待确认'}. ${r.name}（${r.total}）`).join('　'))
-            : h('div.small.muted', '暂无成绩')));
+          !item.rows.length
+            ? h('div.small.muted', '暂无学校/暂无成绩')
+            : item.started === false
+              ? h('div.small.muted', '未开赛/无成绩')
+              : h('div.small', item.rows.slice(0, 8)
+                .map((r) => `${r.rank ?? '待确认'}. ${r.name}（${r.total}）`).join('　'))));
       }
     } catch (e) {
       clear(panelBody);
@@ -81,12 +100,31 @@ async function render({ el, params }) {
 
 function drawTotals(data, group, reload) {
   const body = h('div');
+  if (!data.rows.length) {
+    /* REQ-017：有组别但没有学校/成绩时给明确的空态行与去报名入口，保留顶部导出按钮。 */
+    body.append(emptyState({
+      text: '暂无学校/暂无成绩',
+      hint: '本组别还没有学校报名或成绩。先在学校报名中添加学校并完成报名，再回到本页查看总分。',
+      action: h('a.btn.btn-primary', {
+        href: registrationLink(group.id),
+      }, '去学校报名'),
+    }));
+    return body;
+  }
+  const started = data.started !== false;
+  if (!started) {
+    /* REQ-008：完全未开赛的组别不产生伪名次；页面与导出/公告使用同一 started 口径。 */
+    body.append(h('div.info-box.mb', '本组别尚未开赛/无成绩，名次不计入。'));
+  }
   body.append(h('div.table-scroll', table([
     {
       label: '名次',
-      render: (r) => (r.status === 'tie_pending'
-        ? h('span.badge.badge-warn', '待确认')
-        : h('b', { class: r.rank === 1 ? 'rank-1' : '' }, r.rank)),
+      render: (r) => {
+        if (!started) return h('span.badge.badge-info', '未开赛/无成绩');
+        return r.status === 'tie_pending'
+          ? h('span.badge.badge-warn', '待确认')
+          : h('b', { class: r.rank === 1 ? 'rank-1' : '' }, r.rank);
+      },
     },
     { label: '学校', key: 'name' },
     { label: '团体总分', key: 'total', align: 'right' },
@@ -95,8 +133,10 @@ function drawTotals(data, group, reload) {
     { label: '第三名', render: (r) => r.rank_counts['3'] || 0, align: 'center' },
     {
       label: '待确认',
-      render: (r) => (r.pending.length
-        ? h('span.badge.badge-warn', `${r.pending.length} 项`) : h('span.muted', '—')),
+      render: (r) => (!started
+        ? h('span.muted', '—')
+        : (r.pending.length
+          ? h('span.badge.badge-warn', `${r.pending.length} 项`) : h('span.muted', '—'))),
     },
     {
       label: '明细',
@@ -104,9 +144,9 @@ function drawTotals(data, group, reload) {
         `分项目明细（${r.details.length}）`),
     },
   ], data.rows)));
-  /* 未确认名次不加入正式总分：说明缺项，不伪装为统计完成（§13.3） */
+  /* 未确认名次不加入正式总分：说明缺项，不伪装为统计完成（§13.3）；未开赛组不显示该警告。 */
   const pendingCount = data.rows.reduce((n, r) => n + (r.pending ? r.pending.length : 0), 0);
-  if (pendingCount) {
+  if (started && pendingCount) {
     body.append(h('div.warn-box.mt',
       `还有 ${pendingCount} 项名次未确认，未计入上面的正式总分。`));
   }

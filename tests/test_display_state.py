@@ -98,6 +98,34 @@ class DisplayStateVersionTest(unittest.TestCase):
         self.assertEqual(standby['mode'], 'standby')
         self.assertNotEqual(before['state_version'], standby['state_version'])
 
+    def test_config_revision_matches_published_config(self):
+        state = display_state.build_state(self.conn, self._screen())
+        self.assertIs(type(state['config_revision']), int,
+                      'config_revision must be a plain int for the preview badge')
+        self.assertEqual(state['config_revision'], 1)
+
+        display_store.publish_config(self.conn, 2, {
+            'layout': 1, 'mode': 'score', 'poll_ms': 750,
+            'slots': [{'match_id': 1, 'label': '1 号场'}], 'visible_slots': [0],
+        })
+        updated = display_state.build_state(self.conn, self._screen())
+        self.assertEqual(updated['config_revision'], 2,
+                         'config_revision must follow every publish')
+        self.assertGreater(updated['config_revision'], state['config_revision'])
+
+    def test_default_config_revision_is_zero(self):
+        empty_db = tempfile.TemporaryDirectory(prefix='stss-display-empty-')
+        self.addCleanup(empty_db.cleanup)
+        path = Path(empty_db.name) / 'event_2.db'
+        db.init_db(path)
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        conn.execute("INSERT INTO events(id, uuid, name) VALUES(2, 'u2', '空赛事')")
+        conn.commit()
+        state = display_state.build_state(conn, {'id': None, 'name': '预览', 'event_id': 2})
+        self.assertIs(type(state['config_revision']), int)
+        self.assertEqual(state['config_revision'], 0)
+
 
 if __name__ == '__main__':
     unittest.main()

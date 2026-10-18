@@ -790,6 +790,16 @@ tr.flash td { animation: rowflash 1400ms ease-out 1; }
 .table-scroll > table.tbl:has(th:nth-child(4)) { min-width: 520px; }
 .table-scroll > table.tbl:has(th:nth-child(6)) { min-width: 760px; }
 .table-scroll > table.tbl:has(th:nth-child(8)) { min-width: 960px; }
+/* 成绩表固定列与横向滚动提示（REQ-009）：只影响声明 sticky 列的表格，其余表不变。 */
+.table-scroll-wrap { min-width: 0; max-width: 100%; }
+.table-scroll-hint { margin: 8px 2px 0; font-size: 12px; color: var(--muted); }
+.table-scroll-hint[hidden] { display: none; }
+table.tbl th[data-sticky], table.tbl td[data-sticky] {
+  position: sticky; z-index: 2; background: var(--panel);
+}
+table.tbl th[data-sticky] { background: #f7f9fd; z-index: 3; }
+table.tbl tr:hover td[data-sticky] { background: #fafcff; }
+table.tbl th[data-sticky]::after { content: ""; position: absolute; top: 0; bottom: 0; right: -1px; width: 1px; background: var(--line); }
 
 /* 工作台响应式：平板不再保留固定侧栏，窄屏将上下文和筛选分层，避免互相覆盖。 */
 @media (max-width: 900px) {

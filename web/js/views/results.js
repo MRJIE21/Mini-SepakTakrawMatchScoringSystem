@@ -2,14 +2,14 @@
 
    改进方案 §7.3、§13.1：个人赛不依赖三人赛的编排方案，没有方案也能查看成绩、名次、积分与导出（T16）。
    名次一律标注来源，列表排序不冒充正式名次。 */
-import { api, download, openHtml, captureRequestContext } from '../api.js';
+import { api, download, openPrint, captureRequestContext } from '../api.js';
 import { registerView, state, loadStructure, go } from '../main.js';
 import { workspaceLink } from '../workspaceContext.js';
 import { mountIndividualDraw } from '../individualDraw.js';
 import {
   h, field, selectInput, textInput, table, toast, modal, confirmDialog, confirmAsync, clear,
   statusBadge, task, formDialog, searchSelect, emptyState, errorState, loadingState,
-  categoryLabel, exportOrderControl,
+  categoryLabel, exportOrderControl, scrollableTable,
 } from '../ui.js';
 
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
@@ -68,8 +68,8 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
           category_id: cat.id, order: resultOrder })),
       }, '导出本项目成绩 XLSX') : null,
       canWrite() ? h('button.btn', {
-        onclick: task(() => openHtml('/api/exports/category-notice.html', {
-          category_id: cat.id, order: resultOrder }, '项目成绩单')),
+        onclick: task(() => openPrint('category-notice', {
+          category_id: cat.id, order: resultOrder, event: state.eventId })),
       }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null,
       h('span.small.muted', cat.kind === 'team'
         ? '小组排名依次比较：积分（胜 2、负 1、弃权 0）→ C 值（胜局/负局）→ Z 值（得分/失分）→ 现场抽签。计算使用精确比值。'
@@ -91,8 +91,8 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
         category_id: cat.id, order: resultOrder })),
     }, '导出本项目 XLSX') : null,
     canWrite() ? h('button.btn', {
-      onclick: task(() => openHtml('/api/exports/category-notice.html', {
-        category_id: cat.id, order: resultOrder }, '项目成绩单')),
+      onclick: task(() => openPrint('category-notice', {
+        category_id: cat.id, order: resultOrder, event: state.eventId })),
     }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null));
 
   if (cat.kind === 'individual') {
@@ -183,14 +183,14 @@ async function drawPool(box, pool, redraw, client = scopedClient()) {
   if (data.needs_reconfirm) {
     box.append(h('div.warn-box.mb', '成绩变化后小组名次与已确认快照不一致，请重新确认名次。'));
   }
-  box.append(h('div.table-scroll', table([
-    { label: '名次', render: (r) => rowRank(r) },
-    { label: '参赛主体', key: 'label' },
+  box.append(scrollableTable(h('div.table-scroll', table([
+    { label: '名次', render: (r) => rowRank(r), sticky: 'left' },
+    { label: '参赛主体', key: 'label', sticky: 'left' },
     { label: '场次', key: 'played', align: 'center' },
     { label: '胜', key: 'wins', align: 'center' },
     { label: '负', key: 'losses', align: 'center' },
     { label: '弃权', key: 'forfeits', align: 'center' },
-    { label: '积分', key: 'points', align: 'center' },
+    { label: '积分', key: 'points', align: 'center', sticky: 'right' },
     { label: '胜局', key: 'sets_won', align: 'center' },
     { label: '负局', key: 'sets_lost', align: 'center' },
     { label: 'C 值', key: 'c_text', align: 'center' },
@@ -204,7 +204,7 @@ async function drawPool(box, pool, redraw, client = scopedClient()) {
           ? h('span.badge.badge-warn', `需抽签（第${r.rank_from}—${r.rank_to}名）`)
           : (r.by_lot ? h('span.badge.badge-info', '抽签确定') : (r.ratio_note || ''))),
     },
-  ], data.rows)));
+  ], data.rows)), { hint: '横向滚动查看完整数据' }));
   if (data.excluded.length) {
     box.append(h('div.small.muted.mt',
       `未计入排名的场次：${data.excluded.map((e) => `#${e.match_id}（${e.reason}）`).join('；')}`));
@@ -378,15 +378,15 @@ async function drawPlacements(container, cat, reload, refresh, client = scopedCl
         : '个人赛名次来自成绩录入页；未确认名次不计入学校团体总分。',
     }));
   } else {
-    panel.append(h('div.table-scroll', table([
+    panel.append(scrollableTable(h('div.table-scroll', table([
       {
-        label: '名次', render: (p) => (p.status === 'confirmed'
+        label: '名次', sticky: 'left', render: (p) => (p.status === 'confirmed'
           ? `第 ${p.rank_no} 名` : h('span.badge.badge-warn', '待确认')),
       },
-      { label: '参赛主体', key: 'display' },
+      { label: '参赛主体', key: 'display', sticky: 'left' },
       { label: '基础分', key: 'base_points', align: 'center' },
       { label: '倍数', key: 'multiplier', align: 'center' },
-      { label: '计入积分', key: 'points', align: 'center' },
+      { label: '计入积分', key: 'points', align: 'center', sticky: 'right' },
       {
         /* 每个名次都标来源，不用列表排序冒充正式名次（§13.1） */
         label: '来源', render: (p) => h('span.small',
@@ -408,7 +408,7 @@ async function drawPlacements(container, cat, reload, refresh, client = scopedCl
           },
         }, '删除') : h('span.muted', '只读')),
       },
-    ], prows)));
+    ], prows)), { hint: '横向滚动查看完整数据' }));
     const pending = prows.filter((p) => p.status !== 'confirmed');
     if (pending.length) {
       panel.append(h('div.warn-box.mt',

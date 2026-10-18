@@ -1,9 +1,11 @@
 """赛事、大组别、项目、学校、运动员、队伍、参赛名单、场地。"""
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 
-from .. import db, idempotency, security, registration, team_rules_store
+from .. import config, db, idempotency, security, registration, team_rules_store
 from ..domain import team_rules
 from ..errors import (ApiError, bad_request, conflict, invalid_fields, not_found,
                       stale_revision)
@@ -184,29 +186,100 @@ def team_profile_gaps(conn, team_id: int, captain_id: int | None) -> list[str]:
 
 
 
+# ------------------------------------------------------------------ 赛事列表计数缓存
+# /api/events 的行数据始终实时查询 registry；每个赛事的三项计数按 event_id 缓存
+# STSS_EVENT_STATS_TTL 秒，写操作通过 invalidate_event_stats() 显式失效。
+# 缓存只保存未过滤的原始计数，access.filter_result 仍在返回前按角色过滤。
+_EVENT_STATS_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
+_EVENT_STATS_LOCK = threading.Lock()
+
+
+def _stats_cache_key(event_id: int) -> tuple[str, int]:
+    """缓存键带 registry 路径：测试/多数据目录同进程切换时不会读到别库的计数。"""
+    try:
+        registry = str(config.DB_PATH.resolve())
+    except OSError:
+        registry = str(config.DB_PATH)
+    return registry, int(event_id)
+
+
+def invalidate_event_stats(event_id: int | None = None) -> None:
+    """失效 /api/events 计数缓存。
+
+    event_id 为空时清空全部（创建/改名/删除赛事、账号赛事分配等跨赛事变化）；
+    指定 event_id 时只失效该赛事（event-scope 写操作完成后可精确调用）。
+    """
+    with _EVENT_STATS_LOCK:
+        if event_id is None:
+            _EVENT_STATS_CACHE.clear()
+        else:
+            _EVENT_STATS_CACHE.pop(_stats_cache_key(event_id), None)
+
+
+def _event_stats_ttl() -> float:
+    try:
+        return float(config.EVENT_STATS_TTL)
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _event_stats(conn, event_id: int) -> dict:
+    """读取单赛事计数；缓存命中时不打开赛事数据库连接。"""
+    event_id = int(event_id)
+    key = _stats_cache_key(event_id)
+    ttl = _event_stats_ttl()
+    if ttl > 0:
+        with _EVENT_STATS_LOCK:
+            cached = _EVENT_STATS_CACHE.get(key)
+            if cached is not None and cached[0] > time.monotonic():
+                return dict(cached[1])
+    event_path = db.event_db_path(event_id)
+    data_conn = db.connect(event_path) if event_path.exists() else conn
+    try:
+        counts = db.q1(data_conn,
+                       """SELECT (SELECT COUNT(*) FROM categories c JOIN groups g ON g.id = c.group_id
+                                   WHERE g.event_id = ?) AS categories,
+                                 (SELECT COUNT(*) FROM schools WHERE event_id = ?) AS schools,
+                                 (SELECT COUNT(*) FROM matches m
+                                    JOIN categories c ON c.id = m.category_id
+                                    JOIN groups g ON g.id = c.group_id
+                                   WHERE g.event_id = ? AND m.status = 'finished') AS finished_matches
+                       """, (event_id, event_id, event_id))
+    finally:
+        if data_conn is not conn:
+            data_conn.close()
+    stats = dict(counts)
+    if ttl > 0:
+        with _EVENT_STATS_LOCK:
+            _EVENT_STATS_CACHE[key] = (time.monotonic() + ttl, stats)
+    return dict(stats)
+
+
+def _invalidate_event_of(conn, category_id=None, group_id=None, school_id=None, event_id=None) -> None:
+    """按事件范围写操作精确失效计数缓存（只清该赛事，不清其它赛事）。"""
+    resolved = event_id
+    if resolved is None and category_id is not None:
+        row = db.q1(conn, """SELECT g.event_id FROM categories c
+                               JOIN groups g ON g.id = c.group_id WHERE c.id = ?""", (int(category_id),))
+        resolved = row["event_id"] if row else None
+    if resolved is None and group_id is not None:
+        row = db.q1(conn, "SELECT event_id FROM groups WHERE id = ?", (int(group_id),))
+        resolved = row["event_id"] if row else None
+    if resolved is None and school_id is not None:
+        row = db.q1(conn, "SELECT event_id FROM schools WHERE id = ?", (int(school_id),))
+        resolved = row["event_id"] if row else None
+    if resolved is not None:
+        invalidate_event_stats(int(resolved))
+
+
 # ------------------------------------------------------------------ 赛事
 @route("GET", r"/api/events", scope="registry")
 def list_events(ctx):
     rows = db.q(ctx.conn, "SELECT * FROM events ORDER BY id")
     out = []
     for r in rows:
-        event_path = db.event_db_path(r["id"])
-        data_conn = db.connect(event_path) if event_path.exists() else ctx.conn
-        try:
-            counts = db.q1(data_conn,
-                           """SELECT (SELECT COUNT(*) FROM categories c JOIN groups g ON g.id = c.group_id
-                                       WHERE g.event_id = ?) AS categories,
-                                     (SELECT COUNT(*) FROM schools WHERE event_id = ?) AS schools,
-                                     (SELECT COUNT(*) FROM matches m
-                                        JOIN categories c ON c.id = m.category_id
-                                        JOIN groups g ON g.id = c.group_id
-                                       WHERE g.event_id = ? AND m.status = 'finished') AS finished_matches
-                           """, (r["id"], r["id"], r["id"]))
-        finally:
-            if data_conn is not ctx.conn:
-                data_conn.close()
         item = dict(r)
-        item.update(dict(counts))
+        item.update(_event_stats(ctx.conn, r["id"]))
         out.append(item)
     deployment = db.q1(ctx.conn, "SELECT v FROM settings WHERE k = 'deployment_id'")
     return {"events": out, "deployment_id": deployment["v"] if deployment else ""}
@@ -230,6 +303,7 @@ def create_event(ctx):
     event = dict(get_or_404(ctx.conn, "events", event_id, "赛事"))
     db.create_event_database(event_id, event, ctx.conn)
     security.audit(ctx.conn, ctx.user, "create_event", "event", event_id, {"name": name})
+    invalidate_event_stats()          # 新赛事立即出现在列表中（计数为首个读取时计算）
     return {"event_id": event_id, "event_uuid": event["uuid"]}
 
 
@@ -334,6 +408,7 @@ def create_full_event(ctx):
     finally:
         if event_conn is not None:
             event_conn.close()
+    invalidate_event_stats(event_id)  # 完整建赛一次性写入组别/项目/场地，计数立即失效
     return {"event_id": event_id, "event_uuid": event["uuid"], "group_id": first_group_id,
             "category_id": first_category_id}
 
@@ -364,6 +439,7 @@ def update_event(ctx):
         finally:
             event_conn.close()
     security.audit(ctx.conn, ctx.user, "update_event", "event", event_id, fields)
+    invalidate_event_stats(event_id)  # 改名/状态变化后列表立即刷新
     return {"message": "已更新"}
 
 
@@ -400,6 +476,7 @@ def bootstrap_event(ctx):
                      (event_id, vname)):
             db.insert(ctx.conn, "venues", {"event_id": event_id, "name": vname, "seq": i})
     security.audit(ctx.conn, ctx.user, "bootstrap_event", "event", event_id)
+    _invalidate_event_of(ctx.conn, event_id=event_id)  # 组别/项目建立后计数立即刷新
     return {"message": "已建立大组别与项目", "groups": created}
 
 
@@ -547,6 +624,7 @@ def create_category(ctx):
         "group_id": group_id, "gender": gender, "kind": kind,
         "name": ctx.body.get("name") or f"{GENDER_NAMES[gender]}{KIND_NAMES[kind]}",
         "seq": int(ctx.body.get("seq") or 0)})
+    _invalidate_event_of(ctx.conn, group_id=group_id)
     return {"category_id": cat_id}
 
 
@@ -585,9 +663,19 @@ def delete_category(ctx):
                  (category_id, category_id))
     if used["p"] or used["m"]:
         raise conflict("该项目已有参赛名单或比赛，不能删除", code="in_use")
+    event_id = _event_id_of_category(ctx.conn, category_id)
     db.run(ctx.conn, "DELETE FROM plans WHERE category_id = ?", (category_id,))
     db.run(ctx.conn, "DELETE FROM categories WHERE id = ?", (category_id,))
+    if event_id is not None:
+        invalidate_event_stats(event_id)
     return {"message": "项目已删除"}
+
+
+def _event_id_of_category(conn, category_id: int):
+    row = db.q1(conn, """SELECT g.event_id FROM categories c
+                           JOIN groups g ON g.id = c.group_id WHERE c.id = ?""",
+                (int(category_id),))
+    return int(row["event_id"]) if row else None
 
 
 # ------------------------------------------------------------------ 学校
@@ -631,6 +719,7 @@ def create_school(ctx):
     db.insert(ctx.conn, "school_entries", {"event_id": event_id, "group_id": int(group_id),
                                            "school_id": school_id})
     security.audit(ctx.conn, ctx.user, "create_school", "school", school_id, {"name": name})
+    invalidate_event_stats(event_id)  # 学校计数立即刷新
     return {"school_id": school_id, "rev": 1}
 
 
@@ -664,16 +753,68 @@ def update_school(ctx):
     return {"message": "已更新", "rev": bump_rev(ctx.conn, "schools", school_id)}
 
 
+def _school_delete_reasons(conn, school_id: int) -> list[dict]:
+    """学校被报名引用时，给出真实原因与可执行步骤（不改变任何守卫规则）。"""
+    pids = [row["id"] for row in db.q(
+        conn,
+        """SELECT p.id FROM participations p
+             LEFT JOIN teams t ON t.id = p.team_id
+             LEFT JOIN athletes a ON a.id = p.athlete_id
+            WHERE t.school_id = ? OR a.school_id = ?""", (school_id, school_id))]
+    if not pids:
+        return []
+    marks = ",".join("?" for _ in pids)
+    args = tuple(pids)
+    results = db.q1(
+        conn,
+        f"""SELECT COUNT(*) AS n FROM matches m
+             WHERE m.result_version > 0
+               AND (m.home_participation IN ({marks}) OR m.away_participation IN ({marks})
+                    OR m.home_actual IN ({marks}) OR m.away_actual IN ({marks}))""",
+        args * 4)
+    placed = db.q1(conn, f"SELECT COUNT(*) AS n FROM placements WHERE participation_id IN ({marks})", args)
+    individual = db.q1(conn, f"SELECT COUNT(*) AS n FROM individual_results WHERE participation_id IN ({marks})", args)
+    if (results["n"] or 0) + (placed["n"] or 0) + (individual["n"] or 0) > 0:
+        return [{
+            "code": "has_results",
+            "message": "该学校已有比赛成绩或名次，不能删除",
+            "steps": ["先由管理员或编排对相关场次做正式更正或取消",
+                      "或在成绩页删除/作废相关名次",
+                      "确认该校已无成绩后再删除学校"],
+        }]
+    locked = db.q1(
+        conn,
+        f"""SELECT pl.id FROM plans pl
+              JOIN categories c ON c.id = pl.category_id
+              JOIN participations p ON p.category_id = c.id
+             WHERE p.id IN ({marks}) AND pl.status IN ('locked','running') LIMIT 1""", args)
+    if locked:
+        return [{
+            "code": "plan_locked",
+            "message": "该学校所在项目的赛程或编排方案已锁定，报名冻结，不能删除",
+            "steps": ["由管理员撤回阶段确认或解锁方案",
+                      "确认该校报名不再冻结后再删除学校"],
+        }]
+    return [{
+        "code": "registration_in_use",
+        "message": "该学校已有参赛报名，不能删除",
+        "steps": ["先在学校报名中退出或删除该学校的报名记录",
+                  "确认报名名单为空后再删除学校"],
+    }]
+
+
 @route("DELETE", r"/api/schools/(?P<school_id>\d+)", roles=ADMIN)
 def delete_school(ctx):
     school_id = int(ctx.params["school_id"])
-    get_or_404(ctx.conn, "schools", school_id, "学校")
+    school = get_or_404(ctx.conn, "schools", school_id, "学校")
     used = db.q1(ctx.conn, "SELECT COUNT(*) AS n FROM participations p JOIN teams t ON t.id = p.team_id WHERE t.school_id = ?", (school_id,))
     used2 = db.q1(ctx.conn, "SELECT COUNT(*) AS n FROM participations p JOIN athletes a ON a.id = p.athlete_id WHERE a.school_id = ?", (school_id,))
     if (used["n"] or 0) + (used2["n"] or 0) > 0:
-        raise conflict("该学校已进入参赛名单，不能删除；如需退出请修改参赛记录状态", code="in_use")
+        reasons = _school_delete_reasons(ctx.conn, school_id)
+        raise conflict(reasons[0]["message"], code="in_use", detail={"reasons": reasons})
     db.run(ctx.conn, "DELETE FROM schools WHERE id = ?", (school_id,))
     security.audit(ctx.conn, ctx.user, "delete_school", "school", school_id)
+    invalidate_event_stats(school["event_id"])  # 学校计数立即刷新
     return {"message": "已删除"}
 
 
@@ -791,12 +932,15 @@ def update_athlete(ctx):
 @route("DELETE", r"/api/athletes/(?P<athlete_id>\d+)", roles=ORG)
 def delete_athlete(ctx):
     athlete_id = int(ctx.params["athlete_id"])
-    get_or_404(ctx.conn, "athletes", athlete_id, "运动员")
+    athlete = get_or_404(ctx.conn, "athletes", athlete_id, "运动员")
     if db.q1(ctx.conn, "SELECT id FROM participations WHERE athlete_id = ?", (athlete_id,)):
         raise conflict("该运动员已进入参赛名单，不能删除", code="in_use")
     if db.q1(ctx.conn, "SELECT id FROM team_members WHERE athlete_id = ?", (athlete_id,)):
         raise conflict("该运动员已在某个三人赛项目名单中，请先从项目名单中移除", code="in_use")
     db.run(ctx.conn, "DELETE FROM athletes WHERE id = ?", (athlete_id,))
+    # REQ-006：删除类操作写审计，便于现场追责；只记对象标识，不记口令/令牌。
+    security.audit(ctx.conn, ctx.user, "delete_athlete", "athlete", athlete_id,
+                   {"school_id": athlete["school_id"], "name": athlete["name"]})
     return {"message": "已删除"}
 
 
@@ -909,10 +1053,13 @@ def update_team(ctx):
 @route("DELETE", r"/api/teams/(?P<team_id>\d+)", roles=ADMIN)
 def delete_team(ctx):
     team_id = int(ctx.params["team_id"])
-    get_or_404(ctx.conn, "teams", team_id, "学校项目名单")
+    team = get_or_404(ctx.conn, "teams", team_id, "学校项目名单")
     if db.q1(ctx.conn, "SELECT id FROM participations WHERE team_id = ?", (team_id,)):
         raise conflict("该学校已进入本项目参赛名单，不能删除项目名单", code="in_use")
     db.run(ctx.conn, "DELETE FROM teams WHERE id = ?", (team_id,))
+    security.audit(ctx.conn, ctx.user, "delete_team", "team", team_id,
+                   {"category_id": team["category_id"], "school_id": team["school_id"],
+                    "name": team["name"]})
     return {"message": "已删除"}
 
 
@@ -1142,6 +1289,7 @@ def _resolve_school(conn, cat: dict, body: dict, created: dict) -> dict:
     db.insert(conn, "school_entries", {"event_id": event_id, "group_id": cat["group_id"],
                                        "school_id": school_id})
     created["schools"].append(school_id)
+    invalidate_event_stats(event_id)  # 报名时随事务新建的学校也要让列表计数立即刷新
     return db.q1(conn, "SELECT * FROM schools WHERE id = ?", (school_id,))
 
 
@@ -1587,11 +1735,21 @@ def create_venue(ctx):
 
 @route("DELETE", r"/api/venues/(?P<venue_id>\d+)", roles=ORG)
 def delete_venue(ctx):
+    """删除场地：同一事务统计影响场次、递增安排版本、写审计。"""
     venue_id = int(ctx.params["venue_id"])
-    get_or_404(ctx.conn, "venues", venue_id, "场地")
-    db.run(ctx.conn, "UPDATE matches SET venue_id = NULL WHERE venue_id = ?", (venue_id,))
-    db.run(ctx.conn, "DELETE FROM venues WHERE id = ?", (venue_id,))
-    return {"message": "已删除"}
+    venue = get_or_404(ctx.conn, "venues", venue_id, "场地")
+    with db.tx(ctx.conn):
+        affected = db.q1(ctx.conn,
+                         "SELECT COUNT(*) AS n FROM matches WHERE venue_id = ?", (venue_id,))["n"]
+        # 递增 schedule_revision/updated_at，让已打开的记录页/编辑弹窗的乐观锁能感知变化。
+        db.run(ctx.conn,
+               """UPDATE matches SET venue_id = NULL,
+                          schedule_revision = schedule_revision + 1, updated_at = ?
+                   WHERE venue_id = ?""", (db.now(ctx.conn), venue_id))
+        db.run(ctx.conn, "DELETE FROM venues WHERE id = ?", (venue_id,))
+        security.audit(ctx.conn, ctx.user, "delete_venue", "venue", venue_id,
+                       {"event_id": venue["event_id"], "affected_matches": affected})
+    return {"message": "已删除", "affected_matches": affected}
 
 
 @route("GET", r"/api/participations/labels")

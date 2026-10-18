@@ -28,7 +28,8 @@ def placement_points(rank: int | None, category_kind: str) -> tuple[int, int, in
 
 def compute_school_totals(schools: list[dict], points_rows: list[dict],
                           pending_rows: list[dict] | None = None,
-                          tiebreaks: dict[int, int] | None = None) -> dict:
+                          tiebreaks: dict[int, int] | None = None,
+                          started: bool = True) -> dict:
     """汇总学校总分。
 
     schools:     [{school_id, name, short_name}]
@@ -36,6 +37,8 @@ def compute_school_totals(schools: list[dict], points_rows: list[dict],
                    participation_label, base_points, multiplier, kind}]
     pending_rows:[{school_id, category_name, participation_label}]  未确认名次
     tiebreaks:   {school_id: manual_order}
+    started:     False 表示该大组别尚无任何已开赛场次：不产生名次（rank=None、
+                 status='not_started'、不显示待确认项），总分仍按现有规则求和。
     """
     pending_rows = pending_rows or []
     tiebreaks = tiebreaks or {}
@@ -103,7 +106,8 @@ def compute_school_totals(schools: list[dict], points_rows: list[dict],
         # 现场顺序必须覆盖整个并列集合，且为完整、不重复的 1..N。
         return any(order is None for order in orders) or set(orders) != set(range(1, len(group) + 1))
 
-    unresolved_keys = {key for key, group in groups.items() if is_unresolved(key, group)}
+    unresolved_keys = set() if not started else {
+        key for key, group in groups.items() if is_unresolved(key, group)}
     for key in unresolved_keys:
         group = groups[key]
         unresolved.append({
@@ -116,13 +120,20 @@ def compute_school_totals(schools: list[dict], points_rows: list[dict],
         position += 1
         e["position"] = position
         group_key = (e["total"],) + tuple(e["rank_vector"])
-        if group_key in unresolved_keys:
+        if not started:
+            # 未开赛组别不产生伪名次：名次留空，也不把“尚未开赛”标成“待确认”。
+            e["status"] = "not_started"
+            e["rank"] = None
+        elif group_key in unresolved_keys:
             e["status"] = "tie_pending"
             e["rank"] = None
         else:
             e["status"] = "ok"
             e["rank"] = position
+    if not started:
+        for e in ordered:
+            e["pending"] = []
     for e in ordered:
         if e["manual_order"] is None:
             e.pop("manual_order", None)
-    return {"rows": ordered, "unresolved": unresolved}
+    return {"rows": ordered, "unresolved": unresolved, "started": bool(started)}

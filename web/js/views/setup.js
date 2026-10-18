@@ -500,10 +500,18 @@ function renderCreateEvent(refresh, standalone = false) {
           if (!group.categories.length) items.append(h('div.empty-inline', '尚未添加比赛项目'));
         };
         renderItems();
-        list.append(h('section.group-projects', h('div.panel-head', h('h4', group.name),
+        list.append(h('section.group-projects', h('div.panel-head', h('h4', group.name), h('div.row.tight',
+          h('button.btn.small', { onclick: () => {
+            const missing = PROJECT_PRESETS.filter((preset) => !existingProject(group, preset));
+            for (const preset of missing) {
+              group.categories.push({ name: preset.name, gender: preset.gender, kind: preset.kind });
+            }
+            renderItems();
+            if (!missing.length) toast('常用四项已全部添加');
+          } }, '一键添加常用四项'),
           h('button.btn.small', { onclick: () => {
             group.categories.push({ name: '', gender: '', kind: '' }); renderItems();
-          } }, '添加比赛项目')), items));
+          } }, '添加比赛项目'))), items));
       });
     };
     renderList();
@@ -981,9 +989,17 @@ function renderVenuesStep(initialStructure, readStructure, { context, isCurrent 
         onclick: async () => {
           if (feedback.blocked || !await confirmAsync('删除场地',
             `「${venue.name}」\n已安排在该场地的比赛会改为“未安排”，比赛本身不会被删除。`, '删除')) return;
-          await feedback.run({ controls: [addButton, toggle, cancel], changed: draw,
-            request: () => api.del(`/api/venues/${venue.id}`, {}, { context }), read: readStructure,
-            reconcile: next => !next.venues.some(v => v.id === venue.id), success: '场地已删除' });
+          const task = { controls: [addButton, toggle, cancel], changed: draw,
+            request: async () => {
+              const result = await api.del(`/api/venues/${venue.id}`, {}, { context });
+              if (result && result.affected_matches) {
+                task.success = `场地已删除，${result.affected_matches} 场比赛改为未安排`;
+              }
+              return result;
+            },
+            read: readStructure,
+            reconcile: next => !next.venues.some(v => v.id === venue.id), success: '场地已删除' };
+          await feedback.run(task);
         },
       }, '删除')));
     }

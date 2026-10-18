@@ -69,9 +69,46 @@ def _update_match(ctx):
     return {"message": "已更新", "match": serialize_match(ctx.conn, get_or_404(ctx.conn, "matches", match_id))}
 
 
+def _parse_base_revisions(raw, ids: list[int]) -> dict[int, int] | None:
+    """解析批量排场的可选逐场基础版本；缺省返回 None（保持旧行为）。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise bad_request("base_schedule_revisions 必须是“场次ID: 版本号”对象",
+                          code="invalid_base_revisions")
+    bases: dict[int, int] = {}
+    for key, value in raw.items():
+        try:
+            mid = int(key)
+        except (TypeError, ValueError):
+            raise bad_request("base_schedule_revisions 的场次 ID 必须是整数",
+                              code="invalid_base_revisions") from None
+        if type(value) is not int or value < 0:
+            raise bad_request(f"场次 {mid} 的基础版本必须是非负整数",
+                              code="invalid_base_revisions")
+        if mid in bases:
+            raise bad_request("base_schedule_revisions 中出现重复场次",
+                              code="invalid_base_revisions")
+        bases[mid] = value
+    # 批量安排需要覆盖全部场次：只校验部分场次会让未校验的场次仍可能被静默覆盖。
+    missing = [mid for mid in ids if mid not in bases]
+    if missing:
+        raise bad_request(f"缺少场次 {missing[0]} 的基础版本", code="invalid_base_revisions")
+    extra = sorted(set(bases) - set(ids))
+    if extra:
+        raise bad_request(f"基础版本包含未选择的场次 {extra[0]}", code="invalid_base_revisions")
+    return bases
+
+
 @route("POST", r"/api/matches/bulk-schedule", roles=ORG)
 def bulk_schedule(ctx):
-    """批量安排场地：body {match_ids: [...], venue_id, start_at, interval_minutes}"""
+    """批量安排场地。
+
+    body: {match_ids, venue_id, start_at, interval_minutes,
+           base_schedule_revisions?: {match_id: schedule_revision}}
+    提供 base_schedule_revisions 时在同一事务内逐场校验当前版本；任一不匹配返回
+    409 stale_revision（detail 含 match_id/current）且不写入任何覆盖。
+    """
     ids = [int(x) for x in (ctx.body.get("match_ids") or [])]
     if not ids:
         raise bad_request("请选择要安排的场次")
@@ -94,14 +131,24 @@ def bulk_schedule(ctx):
             raise bad_request("开始时间格式应为 2026-09-20 09:00") from exc
     else:
         cursor = None
+    bases = _parse_base_revisions(ctx.body.get("base_schedule_revisions"), ids)
     marks = ",".join("?" for _ in ids)
-    rows = db.q(ctx.conn, f"SELECT * FROM matches WHERE id IN ({marks})", ids)
-    missing = set(ids) - {r["id"] for r in rows}
-    if missing:
-        raise not_found(f"场次不存在：{', '.join(str(m) for m in sorted(missing))}")
-    for r in rows:
-        _check_venue(ctx.conn, r["category_id"], venue_id)
     with db.tx(ctx.conn):
+        # 事务内重读当前状态：BEGIN IMMEDIATE 后其它写入者无法插队，保证版本校验与写入原子。
+        rows = db.q(ctx.conn, f"SELECT * FROM matches WHERE id IN ({marks})", ids)
+        missing = set(ids) - {r["id"] for r in rows}
+        if missing:
+            raise not_found(f"场次不存在：{', '.join(str(m) for m in sorted(missing))}")
+        by_id = {r["id"]: r for r in rows}
+        for r in rows:
+            _check_venue(ctx.conn, r["category_id"], venue_id)
+        if bases is not None:
+            for mid in ids:
+                current = int(by_id[mid]["schedule_revision"])
+                if current != bases[mid]:
+                    raise conflict("比赛安排已被其他操作更新，请重新读取后再批量安排",
+                                   code="stale_revision",
+                                   detail={"match_id": mid, "current": current})
         changes = {}
         for i, mid in enumerate(ids):
             fields = {}
@@ -116,8 +163,17 @@ def bulk_schedule(ctx):
         schedule.validate_schedule(ctx.conn, {r["id"]: {**dict(r), **changes[r["id"]]}
                                              for r in rows if r["id"] in changes})
         for mid, fields in changes.items():
-            fields['schedule_revision'] = next(r['schedule_revision'] for r in rows if r['id'] == mid) + 1
+            fields['schedule_revision'] = int(by_id[mid]['schedule_revision']) + 1
             db.update(ctx.conn, "matches", mid, fields)
+        event_id = db.q1(ctx.conn,
+                         """SELECT g.event_id FROM categories c
+                              JOIN groups g ON g.id = c.group_id WHERE c.id = ?""",
+                         (rows[0]["category_id"],))["event_id"]
+        security.audit(ctx.conn, ctx.user, "bulk_schedule", "event", event_id, {
+            "matches": ids, "venue_id": int(venue_id) if venue_id else None,
+            "start_at": start, "interval_minutes": interval, "scheduled": len(changes)})
+    from .catalog import invalidate_event_stats
+    invalidate_event_stats(event_id)
     return {"message": f"已安排 {len(ids)} 场"}
 
 

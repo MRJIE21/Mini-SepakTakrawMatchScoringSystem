@@ -6,9 +6,12 @@ const STATUS_TEXT = {
   unassigned: '未指定', missing: '场次不存在', void: '轮空',
 };
 const MAX_FAILURES = 2;
+const EVENT_ID_PATTERN = /^\d+$/;
 const query = new URLSearchParams(location.search);
 const previewMode = query.get('preview') === '1';
 const previewEventId = query.get('event_id') || '';
+const previewUrlVersion = Number.parseInt(query.get('v') || '', 10);
+const previewDirty = query.get('dirty') === '1';
 const ADMIN_TOKEN_KEY = 'stss_token';
 
 const pairing = document.getElementById('pairing');
@@ -18,6 +21,9 @@ const codeEl = document.getElementById('pair-code');
 const pairStatus = document.getElementById('pair-status');
 const pairRefresh = document.getElementById('pair-refresh');
 const reconnect = document.getElementById('reconnect');
+const previewBadge = document.getElementById('preview-badge');
+const previewVersionEl = document.getElementById('pv-version');
+const previewDirtyEl = document.getElementById('pv-dirty');
 const overlay = document.getElementById('overlay');
 const ovEyebrow = document.getElementById('ov-eyebrow');
 const ovTitle = document.getElementById('ov-title');
@@ -34,6 +40,8 @@ let stateTimer = null;
 let pairTimer = null;
 let lastMode = '';
 let pollMs = 500;
+let backAction = null;
+let previewStopped = false;
 
 function fit() {
   const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
@@ -81,12 +89,43 @@ function setReconnect(visible) {
   reconnect.classList.toggle('hidden', !visible);
 }
 
-function previewBlocked(message) {
+function setPreviewVersion(value) {
+  if (!previewVersionEl) return;
+  const revision = Number(value);
+  previewVersionEl.textContent = `v${Number.isInteger(revision) && revision >= 0 ? revision : 0}`;
+}
+
+function setupPreviewChrome() {
+  if (!previewMode) return;
+  document.body.classList.add('preview');
+  if (!previewBadge) return;
+  setPreviewVersion(previewUrlVersion);
+  previewDirtyEl?.classList.toggle('hidden', !previewDirty);
+  previewBadge.classList.remove('hidden');
+}
+
+function returnToConsole() {
+  // 预览多由控制台 window.open 打开；若当前窗口不允许 close（如手动输入 URL），退回控制台首页。
+  window.close();
+  if (!window.closed) location.href = '/';
+}
+
+function previewBlocked(message, options = {}) {
+  // 预览失败后不再自动轮询：可见性恢复/定时器都不能把“连接中断”重新带回来。
+  previewStopped = true;
   clearTimers();
   showPairing();
   codeEl.textContent = '预览';
-  pairRefresh.classList.add('hidden');
   pairStatus.textContent = message;
+  if (options.back) {
+    backAction = returnToConsole;
+    pairRefresh.textContent = '返回控制台';
+    pairRefresh.classList.remove('hidden');
+  } else {
+    backAction = null;
+    pairRefresh.textContent = '换一个配对码';
+    pairRefresh.classList.add('hidden');
+  }
 }
 
 function invalidateToken() {
@@ -148,9 +187,10 @@ async function pollPair() {
 }
 
 async function pollState() {
+  if (previewMode && previewStopped) return;
   const adminToken = previewMode ? (localStorage.getItem(ADMIN_TOKEN_KEY) || '') : '';
-  if (previewMode && (!adminToken || !previewEventId)) {
-    previewBlocked('预览需要管理员登录，请从大屏控制台打开');
+  if (previewMode && (!adminToken || !EVENT_ID_PATTERN.test(previewEventId))) {
+    previewBlocked('预览需要管理员登录，请从大屏控制台打开', { back: true });
     return;
   }
   if (!previewMode && !token) return;
@@ -164,13 +204,26 @@ async function pollState() {
         cache: 'no-store',
         headers: { Authorization: previewMode ? `Bearer ${adminToken}` : `Display ${token}` },
       }, 4000);
+    if (previewMode && (response.status === 400 || response.status === 404)) {
+      // 赛事不存在/参数非法：停止轮询并给出具体原因与返回入口，避免无限“连接中断”。
+      const payload = await response.json().catch(() => ({}));
+      previewBlocked(String(payload.message || '赛事不存在或预览参数无效'), { back: true });
+      return;
+    }
     if (response.status === 401 || response.status === 403) {
-      if (previewMode) { previewBlocked('预览凭据已失效，请重新登录控制台'); return; }
+      if (previewMode) {
+        previewBlocked('预览凭据已失效或账号无权查看该赛事，请重新登录控制台');
+        return;
+      }
       invalidateToken();
       return;
     }
     if (!response.ok) throw new Error('state unavailable');
     const data = await response.json();
+    if (previewMode) {
+      const serverRevision = Number(data.config_revision);
+      if (Number.isInteger(serverRevision)) setPreviewVersion(serverRevision);
+    }
     failCount = 0;
     setReconnect(false);
     const configured = Number(data.poll_ms);
@@ -285,7 +338,11 @@ function render(data) {
   fit();
 }
 
-pairRefresh.addEventListener('click', () => { pairId = null; startPairing(); });
+pairRefresh.addEventListener('click', () => {
+  if (backAction) { const action = backAction; backAction = null; action(); return; }
+  pairId = null;
+  startPairing();
+});
 window.addEventListener('resize', fit);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
@@ -294,10 +351,14 @@ document.addEventListener('visibilitychange', () => {
 });
 
 fit();
+setupPreviewChrome();
 if (previewMode) {
-  if (!previewEventId) previewBlocked('预览缺少赛事参数，请从大屏控制台打开');
-  else if (!localStorage.getItem(ADMIN_TOKEN_KEY)) previewBlocked('预览需要管理员登录，请从大屏控制台打开');
-  else { showScreen(); pollState(); }
+  if (!previewEventId) previewBlocked('预览缺少赛事参数，请从大屏控制台打开', { back: true });
+  else if (!EVENT_ID_PATTERN.test(previewEventId)) {
+    previewBlocked('预览参数无效（event_id 必须是数字），请从大屏控制台打开', { back: true });
+  } else if (!localStorage.getItem(ADMIN_TOKEN_KEY)) {
+    previewBlocked('预览需要管理员登录，请从大屏控制台打开', { back: true });
+  } else { showScreen(); pollState(); }
 } else if (token) {
   showScreen();
   pollState();

@@ -29,26 +29,27 @@ class StartupFixesTest(unittest.TestCase):
         self.port.stop()
         self.env.stop()
 
-    def test_default_permission_denied_uses_available_port(self):
-        blocked = PermissionError(errno.EACCES, 'blocked')
-        server = SimpleNamespace(server_port=8080)
-        with patch('app.http_server.create_server', side_effect=[blocked, server]) as factory:
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertIs(_listen('0.0.0.0'), server)
-        self.assertEqual([call.args[0] for call in factory.call_args_list],
-                         [('0.0.0.0', 8000), ('0.0.0.0', 8080)])
-        self.assertIn('8080', output.getvalue())
+    def test_default_port_occupancy_does_not_fall_back(self):
+        """P2-B：端口被占用时明确报错，不再静默改用 8080/8800 起第二个实例。"""
+        blocked = OSError(errno.EADDRINUSE, 'occupied')
+        with patch('app.http_server.create_server', side_effect=blocked) as factory:
+            with self.assertRaises(OSError) as caught:
+                _listen('0.0.0.0')
+        self.assertEqual(factory.call_count, 1)
+        self.assertIn('8000', str(caught.exception))
+        self.assertIn('--port', str(caught.exception))
 
-    def test_occupied_alternative_is_skipped(self):
-        occupied = OSError(errno.EADDRINUSE, 'occupied')
-        server = SimpleNamespace(server_port=8800)
-        with patch('app.http_server.create_server', side_effect=[occupied, occupied, server]):
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertIs(_listen('127.0.0.1'), server)
+    def test_permission_denied_port_does_not_fall_back(self):
+        blocked = PermissionError(errno.EACCES, 'blocked')
+        with patch('app.http_server.create_server', side_effect=blocked) as factory:
+            with self.assertRaises(OSError) as caught:
+                _listen('0.0.0.0')
+        self.assertEqual(factory.call_count, 1)
+        self.assertIn('8000', str(caught.exception))
 
     def test_explicit_port_must_not_silently_change(self):
         with patch('app.http_server.create_server', side_effect=PermissionError(errno.EACCES, 'blocked')) as factory:
-            with self.assertRaises(PermissionError):
+            with self.assertRaises(OSError):
                 _listen('0.0.0.0', 8000)
         self.assertEqual(factory.call_count, 1)
 
@@ -64,14 +65,6 @@ class StartupFixesTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 _listen('bad-host')
         self.assertEqual(factory.call_count, 1)
-
-    def test_all_ports_blocked_preserves_original_exception(self):
-        original = PermissionError(errno.EACCES, 'first failure')
-        later = PermissionError(errno.EACCES, 'later failure')
-        with patch('app.http_server.create_server', side_effect=[original, later, later, later]):
-            with self.assertRaises(PermissionError) as caught:
-                _listen('0.0.0.0')
-        self.assertIs(caught.exception, original)
 
     def test_zero_port_reaches_socket_factory(self):
         server = SimpleNamespace(server_port=54321)

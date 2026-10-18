@@ -310,6 +310,21 @@ class IndividualDrawApiTest(unittest.TestCase):
                  {'event_identity': self.event_identity, 'request_uid': str(uuid.uuid4())},
                  expect=409, code='individual_draw_locked')
 
+    def test_official_get_exposes_can_draw_and_block_reason_for_panel(self):
+        """REQ-006：面板锁定读取服务端已下发的 can_draw/block_reason，而不是点后 409 才发现。"""
+        draw = self.ok('GET', self.path)['draw']
+        self.assertTrue(draw['can_draw'])
+        self.assertEqual(draw['block_reason'], '')
+        pid = self.pids[0]
+        self.ok('POST', f'/api/recording/individual/{pid}/claim', {})
+        draw = self.ok('GET', self.path)['draw']
+        self.assertFalse(draw['can_draw'])
+        self.assertIn('领取', draw['block_reason'])
+        self.ok('POST', '/api/scoring/individual', self.score(pid))
+        draw = self.ok('GET', self.path)['draw']
+        self.assertFalse(draw['can_draw'])
+        self.assertIn('成绩', draw['block_reason'])
+
     def test_old_project_no_draw_can_record_and_pending_result_locks(self):
         pid = self.pids[0]
         self.ok('POST', '/api/scoring/individual', self.score(pid, result_status='pending'))

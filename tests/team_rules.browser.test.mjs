@@ -392,13 +392,19 @@ try {
     await editor().waitFor();
     pass('规则元数据非法时规则分区局部报错禁写，其它设置可用并可重新核对');
 
-    // 显式赛事参数非法时不静默回退当前赛事。
+    // REQ-018：URL 赛事参数非法时统一回退当前赛事并提示，不再停留旧错误页。
     await page.goto(`${base}/#/setup?event=999999`);
-    await page.getByText('链接中的赛事不存在或当前账号不可访问。', { exact: true }).waitFor();
-    assert.equal(await page.locator('.setup-page').count(), 0);
+    await page.waitForFunction(() => document.getElementById('toast')?.textContent.includes('赛事参数无效，已回到当前赛事'));
+    await page.waitForFunction(id => location.hash.includes(`event=${id}`), identity.event_id);
+    assert.equal(page.url().includes('999999'), false);
+    await page.locator('#setup-event').waitFor();
+    assert.equal(await page.getByText('链接中的赛事不存在或当前账号不可访问。', { exact: true }).count(), 0);
     await page.goto(`${base}/#/teamRules?event=999999`);
-    await page.getByText('链接中的赛事不存在或当前账号不可访问。', { exact: true }).waitFor();
-    pass('非法赛事参数明确报错，不回退到当前赛事');
+    await page.waitForFunction(() => document.getElementById('toast')?.textContent.includes('赛事参数无效，已回到当前赛事'));
+    await page.waitForFunction(id => location.hash.includes(`event=${id}`), identity.event_id);
+    assert.equal(page.url().includes('999999'), false);
+    await editor().waitFor();
+    pass('非法赛事参数回退当前赛事并提示（REQ-018）');
 
     // 旧链接的过期组别/项目参数不再缩小规则范围。
     await page.goto(`${base}/#/teamRules?event=${identity.event_id}&group=999999&category=888`);
@@ -445,6 +451,10 @@ try {
     assert.equal(await page.getByRole('heading', { name: '仅个人组', exact: true }).count(), 0);
     assert.equal(await page.locator('#sidenav a.active').textContent(), '赛事设置');
     pass('切换赛事时迟到结构响应不污染新页面');
+    // REQ-018 切换赛事后仍可能有列表/结构读取在收尾；等渲染与网络稳定再进入保存竞态用例，
+    // 避免把测试自身的瞬时 DOM 重绘误判为保存按钮未禁用。
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(200);
     await open();
 
     await editor().getByLabel('普通局常用规则', { exact: true }).selectOption('0');

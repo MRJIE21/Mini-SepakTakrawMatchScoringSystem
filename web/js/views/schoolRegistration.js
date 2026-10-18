@@ -138,8 +138,14 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       completeDeletion();
     } catch (error) {
       if (!currentPage() || error.cancelled) return;
+      const reasons = Array.isArray(error.detail?.reasons) ? error.detail.reasons : [];
+      const reasonText = reasons.map((reason) => {
+        const steps = Array.isArray(reason?.steps) && reason.steps.length
+          ? ` 下一步：${reason.steps.join('；')}` : '';
+        return `${reason?.message || error.message}${steps}`;
+      }).join(' ');
       deletionStatus(requested && error.outcome_unknown ? 'unknown' : 'idle',
-        requested && error.outcome_unknown ? `删除结果尚未确认，请先核对删除结果：${error.message}` : error.message, true);
+        requested && error.outcome_unknown ? `删除结果尚未确认，请先核对删除结果：${error.message}` : (reasonText || error.message), true);
     } finally {
       if (!['unknown', 'verifying'].includes(deletePhase)) deletePhase = 'idle';
       if (currentPage()) {

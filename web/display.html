@@ -4,9 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>体育馆大屏</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
 <style>
   :root{--line:rgba(160,190,230,.16);--muted:#93a9c6;--blue:#7fb2ff;--orange:#ffb27f;
-    --gold:#f4c95d;--green:#35d07f;--radius:16px}
+    --gold:#f4c95d;--green:#35d07f;--radius:16px;
+    /* 8 窗口下状态标签/局标签/局分小分的绝对下限；根字号仍由 display.js fit() 统一缩放。 */
+    --fs-meta:max(12px,1.06rem)}
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;overflow:hidden;background:#07101f;color:#f2f6fc;
     font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",system-ui,sans-serif;
@@ -75,14 +79,27 @@
   .grid[data-layout="1"] .set-pill{font-size:.95rem;padding:.2rem .58rem}
   .grid[data-layout="1"] .sets{gap:.35rem;margin-top:.35rem}
   .grid[data-layout="2"] .team .name{font-size:2.1rem}
-  .grid[data-layout="2"] .team .points{font-size:8.2rem}
+  .grid[data-layout="2"] .team .points{font-size:9.2rem}
   .grid[data-layout="2"] .series .val{font-size:2.4rem}
   .grid[data-layout="3"] .team .name{font-size:1.75rem}
-  .grid[data-layout="3"] .team .points{font-size:6.4rem}
+  .grid[data-layout="3"] .team .points{font-size:8.4rem}
   .grid[data-layout="3"] .series .val{font-size:2rem}
   .grid[data-layout="4"] .team .name{font-size:1.9rem}
-  .grid[data-layout="4"] .team .points{font-size:7rem}
+  .grid[data-layout="4"] .team .points{font-size:7.8rem}
   .grid[data-layout="4"] .series .val{font-size:2.2rem}
+  /* 8 窗口：状态标签、局标签、局分小分统一使用绝对下限，小分 pill 允许换行，避免 1366 下溢出。 */
+  .grid[data-layout="8"] .chip,
+  .grid[data-layout="8"] .setlabel{font-size:var(--fs-meta)}
+  .grid[data-layout="8"] .set-pill{font-size:var(--fs-meta);padding:.05rem .14rem;line-height:1.1;
+    white-space:normal;text-align:center}
+
+  .preview-badge{position:absolute;left:.45rem;top:.35rem;z-index:30;display:flex;align-items:center;
+    gap:.6rem;max-width:calc(100% - .9rem);padding:.2rem .55rem;border-radius:999px;
+    background:rgba(244,201,93,.16);border:1px solid rgba(244,201,93,.55);color:#ffe6a8;
+    font-size:max(12px,.62rem);font-weight:800;white-space:nowrap}
+  .preview-badge .pv-dirty{color:#ffbd7a;font-weight:700;white-space:normal}
+  .preview-badge b{color:#fff}
+  body.preview .screen{padding-top:2.75rem}
 
   .reconnect{position:absolute;left:50%;top:.6rem;transform:translateX(-50%);z-index:20;
     background:rgba(255,159,67,.16);border:1px solid rgba(255,159,67,.5);color:#ffd0a3;
@@ -123,6 +140,10 @@
 </div>
 
 <div id="screen" class="screen hidden">
+  <div id="preview-badge" class="preview-badge hidden" role="status" aria-live="polite">
+    <span class="pv-mode">预览模式 · 已推送 <b id="pv-version">v0</b></span>
+    <span id="pv-dirty" class="pv-dirty hidden">未推送的修改不会显示</span>
+  </div>
   <div id="grid" class="grid" data-layout="8"></div>
   <div id="reconnect" class="reconnect hidden">连接中断，正在重连…</div>
   <div id="overlay" class="overlay hidden">

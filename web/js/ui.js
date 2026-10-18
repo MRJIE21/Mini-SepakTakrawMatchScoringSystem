@@ -49,18 +49,79 @@ export function clear(node) { while (node.firstChild) node.removeChild(node.firs
 
 export function table(columns, rows, opts = {}) {
   const columnClass = (c) => `${c.align || ''} ${c.cellClass || ''}`.trim();
-  const thead = h('thead', h('tr', ...columns.map((c) => h('th', {
-    class: columnClass(c), scope: 'col',
+  /* 固定列能力：列定义 sticky:'left'|'right' 时在 th/td 上写 data-sticky，
+     scrollableTable 会按表头实际宽度计算左侧偏移，不依赖列宽常量。 */
+  const stickyAttrs = (c, index) => (c.sticky
+    ? { 'data-sticky': c.sticky, 'data-sticky-index': String(index) } : null);
+  const thead = h('thead', h('tr', ...columns.map((c, index) => h('th', {
+    class: columnClass(c), scope: 'col', ...(stickyAttrs(c, index) || {}),
   }, c.label))));
-  const tbody = h('tbody', ...rows.map((row, index) => h('tr', ...columns.map((c) => {
+  const tbody = h('tbody', ...rows.map((row, index) => h('tr', ...columns.map((c, colIndex) => {
     const v = c.render ? c.render(row, index) : row[c.key];
     return h('td', { class: columnClass(c),
       'data-label': opts.responsive ? c.label : null,
+      ...(stickyAttrs(c, colIndex) || {}),
     }, v === undefined || v === null ? '' : v);
   }))));
   const el = h(`table.tbl${opts.class ? `.${opts.class}` : ''}`, thead, tbody);
   if (opts.bodyRef) opts.bodyRef.current = tbody;
   return el;
+}
+
+/* 可横向滚动的表格容器：仅在 scrollWidth 超出时显示提示，并按实际列宽固定左右列。
+   返回包装节点（容器 + 提示），调用方把它当作原 .table-scroll 使用即可。 */
+const scrollTableSyncs = new Set();
+let scrollTableResizeBound = false;
+function syncScrollTables() {
+  for (const sync of [...scrollTableSyncs]) sync();
+}
+export function scrollableTable(container, { hint = '横向滚动查看完整数据' } = {}) {
+  const wrap = h('div.table-scroll-wrap');
+  wrap.append(container);
+  const hintEl = h('div.table-scroll-hint', { role: 'note', hidden: true }, hint);
+  wrap.append(hintEl);
+  const applySticky = () => {
+    const cells = container.querySelectorAll('[data-sticky]');
+    if (!cells.length) return;
+    const headerCells = [...container.querySelectorAll('thead th')];
+    const leftOffsets = new Map();
+    let offset = 0;
+    for (const th of headerCells) {
+      if (th.dataset.sticky === 'left' && !leftOffsets.has(th.dataset.stickyIndex)) {
+        leftOffsets.set(th.dataset.stickyIndex, offset);
+        offset += th.getBoundingClientRect().width;
+      }
+    }
+    for (const cell of cells) {
+      if (cell.dataset.sticky === 'left') {
+        const left = leftOffsets.get(cell.dataset.stickyIndex);
+        if (left !== undefined) cell.style.left = `${left}px`;
+      } else if (cell.dataset.sticky === 'right') {
+        cell.style.right = '0px';
+      }
+    }
+  };
+  const sync = () => {
+    if (!container.isConnected) {
+      /* 页面重绘后旧表已卸载：解除监听，避免反复重建表格时累积监听器。 */
+      scrollTableSyncs.delete(sync);
+      observer.disconnect();
+      return;
+    }
+    applySticky();
+    hintEl.hidden = container.scrollWidth <= container.clientWidth + 1;
+  };
+  const observer = new ResizeObserver(sync);
+  observer.observe(container);
+  scrollTableSyncs.add(sync);
+  if (!scrollTableResizeBound) {
+    window.addEventListener('resize', syncScrollTables, { passive: true });
+    scrollTableResizeBound = true;
+  }
+  wrap.scrollHintSync = sync;
+  wrap.scrollHintObserver = observer;
+  requestAnimationFrame(sync);
+  return wrap;
 }
 
 export function field(label, control, opts = {}) {

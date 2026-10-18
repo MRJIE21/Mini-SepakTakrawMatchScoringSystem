@@ -138,7 +138,8 @@ class DisplayLiveTest(unittest.TestCase):
 
         event = db.connect(config.EVENTS_DIR / "event_1.db", existing=True)
         try:
-            db.run(event, "UPDATE display_live SET expires_at = '2000-01-01 00:00:00' WHERE match_id = 1")
+            db.run(event, "UPDATE display_live SET expires_at = '2000-01-01 00:00:00', "
+                          "expires_at_epoch = 0 WHERE match_id = 1")
         finally:
             event.close()
         stale = self.request("GET", "/api/display/state",

@@ -143,10 +143,20 @@ try {
   await orderSelect.selectOption('desc');
   const csvUrl = await requestWith(() => page.getByRole('button', { name: '导出本项目成绩 CSV', exact: true }).click());
   assert.equal(csvUrl.searchParams.get('order'), 'desc', `CSV 应带 order=desc：${csvUrl}`);
-  const noticeUrl = await requestWith(() => page.getByRole('button', { name: '打印个人赛成绩单', exact: true }).click());
+  /* REQ-011：打印改为稳定静态地址 /print.html?...，由打印页自己带令牌请求（主页面不再直接发导出请求）。 */
+  const noticePopupWait = page.waitForEvent('popup');
+  await page.getByRole('button', { name: '打印个人赛成绩单', exact: true }).click();
+  const noticePopup = await noticePopupWait;
+  await noticePopup.getByRole('heading', { name: '个人赛成绩单', exact: true }).waitFor();
+  const noticeUrl = new URL(noticePopup.url());
+  assert.equal(noticeUrl.pathname, '/print.html', `打印页应为稳定静态地址：${noticeUrl}`);
+  assert.equal(noticeUrl.searchParams.get('type'), 'category-notice');
+  assert.equal(noticeUrl.searchParams.get('category_id'), String(cats['male:individual']));
   assert.equal(noticeUrl.searchParams.get('order'), 'desc', `打印页应带 order=desc：${noticeUrl}`);
+  assert.ok(!noticeUrl.search.toLowerCase().includes('token'), `打印 URL 不得包含令牌：${noticeUrl}`);
+  await noticePopup.close();
   for (const extra of context.pages()) if (extra !== page) await extra.close();
-  checks.push('成绩页默认正序、切倒序后 CSV 与打印页传 order=desc');
+  checks.push('成绩页默认正序、切倒序后 CSV 与打印页传 order=desc（打印页为稳定 /print.html 地址）');
 
   await page.goto(`${base}/#/results?category=${cats['male:team']}`);
   await orderSelect.waitFor();

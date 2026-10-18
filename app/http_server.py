@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import errno
+import logging
 import mimetypes
 import os
 import re
@@ -19,11 +20,13 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import config, db, security
+from . import config, db, security, web_security
 from .errors import ApiError
 from .transport import BoundedHTTPServer, DeadlineReader, default_limits
 
 ROUTES: list[tuple[str, str, object, tuple]] = []
+
+logger = logging.getLogger('stss.http')
 
 MAX_BODY = 4 * 1024 * 1024
 
@@ -55,6 +58,36 @@ def json_response(data, status: int = 200) -> Response:
     return Response(body, status, "application/json; charset=utf-8")
 
 
+class Headers(dict):
+    """大小写不敏感的请求头视图（P2-B REQ-005）。
+
+    Context.headers 统一使用它，避免代理/HTTP2 小写化后
+    ``ctx.headers.get("X-Event-ID")`` 之类读取失效。测试仍可传普通 dict。
+    """
+
+    def __init__(self, values=None):
+        data = {}
+        if isinstance(values, Headers):
+            data = dict(values)
+        elif values:
+            try:
+                items = values.items()
+            except AttributeError:
+                items = []
+            for key, value in items:
+                data[str(key).lower()] = value
+        super().__init__(data)
+
+    def get(self, key, default=None):
+        return super().get(str(key).lower(), default)
+
+    def __contains__(self, key):
+        return super().__contains__(str(key).lower())
+
+    def __getitem__(self, key):
+        return super().__getitem__(str(key).lower())
+
+
 class Context:
     def __init__(self, conn, user, body, query, params, headers, method, path, remote_addr=""):
         self.conn = conn
@@ -62,10 +95,12 @@ class Context:
         self.body = body
         self.query = query
         self.params = params
-        self.headers = headers
+        self.headers = headers if isinstance(headers, Headers) else Headers(headers)
         self.method = method
         self.path = path
         self.remote_addr = remote_addr or ""
+        self.token = None
+        self.token_hash = None
 
     def arg(self, name, default=None):
         vals = self.query.get(name)
@@ -162,17 +197,34 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._send(Response(b"", 204))
 
+    def _request_header(self, name):
+        headers = getattr(self, "headers", None)
+        return headers.get(name) if headers is not None else None
+
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers",
-                         "Content-Type, Authorization, X-Event-ID, X-Event-UUID, X-Deployment-ID, X-Client-Protocol, X-Actor-ID")
-        self.send_header("Access-Control-Expose-Headers", "Retry-After, Content-Disposition")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        for key, value in web_security.cors_headers(
+                self._request_header("Origin"), self._request_header("Host"),
+                config.PUBLIC_ORIGIN).items():
+            self.send_header(key, value)
+
+    def _reject_cross_origin(self, response: Response) -> Response:
+        # 解析层错误（如慢头 408）发生在 self.headers 赋值之前，必须保持可发送。
+        origin = self._request_header("Origin")
+        host = self._request_header("Host")
+        if not web_security.is_cross_origin(origin, host, config.PUBLIC_ORIGIN):
+            return response
+        if web_security.origin_allowed(origin, host, config.PUBLIC_ORIGIN):
+            return response
+        body = web_security.forbidden_response_body()
+        return Response(body, 403, "application/json; charset=utf-8")
 
     def log_message(self, fmt, *args):
-        # pythonw 后台启动时没有 stderr；访问日志不能因此中断正常响应。
-        if sys.stderr is not None:
-            sys.stderr.write("[%s] %s\n" % (datetime.now().strftime("%H:%M:%S"), fmt % args))
+        # 访问日志走 logging（已配置时落盘轮转；未配置时由 logging 回退 stderr）。
+        try:
+            logger.info("%s - %s", self.address_string(), fmt % args)
+        except Exception:
+            if sys.stderr is not None:
+                sys.stderr.write("[%s] %s\n" % (datetime.now().strftime("%H:%M:%S"), fmt % args))
 
     # ---------------------------------------------------------------- 分发
     def _dispatch(self, method: str):
@@ -330,8 +382,11 @@ class Handler(BaseHTTPRequestHandler):
                     if not target_deployment or identity["deployment_id"] != target_deployment['v']:
                         raise ApiError(409, "deployment_identity_mismatch", "提交包部署身份与当前部署不一致")
             ctx = Context(conn, user, body, query, match.groupdict(),
-                          dict(self.headers), method, path,
+                          self.headers, method, path,
                           self.client_address[0] if self.client_address else "")
+            if token:
+                ctx.token = token
+                ctx.token_hash = security.token_hash(token)
             from . import access
             if not public:
                 access.authorize(ctx, scope)
@@ -359,6 +414,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.business_outcome = "not_committed"
                     raise
                 self.business_outcome = "committed"
+                self._invalidate_event_stats(raw_event_id)
                 return response
             if method == "GET" and path != "/api/admin/backup":
                 with db.read_tx(conn):
@@ -368,8 +424,19 @@ class Handler(BaseHTTPRequestHandler):
             response = materialize()
             if method != "GET":
                 self.business_outcome = "committed"
+                self._invalidate_event_stats(raw_event_id)
             return response
         raise ApiError(404, "not_found", f"接口不存在：{method} {path}")
+
+    def _invalidate_event_stats(self, raw_event_id):
+        """赛事库写操作提交后失效 /api/events 计数缓存（P2-B REQ-004）。"""
+        try:
+            from .api import catalog
+            invalidate = getattr(catalog, "invalidate_event_stats", None)
+            if invalidate is not None:
+                invalidate(int(raw_event_id) if raw_event_id else None)
+        except Exception:
+            pass
 
     def _serve_static(self, path: str) -> Response:
         if path in ("/", ""):
@@ -390,6 +457,7 @@ class Handler(BaseHTTPRequestHandler):
         return Response(body, 200, ctype, headers)
 
     def _send(self, response: Response):
+        response = self._reject_cross_origin(response)
         self._sending = True
         self.close_connection = True
         seconds = self.limits["download_timeout"] if response.headers.get("Content-Disposition") else self.limits["write_timeout"]
@@ -399,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
         self.send_header("Connection", "close")
+        for key, value in web_security.security_headers().items():
+            self.send_header(key, value)
         self._cors()
         for k, v in response.headers.items():
             self.send_header(k, v)
@@ -458,27 +528,22 @@ def _local_ips() -> list[str]:
 
 
 def _listen(host: str, port: int | None = None):
-    """默认端口受限时尝试备用；明确指定的端口保持原约定。"""
+    """只监听目标端口；占用/禁止监听时明确报错，不再静默回退到其它端口。
+
+    P2-B：同一数据目录由实例锁保证单实例；端口被占用应由运维结束占用进程或
+    显式指定 --port，避免“双击两次出现两个实例/两个数据目录打架”。
+    """
     requested = config.PORT if port is None else port
     try:
         return create_server((host, requested))
-    except OSError as original:
-        unavailable = original.errno in (errno.EACCES, errno.EADDRINUSE) or getattr(original, 'winerror', None) in (10013, 10048)
-        if not unavailable or port is not None or 'STSS_PORT' in os.environ:
-            raise
-        for alternative in (8080, 8800, 18000):
-            if alternative == requested:
-                continue
-            try:
-                server = create_server((host, alternative))
-            except OSError as exc:
-                if exc.errno in (errno.EACCES, errno.EADDRINUSE) or getattr(exc, 'winerror', None) in (10013, 10048):
-                    continue
-                raise
-            print(f"默认端口 {requested} 被占用或禁止监听，已改用 {server.server_port}。")
-            print("请使用下方实际访问地址；旧地址的未提交记录仍需在旧页面中保存或导出。")
-            return server
-        raise original
+    except OSError as exc:
+        unavailable = exc.errno in (errno.EACCES, errno.EADDRINUSE) or getattr(exc, 'winerror', None) in (10013, 10048)
+        if unavailable:
+            raise OSError(
+                f"端口 {requested} 已被占用或禁止监听；请结束占用进程后重试，"
+                f"或用 --port 指定其它端口（Windows: netstat -ano | findstr :{requested}）。"
+            ) from exc
+        raise
 
 
 EVENT_DB_NAME = re.compile(r'event_\d+\.db')

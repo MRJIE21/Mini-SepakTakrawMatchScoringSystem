@@ -1,5 +1,5 @@
 /* 应用入口：登录、导航、路由与全局状态。 */
-import { api, ApiError, getToken, setToken, setApiEventContext, setApiUser, setApiReadScope, captureRequestContext, validateReceipt } from './api.js';
+import { api, ApiError, getToken, setToken, setApiEventContext, setApiUser, setApiReadScope, captureRequestContext, validateReceipt, setUnauthorizedHandler } from './api.js';
 import { clear, h, toast, prepareNavigation, setPageLeaveGuard, markPageLeaveGuardPending, settlePageLeaveGuard } from './ui.js';
 import { canView } from './permissions.js';
 import { setStoreUser } from './store.js';
@@ -59,6 +59,7 @@ function renderLogin(message) {
     try {
       const res = await api.post('/api/login', { username: username.value, password: password.value });
       setToken(res.token);
+      sessionInvalidHandled = false;
       state.user = res.user;
       setApiUser(state.user);
       state.roles = res.roles || {};
@@ -84,12 +85,51 @@ function renderLogin(message) {
   document.body.append(box);
 }
 
+/* 会话失效统一处理：api.js 遇到非登录接口 401 时单飞回调到这里，清会话并回登录页。 */
+let sessionInvalidHandled = false;
+export function handleSessionInvalid() {
+  if (sessionInvalidHandled) return;
+  sessionInvalidHandled = true;
+  setToken('');
+  setApiUser(null);
+  state.user = null;
+  if (!document.getElementById('login-screen')) renderLogin('登录状态已失效，请重新登录。');
+  toast('登录状态已失效，请重新登录', 'error');
+}
+setUnauthorizedHandler(handleSessionInvalid);
+
+/* 退出所有设备：吊销本账号全部令牌后清除本机会话并回到登录页。
+   大屏设备使用独立凭据，不受影响。 */
+export async function logoutEverywhere() {
+  const result = await api.post('/api/me/logout-all');
+  const revoked = Number(result?.revoked ?? 0);
+  sessionInvalidHandled = true;      // 本次为主动退出，reload 前的任何 401 不再重复跳转
+  toast(`已退出 ${revoked} 个设备`, 'ok');
+  setToken('');
+  setApiUser(null);
+  state.user = null;
+  /* 先让“已退出 N 个设备”的提示可见，再整页重载回登录页。 */
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  location.reload();
+}
+
 /* ------------------------------------------------------------------ 外壳 */
 function navigationView(name) {
   if (name === 'scoring') return state.user.role === 'recorder' ? 'field' : 'workspace';
   // 旧 teamRules 链接是赛事设置的渲染别名，侧栏高亮赛事设置。
   if (name === 'teamRules') return 'setup';
   return name;
+}
+
+/* 顶栏用户信息：显示名与角色名相同或为空时只显示一次，避免“赛事管理员（赛事管理员）”。
+   空显示名回退 username；连 username 也没有时只显示角色名。数组/对象先转字符串再 trim。 */
+function userLabel(user) {
+  if (!user) return '';
+  const role = String(user.role_name ?? '').trim();
+  const name = String(user.display_name ?? '').trim() || String(user.username ?? '').trim();
+  if (!name) return role;
+  if (!role || name === role) return name;
+  return `${name}（${role}）`;
 }
 
 function renderShell() {
@@ -130,8 +170,7 @@ function renderShell() {
   const canCreateEvent = state.user.role === 'admin';
   newEvent.classList.toggle('hidden', !canCreateEvent);
   newEvent.onclick = canCreateEvent ? () => go('setup', { action: 'new' }) : null;
-  document.getElementById('user-line').textContent =
-    `${state.user.display_name}（${state.user.role_name}）`;
+  document.getElementById('user-line').textContent = userLabel(state.user);
   document.getElementById('btn-logout').onclick = async () => {
     try { await api.post('/api/logout'); } catch { /* 忽略 */ }
     setToken('');
@@ -167,22 +206,90 @@ export function replaceViewParams(params = {}) {
   renderedHash = location.hash;
 }
 
+/* URL 赛事参数单源解析（REQ-018）：在构造读作用域前把 state/API 上下文切到同一赛事。
+   无 event 深链沿用当前赛事；非法/不可见值用 replaceState 保留其余参数回填当前赛事并提示；
+   合法切换走 reloadShell（写回 stss_event、结构、顶栏）；403/404 一次性回退，标记防循环。 */
+let routeEventFallbackUsed = false;
+
+function replaceEventParam(eventId) {
+  const [name, query] = location.hash.replace(/^#\/?/, '').split('?');
+  const next = new URLSearchParams(query || '');
+  if (eventId === null || eventId === undefined) next.delete('event');
+  else next.set('event', String(eventId));
+  const suffix = next.toString();
+  history.replaceState(null, '', `#/${name || 'dashboard'}${suffix ? `?${suffix}` : ''}`);
+}
+
+async function resolveRouteEvent(params, isCurrent = () => true) {
+  const raw = params.get('event');
+  if (raw === null || raw === '') return state.eventId;   // 无 event：沿用当前赛事
+  const requested = /^\d+$/.test(raw.trim()) ? Number(raw) : NaN;
+  const target = Number.isSafeInteger(requested) && requested > 0
+    ? state.events.find((event) => event.id === requested) : null;
+  if (!target) {
+    if (!isCurrent()) return state.eventId;
+    replaceEventParam(state.eventId);
+    toast('赛事参数无效，已回到当前赛事');
+    return state.eventId;
+  }
+  if (target.id === state.eventId) return state.eventId;
+  const previousId = state.eventId;
+  try {
+    await reloadShell(target.id);
+  } catch (error) {
+    if (error.cancelled || !isCurrent()) return state.eventId;
+    const recoverable = error instanceof ApiError && [403, 404].includes(error.status);
+    if (!recoverable || routeEventFallbackUsed) throw error;
+    if (previousId === null || !state.events.some((event) => event.id === previousId)) throw error;
+    routeEventFallbackUsed = true;                       // 每次切换失败最多回退一次，避免循环
+    await reloadShell(previousId);
+    if (!isCurrent()) return state.eventId;
+    replaceEventParam(state.eventId);
+    toast('无权访问该赛事，已回到当前赛事', 'warn');
+    routeEventFallbackUsed = false;
+    return state.eventId;
+  }
+  routeEventFallbackUsed = false;
+  if (!isCurrent()) return state.eventId;
+  if (state.eventId !== target.id) {
+    // 赛事列表已刷新但目标已不可见：按非法参数回退，避免地址与状态不一致。
+    replaceEventParam(state.eventId);
+    toast('赛事参数无效，已回到当前赛事');
+    return state.eventId;
+  }
+  toast(`已切换到「${currentEvent()?.name || target.name}」`);
+  return state.eventId;
+}
+
 async function route(force = false) {
   if (force && !await prepareNavigation()) return;
+  if (!state.user) return;             // 401 已登出（登录页已渲染），不再渲染业务路由
+  /* 先取消旧页面读取；解析 URL 赛事期间不沿用旧读作用域，否则 reloadShell 的 GET 会被旧信号取消。 */
   activeReadScope?.controller.abort();
+  setApiReadScope(null);
   const controller = new AbortController();
-  const hash = location.hash;
-  const query = hash.split('?')[1] || '';
-  const requested = Number(new URLSearchParams(query).get('event') || state.eventId);
-  const event = state.events.find((ev) => ev.id === requested);
-  const context = captureRequestContext();
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const scope = { id: ++routeGeneration, controller, signal: controller.signal,
-    context: { ...context, identity: event ? { event_id: event.id, event_uuid: event.uuid, deployment_id: state.deploymentId } : context.identity }, hash };
+    context: captureRequestContext(), hash: location.hash };
   activeReadScope = scope;
   routeQueued = true;
   routeChain = routeChain.catch(() => {}).then(async () => {
     if (!routeQueued || !scopeCurrent(scope)) return;
     routeQueued = false;
+    try {
+      await resolveRouteEvent(params, () => scopeCurrent(scope));
+    } catch (error) {
+      if (error.cancelled || !scopeCurrent(scope)) return;
+      toast(error.message || '赛事切换失败', 'error');
+    }
+    if (!scopeCurrent(scope)) return;
+    scope.hash = location.hash;                          // 可能已被 replaceState 回填
+    const context = captureRequestContext();
+    const event = currentEvent();
+    /* 读作用域 identity 与 state 单一来源一致：列表、草稿与 GET 使用同一赛事。 */
+    scope.context = { ...context, identity: event
+      ? { event_id: event.id, event_uuid: event.uuid, deployment_id: state.deploymentId }
+      : context.identity };
     setApiReadScope(scope);
     await renderRoute(false, scope);
   });
@@ -220,6 +327,8 @@ async function renderRoute(force = false, scope = null) {
         signal: scope?.signal, requestContext: scope?.context, isCurrent: () => scopeCurrent(scope) });
     } catch (err) {
       if (err.cancelled || !scopeCurrent(scope)) return;
+      /* 401 已由 handleSessionInvalid 清理会话并显示登录页，不再渲染错误页造成双提示。 */
+      if (err instanceof ApiError && err.status === 401 && !getToken()) return;
       if (err instanceof ApiError && err.status === 403) {
         toast(err.message || '当前角色不能查看该部分', 'error');
         const home = roleHome();
@@ -246,7 +355,9 @@ async function renderRoute(force = false, scope = null) {
 }
 
 /* ------------------------------------------------------------------ 启动 */
-async function loadEvents() {
+/* preferredEventId 来自启动地址的 ?event=，用于避免“先按 stss_event 加载、路由时再切换”的重复读取；
+   仅在目标赛事对当前账号可见时采用，URL 非法值仍交给 resolveRouteEvent 回退并提示。 */
+async function loadEvents(preferredEventId = null) {
   const scope = activeReadScope;
   try {
     const res = await api.get('/api/events');
@@ -264,8 +375,16 @@ async function loadEvents() {
     state.offline = true;
   }
   const saved = Number(localStorage.getItem('stss_event') || 0);
-  state.eventId = state.events.some((e) => e.id === saved)
-    ? saved : (state.events[0]?.id ?? null);
+  const visible = (id) => Number.isSafeInteger(id) && state.events.some((event) => event.id === id);
+  const preferred = Number(preferredEventId);
+  state.eventId = visible(preferred) ? preferred : visible(saved) ? saved : (state.events[0]?.id ?? null);
+  if (state.eventId !== null) {
+    try {
+      if (Number(localStorage.getItem('stss_event') || 0) !== state.eventId) {
+        localStorage.setItem('stss_event', String(state.eventId));
+      }
+    } catch { /* 存储不可用时仍按内存状态运行 */ }
+  }
   const event = state.events.find((item) => item.id === state.eventId);
   setApiEventContext(event ? { ...event, deployment_id: state.deploymentId } : null);
 }
@@ -358,18 +477,29 @@ export function needRole(...roles) {
 }
 
 async function boot() {
-  await loadEvents();
+  /* 启动地址带 ?event= 时优先按它加载赛事，避免启动后路由再 reloadShell 重复读取。
+     非法或不可见的值不在这里提示，交给 route() 的 resolveRouteEvent 统一回退。 */
+  const query = location.hash.split('?')[1] || '';
+  const preferredRaw = new URLSearchParams(query).get('event');
+  const preferred = preferredRaw !== null && /^\d+$/.test(preferredRaw.trim()) ? Number(preferredRaw) : null;
+  const savedBefore = Number(localStorage.getItem('stss_event') || 0);
+  await loadEvents(preferred);
   /* 重试请求按账号、部署和赛事 UUID 隔离。 */
   const event = state.events.find((item) => item.id === state.eventId);
   setPendingRequestScope(state.user, event ? { ...event, deployment_id: state.deploymentId } : null);
   await loadStructure();
   renderShell();
   updateNetBadge();
+  if (preferred !== null && state.eventId === preferred && preferred !== savedBefore) {
+    toast(`已切换到「${currentEvent()?.name || event?.name || ''}」`);
+  }
   if (!location.hash) {
     skipNextHashRoute = true;      // 这次 hash 变化由下面的 route() 渲染，避免重复加载
     location.hash = roleHome();
   }
-  await route();
+  await route().catch((error) => {
+    if (!error.cancelled) toast(error.message || '页面加载失败', 'error');
+  });
 }
 
 /* 角色默认落地页（§12.1）：记录员直接进现场，查看者进成绩总览 */
@@ -399,6 +529,8 @@ async function recoverIfOffline() {
     me = await api.get('/api/me');
   } catch (err) {
     if (err.cancelled) throw err;
+    /* 401 已由 handleSessionInvalid 回到登录页，这里不再重复渲染登录页覆盖失效提示。 */
+    if ((err.status === 401 || err.code === 'account_changed') && !getToken()) return false;
     if (err.status === 401 || err.code === 'account_changed') {
       setToken('');
       renderLogin('登录状态已失效，请重新登录。');
@@ -424,7 +556,7 @@ function watchNetwork() {
   window.addEventListener('online', async () => {
     updateNetBadge();
     try { if (await recoverIfOffline()) await route(true); }
-    catch (error) { if (!error.cancelled) toast(error.message, 'error'); }
+    catch (error) { if (!error.cancelled && getToken()) toast(error.message, 'error'); }
   });
   window.addEventListener('offline', updateNetBadge);
   updateNetBadge();
@@ -489,8 +621,8 @@ async function loadViews() {
       if (select) select.value = state.eventId ?? '';
       return;
     }
-    try { await recoverIfOffline(); await route(); }
-    catch (error) { if (!error.cancelled) toast(error.message, 'error'); }
+    try { await recoverIfOffline(); if (!getToken()) return; await route(); }
+    catch (error) { if (!error.cancelled && getToken()) toast(error.message, 'error'); }
   });
   if (!getToken()) { renderLogin(); return; }
   let me = null;
@@ -511,6 +643,8 @@ async function loadViews() {
       renderLogin('当前离线且本机没有可用会话，请恢复联网后登录。');
       return;
     }
+    /* 401 已由全局处理器清令牌并渲染登录页（带“登录状态已失效”说明），不要覆盖提示。 */
+    if (!getToken() && document.getElementById('login-screen')) return;
     setToken('');
     renderLogin();
     return;

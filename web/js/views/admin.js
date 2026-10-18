@@ -1,12 +1,12 @@
 /* 成绩更正与导出、账号管理（设计大纲 3、8、12.3；改进方案 §13.2、§13.4）。 */
-import { api, download, openHtml, newUid, captureRequestContext, recordRequestContext, validateReceipt } from '../api.js';
+import { api, download, openHtml, newUid, captureRequestContext, recordRequestContext, validateReceipt, getToken } from '../api.js';
 import { localStore } from '../store.js';
 import { DEFAULT_RULES, normalizeRules, ruleForSet, rulesSummary, winner } from '../teamRules.js';
-import { registerView, state, loadStructure } from '../main.js';
+import { registerView, state, loadStructure, logoutEverywhere } from '../main.js';
 import { openEditor as openIndividualCorrection } from './individual.js';
 import {
   h, field, selectInput, numberInput, textInput, textarea, table, toast, modal, statusBadge,
-  task, formDialog, promptDialog, clear, loadingState, errorState, emptyState, categoryLabel,
+  task, formDialog, promptDialog, confirmAsync, clear, loadingState, errorState, emptyState, categoryLabel,
   exportOrderControl,
 } from '../ui.js';
 
@@ -33,10 +33,15 @@ const AUDIT_LABELS = {
   enroll_team: '报名三人赛', enroll_individual: '报名个人赛', batch_enroll: '批量报名', import_enrollments: '导入报名',
   create_team: '建立代表队', delete_participation: '删除报名', create_user: '新增账号', update_user: '修改账号',
   reset_password: '重置账号密码', set_event_access: '分配账号赛事', login: '登录', change_password: '修改密码',
+  logout: '退出登录', logout_all: '退出所有设备', delete_athlete: '删除运动员',
+  delete_team: '删除项目名单', delete_venue: '删除比赛场地', delete_placement: '删除名次',
+  clear_school_tiebreak: '清除学校同分结果', bulk_schedule: '批量安排场地',
+  maintenance_cleanup: '数据保留清理', restore: '恢复数据库备份',
 };
 const AUDIT_OBJECTS = { match: '场次', individual: '个人赛报名', individual_result: '个人赛成绩',
   pool: '小组', plan: '方案', category: '项目', school: '学校', event: '赛事', placement: '名次',
-  group: '组别', database: '赛事数据库', user: '账号', participation: '报名', team: '代表队', stage: '阶段' };
+  group: '组别', database: '赛事数据库', user: '账号', participation: '报名', team: '代表队', stage: '阶段',
+  athlete: '运动员', venue: '比赛场地', school_tiebreak: '学校同分结果' };
 
 function auditContent(row) {
   let detail = {};
@@ -89,7 +94,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
   let exportOrder = 'asc';
   const logBox = h('div');
   const pager = h('div.row.tight.mt');
-  let pageOffset = 0, pageRevision;
+  let pageOffset = 0, pageRevision, auditScope = 'event';
   el.append(listBox, pager, exportBox, logBox);
   await load();
 
@@ -194,27 +199,45 @@ async function render({ el, params, signal, requestContext = captureRequestConte
 
       /* 备份与审计属于维护动作，不与现场成绩导出并列（§13.4） */
       clear(logBox);
-      if (isAdmin()) {
-        const logs = (await api.get('/api/audit-logs?limit=60')).logs;
-        logBox.append(h('div.panel',
-          h('h3', '维护 · 关键操作记录（最近 60 条）'),
-          h('div.row.mb', h('button.btn', {
-            onclick: task(() => download('/api/admin/backup')),
-          }, '下载数据库备份')),
-          h('div.table-scroll', table([
-            { label: '时间', key: 'created_at' },
-            { label: '操作人', key: 'user_name' },
-            { label: '操作', render: (r) => AUDIT_LABELS[r.action] || '其他操作' },
-            { label: '对象', render: (r) => `${AUDIT_OBJECTS[r.entity_type] || '对象'} ${r.entity_id ?? ''}` },
-            { label: '内容', render: auditContent },
-          ], logs))));
-      }
+      if (isAdmin()) await renderAudit();
       return individualRows;
     } catch (e) {
-      if (e.cancelled || !isCurrent()) return;
+      if (e.cancelled || !isCurrent() || !getToken()) return;
       if (e.code === 'list_changed') { pageOffset = 0; pageRevision = null; return load(); }
       clear(listBox);
       listBox.append(h('div.panel', errorState(e, load)));
+    }
+  }
+
+  /* 审计范围：赛事库（现场操作）与账号库（登录/账号/重置密码等）。 */
+  async function renderAudit() {
+    clear(logBox);
+    logBox.append(h('div.panel', loadingState('正在加载关键操作记录…')));
+    try {
+      const logs = (await api.get(`/api/audit-logs?limit=60&scope=${auditScope}`)).logs;
+      if (!isCurrent()) return;
+      const scopeButton = (value, label) => h('button.btn.small', {
+        class: auditScope === value ? 'btn-primary' : '',
+        onclick: () => { if (auditScope === value) return; auditScope = value; renderAudit(); },
+      }, label);
+      clear(logBox);
+      logBox.append(h('div.panel',
+        h('div.panel-head', h('h3', '维护 · 关键操作记录（最近 60 条）'),
+          h('div.row.tight', h('span.small.muted', '范围：'), scopeButton('event', '赛事'), scopeButton('registry', '账号'))),
+        h('div.row.mb', h('button.btn', {
+          onclick: task(() => download('/api/admin/backup')),
+        }, '下载数据库备份')),
+        h('div.table-scroll', table([
+          { label: '时间', key: 'created_at' },
+          { label: '操作人', key: 'user_name' },
+          { label: '操作', render: (r) => AUDIT_LABELS[r.action] || '其他操作' },
+          { label: '对象', render: (r) => `${AUDIT_OBJECTS[r.entity_type] || '对象'} ${r.entity_id ?? ''}` },
+          { label: '内容', render: auditContent },
+        ], logs))));
+    } catch (e) {
+      if (e.cancelled || !isCurrent() || !getToken()) return;
+      clear(logBox);
+      logBox.append(h('div.panel', errorState(e, renderAudit)));
     }
   }
 }
@@ -442,7 +465,8 @@ async function renderUsers({ el, signal }) {
   el.append(h('div.panel',
     h('h2', '账号与权限'),
     h('div.small.muted', '角色：赛事管理员（全部权限）、编排与成绩人员（编排、名次、更正、导出）、'
-      + '场地记录员（加载并提交成绩）、成绩查看者（只读）。记录任务按场次领取，转交由管理员或成绩人员操作。'),
+      + '场地记录员（加载并提交成绩）、成绩查看者（只读）、'
+      + '大屏操作员（大屏控制台/预览/推送/配对，其他业务页只读）。记录任务按场次领取，转交由管理员或成绩人员操作。'),
   ));
   el.append(listBox);
   el.append(renderCreateUser(load, signal));
@@ -480,6 +504,7 @@ async function renderUsers({ el, signal }) {
           },
         ], data.users))));
     } catch (e) {
+      if (!getToken()) return;         // 401 已由全局处理器回到登录页
       clear(listBox);
       listBox.append(h('div.panel', errorState(e, load)));
     }
@@ -495,8 +520,9 @@ async function resetPassword(user) {
   });
   if (!pwd) return;
   try {
-    await api.post(`/api/users/${user.id}/password`, { password: pwd });
-    toast('密码已重置', 'ok');
+    const result = await api.post(`/api/users/${user.id}/password`, { password: pwd });
+    const message = result?.message || '密码已重置';
+    toast(message.includes('下线') ? message : `${message}；其他设备已下线`, 'ok');
   } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -550,8 +576,9 @@ function renderMyPassword() {
     const label = btn.textContent;
     btn.textContent = '更新中…';
     try {
-      await api.post('/api/me/password', { old_password: oldPwd.value, new_password: newPwd.value });
-      toast('密码已更新', 'ok');
+      const result = await api.post('/api/me/password', { old_password: oldPwd.value, new_password: newPwd.value });
+      const revokedOthers = Number(result?.revoked_others ?? 0);
+      toast(revokedOthers ? `密码已更新，其他 ${revokedOthers} 个设备已下线` : '密码已更新', 'ok');
       oldPwd.value = ''; newPwd.value = '';
     } catch (e) {
       toast(e.message, 'error');       // 失败保留输入，便于修正后重试（§9.2）
@@ -560,8 +587,19 @@ function renderMyPassword() {
       btn.textContent = label;
     }
   };
+  const logoutAll = h('button.btn.btn-danger', { onclick: async () => {
+    if (!await confirmAsync('退出所有设备',
+      '将退出该账号在所有设备上的登录（包括本机），之后需要重新登录。\n大屏显示端使用独立凭据，不受影响。',
+      '退出所有设备', { danger: true })) return;
+    logoutAll.disabled = true;
+    try { await logoutEverywhere(); }
+    catch (e) { logoutAll.disabled = false; toast(e.message || '退出所有设备失败', 'error'); }
+  } }, '退出所有设备');
   return h('div.panel', h('h3', '修改我的密码'),
-    h('div.row', field('当前密码', oldPwd), field('新密码', newPwd), btn));
+    h('div.row', field('当前密码', oldPwd), field('新密码', newPwd), btn),
+    h('div.small.muted.mt', '修改密码后，该账号在其他设备上的登录会立即失效。'),
+    h('div.row.mt', logoutAll,
+      h('span.small.muted', '退出所有设备会吊销本账号的全部登录凭据，需要重新登录；大屏设备不受影响。')));
 }
 
 registerView({ name: 'users', label: '账号管理', roles: ['admin'], render: renderUsers });

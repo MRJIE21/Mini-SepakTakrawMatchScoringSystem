@@ -1,8 +1,6 @@
 """登录与当前用户。"""
 from __future__ import annotations
 
-import secrets
-from datetime import datetime, timedelta
 from .. import config, db, security
 from ..errors import ApiError, bad_request, unauthorized
 from ..http_server import route
@@ -35,22 +33,35 @@ def login(ctx):
         fresh = db.q1(ctx.conn, "SELECT * FROM users WHERE id=? AND active=1", (row['id'],))
         if fresh is None or fresh['password_hash'] != row['password_hash'] or fresh['salt'] != row['salt']:
             raise unauthorized("账号已更新，请重新登录")
-        token = secrets.token_urlsafe(32)
-        expires = datetime.now() + timedelta(hours=config.TOKEN_TTL_HOURS)
-        db.insert(ctx.conn, 'tokens', {'token': token, 'user_id': fresh['id'],
-                                      'expires_at': expires.strftime('%Y-%m-%d %H:%M:%S')})
+        token = security.issue_token(ctx.conn, fresh['id'])
         user = dict(fresh)
         security.audit(ctx.conn, user, "login", "user", user["id"])
     return {"token": token, "user": public_user(user)}
 
 
+def _request_token(ctx) -> str:
+    if getattr(ctx, "token", None):
+        return ctx.token
+    auth = ctx.headers.get("Authorization") or ""
+    return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+
+
 @route("POST", r"/api/logout", scope="registry")
 def logout(ctx):
-    auth = ctx.headers.get("Authorization") or ""
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    token = _request_token(ctx)
     if token:
         security.logout(ctx.conn, token)
+        security.audit(ctx.conn, ctx.user, "logout", "user", ctx.user["id"])
     return {"message": "已退出登录"}
+
+
+@route("POST", r"/api/me/logout-all", scope="registry")
+def logout_all(ctx):
+    """退出所有设备：吊销该用户全部令牌（含当前会话），前端随后清空本地令牌。"""
+    revoked = security.revoke_user_tokens(ctx.conn, ctx.user["id"])
+    security.audit(ctx.conn, ctx.user, "logout_all", "user", ctx.user["id"],
+                   {"revoked": revoked})
+    return {"revoked": revoked, "message": f"已退出 {revoked} 个设备，请重新登录"}
 
 
 @route("GET", r"/api/me", scope="registry")
@@ -68,10 +79,15 @@ def change_password(ctx):
     row = ctx.conn.execute("SELECT * FROM users WHERE id = ?", (ctx.user["id"],)).fetchone()
     if not security.verify_password(old, row["password_hash"], row["salt"]):
         raise bad_request("原密码不正确", code="wrong_password")
+    current_hash = getattr(ctx, "token_hash", None) or (
+        security.token_hash(_request_token(ctx)) if _request_token(ctx) else None)
     security.set_password(ctx.conn, ctx.user["id"], new)
+    revoked_others = security.revoke_user_tokens(ctx.conn, ctx.user["id"], keep_token_hash=current_hash)
     db.sync_user_to_event_databases(ctx.conn, ctx.user["id"])
-    security.audit(ctx.conn, ctx.user, "change_password", "user", ctx.user["id"])
-    return {"message": "密码已更新", "snapshot_sync_pending": True}
+    security.audit(ctx.conn, ctx.user, "change_password", "user", ctx.user["id"],
+                   {"revoked_others": revoked_others})
+    return {"message": "密码已更新，其他设备已退出登录", "revoked_others": revoked_others,
+            "snapshot_sync_pending": True}
 
 
 def public_user(user: dict) -> dict:

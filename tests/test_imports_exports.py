@@ -271,7 +271,9 @@ class ImportExportsTest(unittest.TestCase):
         self.assertIn("&lt;script&gt;坏学校&lt;/script&gt;", notice)
         self.assertNotIn("<script>坏学校", notice)
         school = self.req("GET", f"/api/exports/school-notice.html?group_id={self.group['id']}", raw=True)
-        self.assertIn("尚有 20 项名次未确认", school)
+        # REQ-008：仅报名、无任何已开赛场次的组别不产生名次，公告按“未开赛/无成绩”口径输出。
+        self.assertIn("本组别尚未开赛/无成绩，名次不计入", school)
+        self.assertNotIn("尚有", school)
         self.assertIn("第 2 / 2 页", school)
 
     def test_team_print_uses_confirmed_placement_and_school_points(self):

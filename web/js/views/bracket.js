@@ -5,7 +5,7 @@
 */
 import { api, captureRequestContext } from '../api.js';
 import { registerView, state, loadStructure } from '../main.js';
-import { h, field, selectInput, table, statusBadge, matchStatusBadge, categoryLabel } from '../ui.js';
+import { h, field, selectInput, table, statusBadge, matchStatusBadge, categoryLabel, emptyState } from '../ui.js';
 import { BOX_W, BOX_H, COL_GAP, HEAD_H, computeLayout, connectorPath } from '../bracketLayout.js';
 
 const KIND_LABEL = {
@@ -43,7 +43,24 @@ async function render({ el, params, signal, requestContext = captureRequestConte
     return;
   }
   for (const stage of data.plan.stages) {
-    if (!stage.matches.length) continue;
+    const purpose = stage.params?.schedule_meta?.definition.purpose;
+    const isCustom = stage.kind === 'custom' || purpose === 'manual';
+    if (!stage.matches.length) {
+      /* 空的自定义阶段不再整段跳过：渲染面板与空态，避免只有标题的空白区域。 */
+      if (!isCustom) continue;
+      const emptyPanel = h('div.panel',
+        h('div.panel-head',
+          h('h3', `${stage.seq}. ${stage.name}`),
+          h('div.row.tight',
+            statusBadge(KIND_LABEL[stage.kind] || stage.kind, 'info'),
+            h('span.small.muted', '场次 0'))));
+      emptyPanel.append(emptyState({
+        text: '暂无自定义比赛',
+        hint: '可在“比赛赛程”中按组委会安排在自定义阶段新增比赛。',
+      }));
+      el.append(emptyPanel);
+      continue;
+    }
     const panel = h('div.panel',
       h('div.panel-head',
         h('h3', `${stage.seq}. ${stage.name}`),
@@ -55,8 +72,18 @@ async function render({ el, params, signal, requestContext = captureRequestConte
 
     const bracketPools = stage.pools.filter((p) => p.kind === 'bracket');
     const isElim = bracketPools.length > 0;
-    const purpose = stage.params?.schedule_meta?.definition.purpose;
-    if (['knockout', 'placement'].includes(purpose)) {
+    if (isCustom && !stage.pools.length) {
+      /* REQ-007：自定义阶段没有小组/签表，按 seq/id 顺序列出普通场次。 */
+      const matches = [...stage.matches].sort(
+        (a, b) => Number(a.seq ?? 0) - Number(b.seq ?? 0) || Number(a.id) - Number(b.id));
+      panel.append(h('div.table-scroll', table([
+        { label: '轮次', key: 'round_label' },
+        { label: '主队/选手', render: (m) => sideText(m.home) },
+        { label: '客队/选手', render: (m) => sideText(m.away) },
+        { label: '比分', render: (m) => setSummary(m) },
+        { label: '状态', render: (m) => matchStatusBadge(m) },
+      ], matches)));
+    } else if (['knockout', 'placement'].includes(purpose)) {
       panel.append(renderTree(stage.matches, { poolOf: new Map(), poolNames: new Map(), sectionPoolId: null }));
     } else if (isElim) {
       const ctxBase = {

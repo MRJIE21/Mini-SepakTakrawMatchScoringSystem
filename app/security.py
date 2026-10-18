@@ -15,9 +15,9 @@ import secrets
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from . import config, db
+from . import clock, config, db
 
 ROLES = ("admin", "organizer", "recorder", "viewer", "display_operator")
 ROLE_NAMES = {
@@ -127,22 +127,55 @@ def set_password(conn, user_id: int, password: str) -> None:
     db.update(conn, "users", user_id, {"password_hash": pwd_hash, "salt": salt})
 
 
-def login(conn, username: str, password: str) -> str | None:
-    row = db.q1(conn, "SELECT * FROM users WHERE username = ? AND active = 1", (username,))
-    if row is None or not verify_password(password, row["password_hash"], row["salt"]):
-        return None
+def token_hash(value: str) -> str:
+    """服务端只保存令牌的 sha256 哈希；明文只出现在登录响应与客户端。"""
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
+def issue_token(conn, user_id: int) -> str:
+    """签发一次性返回的明文令牌，数据库只落哈希与 UTC epoch。"""
     token = secrets.token_urlsafe(32)
-    expires = datetime.now() + timedelta(hours=config.TOKEN_TTL_HOURS)
+    expires_epoch = int(clock.utc_epoch()) + int(config.TOKEN_TTL_HOURS) * 3600
+    expires_text = datetime.fromtimestamp(expires_epoch).strftime("%Y-%m-%d %H:%M:%S")
     db.insert(conn, "tokens", {
-        "token": token,
-        "user_id": row["id"],
-        "expires_at": expires.strftime("%Y-%m-%d %H:%M:%S"),
+        "token": token_hash(token),
+        "user_id": int(user_id),
+        "expires_at": expires_text,
+        "expires_at_epoch": expires_epoch,
     })
     return token
 
 
+def revoke_user_tokens(conn, user_id: int, keep_token_hash: str | None = None) -> int:
+    """吊销该用户全部令牌；keep_token_hash 用于改密时保留当前会话。"""
+    if keep_token_hash:
+        cursor = conn.execute("DELETE FROM tokens WHERE user_id = ? AND token <> ?",
+                              (int(user_id), keep_token_hash))
+    else:
+        cursor = conn.execute("DELETE FROM tokens WHERE user_id = ?", (int(user_id),))
+    return max(0, cursor.rowcount or 0)
+
+
+def login(conn, username: str, password: str) -> str | None:
+    row = db.q1(conn, "SELECT * FROM users WHERE username = ? AND active = 1", (username,))
+    if row is None or not verify_password(password, row["password_hash"], row["salt"]):
+        return None
+    return issue_token(conn, row["id"])
+
+
 def logout(conn, token: str) -> None:
-    db.run(conn, "DELETE FROM tokens WHERE token = ?", (token,))
+    if token:
+        db.run(conn, "DELETE FROM tokens WHERE token = ?", (token_hash(token),))
+
+
+def _token_expired(conn, row) -> bool:
+    epoch = row["expires_at_epoch"] if "expires_at_epoch" in row.keys() else 0
+    if not epoch:
+        epoch = clock.parse_local_text(row["expires_at"]) or 0
+    if not epoch:
+        return True
+    # 时钟回拨由 clock.wall_epoch 的持久化高水位兜底：回拨后已过期令牌不会复活。
+    return clock.wall_epoch(conn) >= epoch
 
 
 def user_for_token(conn, token: str | None) -> dict | None:
@@ -150,14 +183,15 @@ def user_for_token(conn, token: str | None) -> dict | None:
         return None
     row = db.q1(
         conn,
-        """SELECT u.*, t.expires_at FROM tokens t JOIN users u ON u.id = t.user_id
+        """SELECT u.*, t.expires_at, t.expires_at_epoch FROM tokens t
+             JOIN users u ON u.id = t.user_id
             WHERE t.token = ? AND u.active = 1""",
-        (token,),
+        (token_hash(token),),
     )
     if row is None:
         return None
-    if row["expires_at"] < datetime.now().strftime("%Y-%m-%d %H:%M:%S"):
-        db.run(conn, "DELETE FROM tokens WHERE token = ?", (token,))
+    if _token_expired(conn, row):
+        # P2-B：日常运行不自动删除过期数据，交给 run.py maintenance 处理。
         return None
     return dict(row)
 

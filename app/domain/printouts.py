@@ -5,14 +5,51 @@ import html
 
 
 def render_sheet(*, title: str, event: str, scope: str, headers: list[str], rows: list[list],
-                 generated_at: str, prepared_by: str, note: str = "", per_page: int = 16) -> str:
+                 generated_at: str, prepared_by: str, note: str = "", per_page: int = 16,
+                 separator: dict | None = None) -> str:
+    """渲染打印成绩单。
+
+    separator 为可选的分组提示行：{"text": "待确认名次（不计入）", "before": 行下标}，
+    在指定数据行之前插入一整行分组标题（不计入每页数据行数与“共 N 条”），用于把
+    已确认名次与待确认名次分开；缺省 None 时输出与旧版完全一致。
+    """
     esc = lambda value: html.escape("" if value is None else str(value))
-    chunks = [rows[index:index + per_page] for index in range(0, len(rows), per_page)] or [[]]
+    entries: list[tuple[str, object]] = []
+    if separator and rows:
+        before = max(0, min(int(separator.get("before", len(rows))), len(rows)))
+        for index, row in enumerate(rows):
+            if index == before:
+                entries.append(("separator", separator.get("text", "")))
+            entries.append(("row", row))
+        if before >= len(rows):
+            entries.append(("separator", separator.get("text", "")))
+    else:
+        entries = [("row", row) for row in rows]
+    chunks: list[list[tuple[str, object]]] = []
+    current: list[tuple[str, object]] = []
+    data_count = 0
+    for kind, payload in entries:
+        if kind == "row" and data_count >= per_page:
+            chunks.append(current)
+            current, data_count = [], 0
+        current.append((kind, payload))
+        if kind == "row":
+            data_count += 1
+    chunks.append(current)
+    if not chunks:
+        chunks = [[]]
     pages = []
     for index, chunk in enumerate(chunks, start=1):
         heading = "".join(f"<th scope='col'>{esc(label)}</th>" for label in headers)
-        body = "".join("<tr>" + "".join(f"<td>{esc(cell)}</td>" for cell in row) + "</tr>"
-                       for row in chunk)
+        body_parts = []
+        for kind, payload in chunk:
+            if kind == "separator":
+                body_parts.append(
+                    f"<tr class='separator'><td colspan='{len(headers)}'>{esc(payload)}</td></tr>")
+            else:
+                body_parts.append("<tr>" + "".join(
+                    f"<td>{esc(cell)}</td>" for cell in payload) + "</tr>")
+        body = "".join(body_parts)
         if not body:
             body = f"<tr><td colspan='{len(headers)}'>暂无参赛名单或成绩</td></tr>"
         pages.append(f"""<section class="sheet">
@@ -36,6 +73,7 @@ def render_sheet(*, title: str, event: str, scope: str, headers: list[str], rows
       table{{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}}
       th,td{{border:1px solid #555;padding:8px 5px;text-align:center;overflow-wrap:anywhere;white-space:pre-wrap}}
       th{{background:#f2f2f2}}tr{{break-inside:avoid}}.signatures{{font-size:12px;margin:22px 0;line-height:2}}
+      tr.separator td{{background:#f2f2f2;font-weight:600;text-align:left}}
       .footer{{border-top:1px solid #aaa;padding-top:9px;font-size:11px;color:#444}}
       @page{{size:A4 portrait;margin:10mm}}@media print{{body{{background:white}}.toolbar{{display:none}}
       .sheet{{width:auto;min-height:0;margin:0;padding:0;break-after:page}}.sheet:last-child{{break-after:auto}}

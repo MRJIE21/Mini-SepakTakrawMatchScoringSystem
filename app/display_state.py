@@ -4,12 +4,13 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from . import db, display_store
+from . import clock, db, display_store
 from .errors import ApiError
 
 
 def _now(conn) -> str:
-    return db.now(conn)
+    """服务器时间统一 UTC ISO8601（P2-B REQ-011）。"""
+    return clock.utc_iso()
 
 
 def _set_chips(sets, current_set: int | None) -> list[dict]:
@@ -194,6 +195,7 @@ def build_state(event_conn, screen: dict) -> dict:
         },
         "config_updated_at": config.get("updated_at") or "",
         "revision": revision,
+        "config_revision": int(config.get("revision") or 0),
         "state_version": state_version,
         "server_time": _now(event_conn),
     }

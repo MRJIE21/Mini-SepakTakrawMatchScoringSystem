@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import sqlite3
 import threading
 import uuid
@@ -256,6 +258,8 @@ def init_db(db_path: Path | str | None = None) -> None:
         display_store.backup_before_upgrade(conn)
         conn.executescript(schema)
         _migrate(conn)
+        _migrate_token_hashes(conn)
+        _migrate_epoch_times(conn)
         _migrate_user_roles(conn)
         _migrate_group_draw_method(conn)
     finally:
@@ -339,6 +343,72 @@ def _migrate_group_draw_method(conn: sqlite3.Connection) -> None:
     ''')
 
 
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    return {row["name"] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _migrate_token_hashes(conn: sqlite3.Connection) -> None:
+    """P2-B：tokens.token 从明文改为 sha256 哈希（列名保持兼容）。
+
+    单事务、幂等；任何非 64 位小写十六进制的既有值都视为历史明文并替换。
+    该迁移只改数据值、不改结构，因此不生成含明文令牌的升级备份
+    （REQ-003 要求备份不得含明文有效令牌）；失败整体回滚。
+    """
+    if "tokens" not in _table_names(conn) or "settings" not in _table_names(conn):
+        return
+    rows = conn.execute("SELECT token FROM tokens").fetchall()
+    updates = []
+    for row in rows:
+        value = row["token"] or ""
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            updates.append((hashlib.sha256(value.encode("utf-8")).hexdigest(), value))
+    if not updates:
+        conn.execute("INSERT OR IGNORE INTO settings(k, v) VALUES('token_hash_v1', '1')")
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for digest, legacy in updates:
+            conn.execute("UPDATE tokens SET token = ? WHERE token = ?", (digest, legacy))
+        conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('token_hash_v1', '1')")
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def _migrate_epoch_times(conn: sqlite3.Connection) -> None:
+    """P2-B：为安全相关时间补齐 epoch 列并回填历史本地时间字符串。
+
+    旧 TEXT 列保留只读兼容；只回填 epoch=0 且文本非空的行，幂等、不批量改写历史。
+    """
+    from . import clock
+    tables = _table_names(conn)
+    targets = (
+        ("tokens", "expires_at", "expires_at_epoch"),
+        ("display_screens", "last_seen_at", "last_seen_epoch"),
+        ("display_pair_codes", "expires_at", "expires_at_epoch"),
+        ("display_live", "expires_at", "expires_at_epoch"),
+    )
+    for table, text_column, epoch_column in targets:
+        if table not in tables:
+            continue
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if epoch_column not in columns:
+            continue
+        rows = conn.execute(
+            f"SELECT rowid AS rid, {text_column} AS legacy FROM {table} "
+            f"WHERE {epoch_column} = 0 AND {text_column} <> ''").fetchall()
+        for row in rows:
+            epoch = clock.parse_local_text(row["legacy"])
+            if epoch is not None:
+                conn.execute(f"UPDATE {table} SET {epoch_column} = ? WHERE rowid = ?",
+                             (int(epoch), row["rid"]))
+    if "settings" in tables:
+        conn.execute("INSERT OR IGNORE INTO settings(k, v) VALUES('utc_epoch_v1', '1')")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """为旧数据库补齐新增列（SQLite 不支持 IF NOT EXISTS 加列，这里按表结构探测）。
 
@@ -359,6 +429,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     "reset_parent_id INTEGER REFERENCES matches(id)",
                     "reset_state TEXT NOT NULL DEFAULT 'none'", "reset_parent_version INTEGER"],
         "display_config": ["poll_ms INTEGER NOT NULL DEFAULT 500 CHECK (poll_ms BETWEEN 100 AND 1000)"],
+        "tokens": ["expires_at_epoch INTEGER NOT NULL DEFAULT 0"],
+        "display_screens": ["last_seen_epoch INTEGER NOT NULL DEFAULT 0"],
+        "display_pair_codes": ["expires_at_epoch INTEGER NOT NULL DEFAULT 0"],
+        "display_live": ["expires_at_epoch INTEGER NOT NULL DEFAULT 0"],
     }
     for table, columns in migrations.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}

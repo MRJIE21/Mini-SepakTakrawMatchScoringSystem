@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   token      TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  expires_at_epoch INTEGER NOT NULL DEFAULT 0
 );
 
 -- 全局账号提交与同步任务原子保存；赛事库中的空表不参与业务。
@@ -529,6 +530,7 @@ CREATE TABLE IF NOT EXISTS display_screens (
   token_hash   TEXT NOT NULL UNIQUE,
   created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   last_seen_at TEXT NOT NULL DEFAULT '',
+  last_seen_epoch INTEGER NOT NULL DEFAULT 0,
   revoked_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_display_screens_event ON display_screens(event_id, id);
@@ -540,6 +542,7 @@ CREATE TABLE IF NOT EXISTS display_pair_codes (
   event_id    INTEGER REFERENCES events(id) ON DELETE CASCADE,
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   expires_at  TEXT NOT NULL,
+  expires_at_epoch INTEGER NOT NULL DEFAULT 0,
   claimed_at  TEXT,
   token_once  TEXT NOT NULL DEFAULT ''
 );
@@ -576,7 +579,8 @@ CREATE TABLE IF NOT EXISTS display_live (
   recorder_id   INTEGER REFERENCES users(id),
   draft_uid     TEXT NOT NULL DEFAULT '',
   updated_at    TEXT NOT NULL DEFAULT '',
-  expires_at    TEXT NOT NULL DEFAULT ''
+  expires_at    TEXT NOT NULL DEFAULT '',
+  expires_at_epoch INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_display_live_expiry ON display_live(expires_at);
 

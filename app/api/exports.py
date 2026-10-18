@@ -83,6 +83,19 @@ def _ordered(rows: list, order: str) -> list:
     return list(reversed(rows)) if order == "desc" else rows
 
 
+def _confirmed_then_pending(rows_with_state: list[tuple[bool, list]], order: str):
+    """打印成绩单分组排序：只反转已确认行，待确认行固定追加在最后。
+
+    返回 (行列表, 分组提示行)；没有待确认行时不插入分组提示。
+    """
+    confirmed = [row for ok, row in rows_with_state if ok]
+    pending = [row for ok, row in rows_with_state if not ok]
+    ordered = list(reversed(confirmed)) if order == "desc" else confirmed
+    separator = ({"text": "待确认名次（不计入）", "before": len(ordered)}
+                 if pending else None)
+    return ordered + pending, separator
+
+
 def _xlsx_response(data: bytes, filename: str) -> Response:
     return Response(data, 200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     {"Content-Disposition": f'attachment; filename="{filename}"'})
@@ -264,6 +277,7 @@ def export_standings_xlsx(ctx):
 def _school_totals_table(conn, group_id):
     from .standings import group_school_totals
     result = group_school_totals(conn, group_id)
+    started = bool(result.get("started", True))
     headers = ["名次", "学校", "团体总分", "第一名数", "第二名数", "第三名数", "分项目明细", "待确认项目"]
     rows = []
     for row in result["rows"]:
@@ -271,10 +285,12 @@ def _school_totals_table(conn, group_id):
                            f"{d['participation_label']}第{d['rank_no']}名"
                            f"（{d['base_points']}×{d['multiplier']}={d['points']}）"
                            for d in row["details"])
-        rows.append([row.get("rank") or "待确认", row["name"], _number(row["total"]),
+        # 未开赛组别不产生名次：名次列用“—”，待确认列固定 0，与页面/打印公告同口径。
+        rank_cell = (row.get("rank") or "待确认") if started else "—"
+        rows.append([rank_cell, row["name"], _number(row["total"]),
                      _number(row["rank_counts"].get(1, 0)), _number(row["rank_counts"].get(2, 0)),
                      _number(row["rank_counts"].get(3, 0)), detail,
-                     _number(len(row.get("pending") or []))])
+                     _number(len(row.get("pending") or [])) if started else 0])
     return result["group"], headers, rows
 
 
@@ -453,10 +469,11 @@ def _individual_rows(conn, category_id):
                      pl.rank_no, s.name, a.name, p.id""", (category_id,))
 
 
-def _print_response(ctx, title, event, scope, headers, rows, note):
+def _print_response(ctx, title, event, scope, headers, rows, note, separator=None):
     from ..domain.printouts import render_sheet
     page = render_sheet(title=title, event=event, scope=scope, headers=headers, rows=rows,
-                        generated_at=db.now(ctx.conn), prepared_by=ctx.user.get("display_name", ""), note=note)
+                        generated_at=db.now(ctx.conn), prepared_by=ctx.user.get("display_name", ""),
+                        note=note, separator=separator)
     return Response(page.encode("utf-8"), 200, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
 
 
@@ -469,9 +486,10 @@ def export_category_notice(ctx):
     if cat["kind"] == "individual":
         data = _individual_rows(ctx.conn, category_id)
         headers = ["名次", "学校", "运动员", "有效次数", "失误次数", "违规次数", "结果状态", "积分"]
-        rows = [[_confirmed_rank(r), r["school_name"], r["athlete_name"], _number(r["result_value"]),
-                 _number(r["error_count"]), _number(r["violation_count"]), _individual_status(r),
-                 r["points"] if _has_rank(r) else "—"] for r in data]
+        paired = [(_has_rank(r), [_confirmed_rank(r), r["school_name"], r["athlete_name"],
+                                  _number(r["result_value"]), _number(r["error_count"]),
+                                  _number(r["violation_count"]), _individual_status(r),
+                                  r["points"] if _has_rank(r) else "—"]) for r in data]
         pending = sum(r["participation_status"] == "active" and r["result_status"] not in ("dns", "dnf", "dsq")
                       and not _has_rank(r) for r in data)
         title = "个人赛成绩单"
@@ -488,33 +506,51 @@ def export_category_notice(ctx):
                              pl.rank_no, s.name, p.id""", (category_id,))
         sources = {"auto": "比赛推导", "standings": "小组排名", "manual": "现场确认"}
         headers = ["名次", "参赛学校", "名次来源", "积分", "核对状态"]
-        rows = [[_confirmed_rank(r), r["school_name"], sources.get(r["source"], "—"),
-                 r["points"] if _has_rank(r) else "—", "名次已确认" if _has_rank(r) else "名次待确认"] for r in data]
+        paired = [(_has_rank(r), [_confirmed_rank(r), r["school_name"], sources.get(r["source"], "—"),
+                                  r["points"] if _has_rank(r) else "—",
+                                  "名次已确认" if _has_rank(r) else "名次待确认"]) for r in data]
         pending = sum(not _has_rank(r) for r in data)
         title = "三人赛项目名次表"
         from .. import team_rules_store
         current_rules = team_rules_store.project(ctx.conn, category_id)
         rules_label = '赛事统一规则' if current_rules['rules_scope'] == 'event' else '尚未统一，此项目原规则'
         note = f"{rules_label}：{current_rules['rules_summary']}；历史场次按各场记录规则。集体项目积分双倍计入。待确认 {pending} 所学校。"
-    return _print_response(ctx, title, cat["event_name"], scope, headers, _ordered(rows, order),
-                           note + " 请经核对、签字后公示；成绩更正后请重新打印。")
+    # 倒序只作用于已确认名次块；待确认名次固定追加在最后并单独分组，避免倒序把待确认排到最前。
+    rows, separator = _confirmed_then_pending(paired, order)
+    return _print_response(ctx, title, cat["event_name"], scope, headers, rows,
+                           note + " 请经核对、签字后公示；成绩更正后请重新打印。", separator)
 
 
 @route("GET", r"/api/exports/school-notice.html")
 def export_school_notice(ctx):
     from .standings import school_totals
     group_id = int(ctx.arg("group_id") or 0)
-    # 复用成绩页面的完整汇总，包含未确认名次与学校总分并列状态。
+    order = _order_arg(ctx)
+    # 复用成绩页面的完整汇总，包含未确认名次、学校总分并列状态与“已开赛”口径。
     from ..http_server import Context
     nested = Context(ctx.conn, ctx.user, {}, {}, {"group_id": str(group_id)}, ctx.headers, "GET", ctx.path)
     data = school_totals(nested)
+    started = bool(data.get("started", True))
     event = get_or_404(ctx.conn, "events", data["group"]["event_id"], "赛事")
     headers = ["名次", "学校", "总分", "第一名数", "第二名数", "第三名数", "待确认项目"]
-    rows = [[r.get("rank") if r["status"] != "tie_pending" else "待确认", r["name"], r["total"],
-             r["rank_counts"].get(1, 0), r["rank_counts"].get(2, 0), r["rank_counts"].get(3, 0),
-             len(r["pending"])] for r in data["rows"]]
+    if started:
+        ranked = [(r["status"] != "tie_pending",
+                   [r.get("rank") if r["status"] != "tie_pending" else "待确认", r["name"], r["total"],
+                    r["rank_counts"].get(1, 0), r["rank_counts"].get(2, 0), r["rank_counts"].get(3, 0),
+                    len(r["pending"])]) for r in data["rows"]]
+    else:
+        # 未开赛组别不产生名次：名次列“—”，待确认项目固定 0，不显示待确认分组。
+        ranked = [(True,
+                   ["—", r["name"], r["total"],
+                    r["rank_counts"].get(1, 0), r["rank_counts"].get(2, 0), r["rank_counts"].get(3, 0), 0])
+                  for r in data["rows"]]
+    rows, separator = _confirmed_then_pending(ranked, order)
     pending = sum(len(r["pending"]) for r in data["rows"])
-    note = f"单项前八名积分 9、7、6、5、4、3、2、1，三人赛双倍。尚有 {pending} 项名次未确认，未计入总分。"
-    note += f" 有 {len(data['unresolved'])} 组学校总分并列待确认。请经核对、签字后公示；成绩更正后请重新打印。"
+    if started:
+        note = f"单项前八名积分 9、7、6、5、4、3、2、1，三人赛双倍。尚有 {pending} 项名次未确认，未计入总分。"
+        note += f" 有 {len(data['unresolved'])} 组学校总分并列待确认。"
+    else:
+        note = "本组别尚未开赛/无成绩，名次不计入。单项前八名积分 9、7、6、5、4、3、2、1，三人赛双倍。"
+    note += "请经核对、签字后公示；成绩更正后请重新打印。"
     return _print_response(ctx, "学校团体总分表", event["name"], data["group"]["name"],
-                           headers, _ordered(rows, _order_arg(ctx)), note)
+                           headers, rows, note, separator)

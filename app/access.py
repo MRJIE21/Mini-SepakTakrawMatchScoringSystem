@@ -121,7 +121,7 @@ def authorize(ctx, scope):
                                          '/api/display/revoke'):
             return
         # 其余只读页面走下方 viewer 白名单；组 2/3 的写操作仍被拒绝。
-    if path in ('/api/me', '/api/me/password', '/api/logout', '/api/events'): return
+    if path in ('/api/me', '/api/me/password', '/api/me/logout-all', '/api/logout', '/api/events'): return
     if method != 'GET':
         if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual', '/api/display/live') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
             return
