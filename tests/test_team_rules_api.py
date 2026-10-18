@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import test_api as fixtures
 from helpers.historical_schedule import fixture_schedule
+from helpers.backups import find_backup
 from app import db, config, team_rules_store
 from app.domain import team_rules
 from test_team_rules import events_for_scores
@@ -253,7 +254,8 @@ class TeamRulesApiTest(fixtures.ApiTest):
             self.assertEqual(db.q1(conn, 'SELECT home_points FROM match_sets WHERE match_id=?', (historical[1],))[0], 8)
             all_ids = [r['id'] for r in db.q(conn, 'SELECT id FROM matches')]
         finally: conn.close()
-        backup = Path(str(fixture_path) + '.before-team-rules-v1.db')
+        backup = find_backup(fixture_path, 'before-team-rules-v1')
+        self.assertIsNotNone(backup)
         self.assertTrue(backup.is_file())
         original_backup = backup.read_bytes()
         db.init_db(fixture_path)

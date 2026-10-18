@@ -114,9 +114,16 @@ def authorize(ctx, scope):
             raise forbidden('赛事结构只能由管理员维护')
         if method != 'GET' and re.fullmatch(r'/api/categories/\d+', path): raise forbidden('项目设置只能由管理员维护')
         return
+    if role == 'display_operator':
+        if method == 'GET' and path in ('/api/display/console', '/api/display/preview'):
+            return
+        if method == 'POST' and path in ('/api/display/pair/claim', '/api/display/publish',
+                                         '/api/display/revoke'):
+            return
+        # 其余只读页面走下方 viewer 白名单；组 2/3 的写操作仍被拒绝。
     if path in ('/api/me', '/api/me/password', '/api/logout', '/api/events'): return
     if method != 'GET':
-        if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
+        if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual', '/api/display/live') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
             return
         raise forbidden('当前角色没有该操作权限')
     shared = [r'/api/events/\d+/structure', r'/api/events/\d+/team-rules', r'/api/events/\d+/venues', r'/api/matches', r'/api/matches/\d+', r'/api/receipts/[\w.-]+', r'/api/categories/\d+/team-rules', r'/api/categories/\d+/individual-draw']
@@ -126,7 +133,7 @@ def authorize(ctx, scope):
               r'/api/categories/\d+/placements', r'/api/groups/\d+/school-totals', r'/api/events/\d+/school-totals']
     if not any(re.fullmatch(pattern, path) for pattern in shared + (recorder if role == 'recorder' else viewer)):
         raise forbidden('当前角色不能查看该部分')
-    if role == 'viewer' and re.fullmatch(r'/api/pools/\d+/standings', path):
+    if role in ('viewer', 'display_operator') and re.fullmatch(r'/api/pools/\d+/standings', path):
         pool = db.q1(ctx.conn, 'SELECT status FROM pools WHERE id=?', (int(ctx.params['pool_id']),))
         if not pool or pool['status'] != 'confirmed': raise forbidden('该小组名次尚未确认')
 
@@ -144,7 +151,7 @@ def filter_result(ctx, result):
     if role == 'recorder':
         if 'submissions' in result: result['submissions'] = [s for s in result['submissions'] if s['user_id'] == ctx.user['id']]
         if result.get('submission') and result['submission']['user_id'] != ctx.user['id']: return {'found': False}
-    if role == 'viewer':
+    if role in ('viewer', 'display_operator'):
         if 'placements' in result: result['placements'] = [p for p in result['placements'] if p['status'] == 'confirmed']
         if result.get('plan'):
             plan = result['plan']

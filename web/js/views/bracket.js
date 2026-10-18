@@ -156,7 +156,7 @@ function matchCard(m, x, y, ctx) {
   if (m.status === 'void') classes.push('void');
   const card = h(`div.${classes.join('.')}`, {
     style: `left:${x}px;top:${y}px;width:${BOX_W}px`,
-    title: m.sets.length
+    title: !isVoidResult(m) && m.sets.length
       ? m.sets.map((s) => `第${s.set_no}局 ${s.home_points}:${s.away_points}`).join('　') : '',
   },
     h('div.bk-title', `${m.public_code || `第${m.seq}场`} · ${m.round_label}${m.status === 'void' ? ' · 轮空' : ''}`),
@@ -205,8 +205,13 @@ function winnerOf(m) {
   return null;
 }
 
+function isVoidResult(m) {
+  return m.result_status === 'cancelled' || m.result_status === 'unfinished';
+}
+
 function scoreText(m, side) {
   if (m.status === 'pending') return '';
+  if (isVoidResult(m)) return '';
   if (m.result_status === 'home_forfeit') return side === 'home' ? '弃权' : '胜';
   if (m.result_status === 'away_forfeit') return side === 'away' ? '弃权' : '胜';
   if (m.result_status && m.result_status !== 'normal') {
@@ -217,6 +222,9 @@ function scoreText(m, side) {
 }
 
 function setSummary(m) {
+  if (isVoidResult(m)) {
+    return m.result_status === 'cancelled' ? '已取消（原局分作废）' : '未完成（原局分作废）';
+  }
   if (m.result_status === 'home_forfeit') return '主队弃权';
   if (m.result_status === 'away_forfeit') return '客队弃权';
   if (!m.sets.length) return '';

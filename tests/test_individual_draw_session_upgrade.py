@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from app import config, db, security
+from helpers.backups import find_backup
 
 
 def build_legacy_event_database(path: Path):
@@ -99,7 +100,8 @@ class SessionUpgradeTest(unittest.TestCase):
         event_path = config.EVENTS_DIR / 'event_2.db'
         build_legacy_event_database(event_path)
         db.init_db(event_path)
-        snapshot = Path(str(event_path) + '.before-individual-draw-session-v1.sqlite')
+        snapshot = find_backup(event_path, 'before-individual-draw-session-v1')
+        self.assertIsNotNone(snapshot)
         self.assertTrue(snapshot.is_file())
         stamp = snapshot.stat().st_mtime_ns
         saved = sqlite3.connect(snapshot)

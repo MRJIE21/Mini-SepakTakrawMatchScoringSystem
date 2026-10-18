@@ -5,26 +5,97 @@
   organizer 编排与成绩人员
   recorder  场地记录员
   viewer    成绩查看者
+  display_operator 大屏操作员
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import secrets
+import threading
+import time
+from collections import deque
 from datetime import datetime, timedelta
 
 from . import config, db
 
-ROLES = ("admin", "organizer", "recorder", "viewer")
+ROLES = ("admin", "organizer", "recorder", "viewer", "display_operator")
 ROLE_NAMES = {
     "admin": "赛事管理员",
     "organizer": "编排与成绩人员",
     "recorder": "场地记录员",
     "viewer": "成绩查看者",
+    "display_operator": "大屏操作员",
 }
 
-# 本地赛事部署的固定初始管理员密码；仍可通过环境变量覆盖，或登录后修改。
-DEFAULT_ADMIN_PASSWORD = "Admin123456"
+# 登录失败限流：进程内内存实现，阈值可通过 config/env 调整；重启清零。
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_FAILURES: dict[str, deque] = {}
+_LOGIN_LOCKS: dict[str, float] = {}
+
+
+def reset_login_limits() -> None:
+    with _LOGIN_LOCK:
+        _LOGIN_FAILURES.clear()
+        _LOGIN_LOCKS.clear()
+
+
+def _prune(values: deque, now: float) -> None:
+    floor = now - max(1, config.LOGIN_WINDOW_SECONDS)
+    while values and values[0] <= floor:
+        values.popleft()
+
+
+def login_retry_after(ip: str, username: str) -> int:
+    """Return remaining lock seconds for this IP+username or IP, else 0."""
+    now = time.monotonic()
+    keys = (f'user|{ip}|{username.strip().lower()}', f'ip|{ip}')
+    with _LOGIN_LOCK:
+        retry = 0
+        for key in keys:
+            until = _LOGIN_LOCKS.get(key, 0)
+            if until > now:
+                retry = max(retry, int(until - now) + 1)
+        return retry
+
+
+def record_login_failure(ip: str, username: str) -> int:
+    """Record one failed attempt and return lock seconds if now locked."""
+    now = time.monotonic()
+    user_key = f'user|{ip}|{username.strip().lower()}'
+    ip_key = f'ip|{ip}'
+    with _LOGIN_LOCK:
+        retry = 0
+        for key, limit in ((user_key, config.LOGIN_MAX_FAILS), (ip_key, config.LOGIN_IP_MAX_FAILS)):
+            values = _LOGIN_FAILURES.setdefault(key, deque())
+            _prune(values, now)
+            values.append(now)
+            if len(values) >= max(1, limit):
+                until = now + max(1, config.LOGIN_LOCK_SECONDS)
+                _LOGIN_LOCKS[key] = until
+                values.clear()
+                retry = max(retry, int(until - now) + 1)
+        return retry
+
+
+def clear_login_failures(ip: str, username: str) -> None:
+    with _LOGIN_LOCK:
+        _LOGIN_FAILURES.pop(f'user|{ip}|{username.strip().lower()}', None)
+        _LOGIN_LOCKS.pop(f'user|{ip}|{username.strip().lower()}', None)
+
+
+def ensure_default_users(conn) -> str | None:
+    """首次启动只建立管理员账号。
+
+    不再内置固定密码：未显式设置 STSS_ADMIN_PASSWORD 时生成随机初始口令，
+    仅在启动控制台显示一次，必须登录后立即修改。
+    """
+    if db.q1(conn, "SELECT id FROM users LIMIT 1"):
+        return None
+    configured = os.environ.get("STSS_ADMIN_PASSWORD")
+    password = configured or secrets.token_urlsafe(9)
+    create_user(conn, "admin", password, "admin", "赛事管理员")
+    return None if configured else password
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -89,25 +160,6 @@ def user_for_token(conn, token: str | None) -> dict | None:
         db.run(conn, "DELETE FROM tokens WHERE token = ?", (token,))
         return None
     return dict(row)
-
-
-def ensure_default_users(conn) -> str | None:
-    """首次启动只建立管理员账号。
-
-    不再内置 organizer/recorder/viewer 等固定密码账号：现场账号由管理员在
-    “账号管理”中按角色创建，避免出现人尽可知的默认口令。
-
-    返回需要打印给运维的初始密码：
-      - 环境变量 STSS_ADMIN_PASSWORD 指定时使用环境变量并返回 None；
-      - 未指定时使用固定初始密码 DEFAULT_ADMIN_PASSWORD；
-      - 已有账号的数据库返回 None。
-    """
-    if db.q1(conn, "SELECT id FROM users LIMIT 1"):
-        return None
-    configured = os.environ.get("STSS_ADMIN_PASSWORD")
-    password = configured or DEFAULT_ADMIN_PASSWORD
-    create_user(conn, "admin", password, "admin", "赛事管理员")
-    return None if configured else password
 
 
 def audit(conn, user: dict | None, action: str, entity_type: str = "", entity_id: int | None = None,

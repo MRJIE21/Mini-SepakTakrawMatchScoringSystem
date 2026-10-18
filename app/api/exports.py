@@ -23,14 +23,23 @@ _WINNER_SIDE_NAMES = {"home": "主队", "away": "客队"}
 _FINAL_INDIVIDUAL_STATUSES = ("dns", "dnf", "dsq")
 # 有最终结果但可能没有逐局比分的状态：记录表不能再说“空白记录表”。
 _NO_SET_FINAL_STATUSES = ("home_forfeit", "away_forfeit", "unfinished", "cancelled")
+# 取消/未完成场次的旧局分只作审计留存，任何正式打印/导出都不得呈现为有效比分。
+_VOID_RESULT_STATUSES = ("cancelled", "unfinished")
 _RECORD_SHEET_FILLED_NOTE = ("本表已填入系统记录的局分与结果，供赛后留档；"
                              "与系统提交内容不一致时以核对后的系统记录为准。")
 _RECORD_SHEET_NO_SET_NOTE = "本场无逐局比分（弃权/未完成/取消），结果以系统记录为准。"
+_RECORD_SHEET_VOID_NOTE = "本场已取消/未完成，原局分作废；结果以系统记录为准。"
 _RECORD_SHEET_BLANK_NOTE = "本表为空白记录表，供现场手工记录；录入后请以系统核对结果为准。"
+
+
+def _is_void_result(result_status) -> bool:
+    return str(result_status or "") in _VOID_RESULT_STATUSES
 
 
 def _record_sheet_note(has_sets: bool, result_status: str) -> str:
     """记录表页脚只说明本场实际记录情况，避免“已勾选结果却称空白表”。"""
+    if _is_void_result(result_status):
+        return _RECORD_SHEET_VOID_NOTE
     if has_sets:
         return _RECORD_SHEET_FILLED_NOTE
     if result_status in _NO_SET_FINAL_STATUSES:
@@ -181,7 +190,8 @@ def _results_table(conn, category_id):
     for r in matches:
         sets = db.q(conn, "SELECT * FROM match_sets WHERE match_id = ? ORDER BY set_no", (r["id"],))
         labels = participation_display_map(conn, [x for x in (r["home_actual"], r["away_actual"]) if x])
-        set_text = " ".join(f"{s['home_points']}:{s['away_points']}" for s in sets)
+        set_text = "" if _is_void_result(r["result_status"]) else \
+            " ".join(f"{s['home_points']}:{s['away_points']}" for s in sets)
         rows.append([cat["group_name"], _category_label(cat["name"], cat["gender"]), r["round_label"],
                      labels.get(r["home_actual"], ""), labels.get(r["away_actual"], ""),
                      set_text, _winner_text(r["result_status"], sets),
@@ -320,7 +330,8 @@ def export_record_sheet(ctx):
     team_width = 20 if maximum >= 5 else 28
     players_width = 25 if maximum >= 5 else 30
     set_cols = "".join(f"<th>第{i}局</th>" for i in range(1, maximum + 1))
-    played_sets = {s['set_no']: s for s in (info.get('sets') or [])}
+    played_sets = {} if _is_void_result(info.get("result_status")) else \
+        {s['set_no']: s for s in (info.get('sets') or [])}
     has_result = bool(played_sets)
 
     def score_cells(side):
@@ -386,14 +397,18 @@ def export_record_sheet_csv(ctx):
            ["轮次", info["round_label"], "场地", info.get("venue_name", "")],
            ["主队", info["home"]["label"], "客队", info["away"]["label"]],
            ["局次", "主队得分", "客队得分", "胜方"]]
-    for s in info.get("sets", []):
+    void = _is_void_result(info.get("result_status"))
+    sets = [] if void else info.get("sets", [])
+    for s in sets:
         out.append([f"第{s['set_no']}局", s["home_points"], s["away_points"],
                     _winner_side_text(s["winner_side"])])
-    if not info.get("sets"):
+    if not sets:
         for i in range(1, info['rules']['max_sets'] + 1):
             out.append([f"第{i}局", "", "", ""])
     out.append(["结果状态", info.get("result_status_name") or _result_status_text(info.get("result_status")),
                 "制表口径", info['rules_summary']])
+    if void:
+        out.append(["说明", "本场已取消/未完成，原局分作废", "", ""])
     return _csv_response(out, f"record_{match_id}.csv")
 
 

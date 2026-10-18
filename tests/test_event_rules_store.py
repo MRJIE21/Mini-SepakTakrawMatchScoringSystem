@@ -8,6 +8,7 @@ import unittest
 from app import db, team_rules_store as store
 from app.domain import team_rules as rules
 from app.errors import ApiError
+from helpers.backups import backups_root, find_backup
 
 
 class EventRulesMigrationTest(unittest.TestCase):
@@ -41,7 +42,8 @@ class EventRulesMigrationTest(unittest.TestCase):
         self.upgrade()
         current = store.event(self.conn, self.event)
         self.assertEqual((current['rules_state'], current['rules_revision'], current['rules']), ('unified', 7, value))
-        backup = Path(str(self.path) + '.before-event-team-rules-v2.db')
+        backup = find_backup(self.path, 'before-event-team-rules-v2')
+        self.assertIsNotNone(backup)
         saved = backup.read_bytes()
         old = sqlite3.connect(backup)
         try:
@@ -93,11 +95,13 @@ class EventRulesMigrationTest(unittest.TestCase):
         with self.assertRaises(ApiError): db.init_db(self.path)
         self.assertIsNone(db.q1(self.conn, 'SELECT v FROM settings WHERE k=?', (store.EVENT_MARKER,)))
         self.assertNotIn('team_rules_state', [r['name'] for r in self.conn.execute('PRAGMA table_info(events)')])
-        self.assertTrue(Path(str(self.path) + '.before-event-team-rules-v2.db').is_file())
+        self.assertIsNotNone(find_backup(self.path, 'before-event-team-rules-v2'))
 
     def test_invalid_existing_backup_is_not_overwritten(self):
         self.old_schema()
-        backup = Path(str(self.path) + '.before-event-team-rules-v2.db')
+        root = backups_root(self.path)
+        root.mkdir(parents=True, exist_ok=True)
+        backup = root / f'{self.path.stem}-before-event-team-rules-v2-00000000-000000-000000.db'
         backup.write_bytes(b'invalid backup; preserve me')
         with self.assertRaises((sqlite3.DatabaseError, RuntimeError)): db.init_db(self.path)
         self.assertEqual(backup.read_bytes(), b'invalid backup; preserve me')

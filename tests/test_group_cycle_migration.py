@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from app import db
+from helpers.backups import find_backup
 
 
 def build_legacy_database(path: Path):
@@ -65,8 +66,9 @@ class GroupDrawCycleMigrationTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM group_draws WHERE method='cycle'").fetchone()[0], 1)
         finally:
             conn.close()
-        snapshot = Path(str(path) + '.before-group-cycle-v1.sqlite')
-        self.assertTrue(snapshot.is_file(), '升级前应留快照')
+        snapshot = find_backup(path, 'before-group-cycle-v1')
+        self.assertIsNotNone(snapshot, '升级前应留快照')
+        self.assertTrue(snapshot.is_file())
         saved = sqlite3.connect(snapshot)
         try:
             self.assertNotIn("'cycle'", saved.execute(

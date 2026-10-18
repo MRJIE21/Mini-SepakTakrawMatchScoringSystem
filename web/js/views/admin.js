@@ -506,7 +506,7 @@ function renderCreateUser(load, signal) {
   const display = textInput('', { id: 'new-account-display-name', name: 'new_account_display_name',
     placeholder: '显示名称', autocomplete: 'off' });
   const role = selectInput([['admin', '赛事管理员'], ['organizer', '编排与成绩人员'],
-    ['recorder', '场地记录员'], ['viewer', '成绩查看者']], 'recorder');
+    ['recorder', '场地记录员'], ['viewer', '成绩查看者'], ['display_operator', '大屏操作员']], 'recorder');
   const password = h('input', { id: 'new-account-password', name: 'new_account_password',
     type: 'password', value: '', autocomplete: 'new-password', placeholder: '初始密码（至少 6 位）' });
   const events = eventScopeFields([], signal);
@@ -667,7 +667,7 @@ function eventScopeFields(selected, signal) {
 }
 function editScope(user, reload) {
   const scopes=eventScopeFields(user.event_ids);
-  const role=selectInput([['admin','赛事管理员'],['organizer','编排与成绩人员'],['recorder','场地记录员'],['viewer','成绩查看者']],user.role,{dataset:{field:'role'}});
+  const role=selectInput([['admin','赛事管理员'],['organizer','编排与成绩人员'],['recorder','场地记录员'],['viewer','成绩查看者'],['display_operator','大屏操作员']],user.role,{dataset:{field:'role'}});
   formDialog({title:'角色与赛事 · '+user.display_name, onClose:scopes.destroy, sections:[{body:h('div',field('角色',role),scopes.body)}],actions:[{label:'保存',primary:true,run:async({close})=>{
     await api.put('/api/users/'+user.id,{role:role.value,event_ids:scopes.values()}); close(); await reload();
   }}]});

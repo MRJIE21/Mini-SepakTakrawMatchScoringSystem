@@ -412,7 +412,19 @@ async function drawPlacements(container, cat, reload, refresh, client = scopedCl
     const pending = prows.filter((p) => p.status !== 'confirmed');
     if (pending.length) {
       panel.append(h('div.warn-box.mt',
-        `${pending.length} 项名次待确认，不计入学校团体总分。`));
+        `${pending.length} 项名次待核对/待确认，不计入学校团体总分。` +
+        '若刚完成成绩更正或重新确认小组名次，请按当前小组名次重新生成或手工复核。'));
+      if (cat.kind === 'team' && canWrite()) {
+        panel.append(h('div.row.mt', h('button.btn', {
+          onclick: async () => {
+            try {
+              const res = await client.post(`/api/categories/${cat.id}/placements/from-pools`, {});
+              toast(res.message || '已按当前小组名次生成项目名次', 'ok');
+              reload();
+            } catch (e) { toast(e.message, 'error'); }
+          },
+        }, '按当前小组名次重新生成名次')));
+      }
     }
   }
   if (!canWrite()) return;

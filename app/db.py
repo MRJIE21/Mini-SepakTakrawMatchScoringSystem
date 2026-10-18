@@ -249,14 +249,58 @@ def init_db(db_path: Path | str | None = None) -> None:
         from . import team_rules_store
         from . import individual_draw_store
         from . import individual_draw_session_store
+        from . import display_store
         individual_draw_store.backup_before_upgrade(conn)
         individual_draw_session_store.backup_before_upgrade(conn)
         team_rules_store.backup_before_upgrade(conn)
+        display_store.backup_before_upgrade(conn)
         conn.executescript(schema)
         _migrate(conn)
+        _migrate_user_roles(conn)
         _migrate_group_draw_method(conn)
     finally:
         conn.close()
+
+
+def _migrate_user_roles(conn: sqlite3.Connection) -> None:
+    """旧 users 表的 CHECK 不含 display_operator；SQLite 只能重建表。"""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+    if row is None or 'display_operator' in (row['sql'] or ''):
+        return
+    from .team_rules_store import _backup
+    _backup(conn, '.before-display-operator-role.db')
+    if conn.in_transaction:
+        raise RuntimeError('用户角色迁移必须在独立事务前执行')
+    conn.execute('PRAGMA foreign_keys=OFF')
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('''
+            CREATE TABLE users_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              username TEXT NOT NULL UNIQUE,
+              password_hash TEXT NOT NULL,
+              salt TEXT NOT NULL,
+              display_name TEXT NOT NULL DEFAULT '',
+              role TEXT NOT NULL CHECK (role IN ('admin','organizer','recorder','viewer','display_operator')),
+              active INTEGER NOT NULL DEFAULT 1,
+              snapshot_revision INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+        ''')
+        conn.execute('''INSERT INTO users_new
+            (id, username, password_hash, salt, display_name, role, active, snapshot_revision, created_at)
+            SELECT id, username, password_hash, salt, display_name, role, active, snapshot_revision, created_at
+            FROM users''')
+        conn.execute('DROP TABLE users')
+        conn.execute('ALTER TABLE users_new RENAME TO users')
+        conn.execute('COMMIT')
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute('ROLLBACK')
+        raise
+    finally:
+        conn.execute('PRAGMA foreign_keys=ON')
 
 
 def _migrate_group_draw_method(conn: sqlite3.Connection) -> None:
@@ -314,6 +358,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "matches": ["schedule_role TEXT NOT NULL DEFAULT ''", "schedule_revision INTEGER NOT NULL DEFAULT 1", "winner_rank INTEGER", "loser_rank INTEGER",
                     "reset_parent_id INTEGER REFERENCES matches(id)",
                     "reset_state TEXT NOT NULL DEFAULT 'none'", "reset_parent_version INTEGER"],
+        "display_config": ["poll_ms INTEGER NOT NULL DEFAULT 500 CHECK (poll_ms BETWEEN 100 AND 1000)"],
     }
     for table, columns in migrations.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}

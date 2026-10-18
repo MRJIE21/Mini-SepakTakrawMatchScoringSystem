@@ -1328,3 +1328,31 @@ tr.flash td { animation: rowflash 1400ms ease-out 1; }
   .schedule-stage-state > .row { margin-left:0; }
   .schedule-stages .btn { white-space:normal; text-align:left; }
 }
+
+/* 大屏控制台 */
+.display-slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.slot-card { border: 1px solid var(--line); border-radius: 12px; background: #f8fafd; padding: 10px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.slot-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.slot-card .input, .slot-card .select { width: 100%; min-width: 0; }
+@media (max-width: 760px) { .display-slots { grid-template-columns: 1fr; } }
+/* 大屏控制台布局优化 */
+.display-admin-workspace { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 14px; }
+.display-admin-controls, .display-admin-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.display-admin-controls .panel, .display-admin-main .panel { margin: 0; }
+.display-admin-controls .panel-head, .display-admin-main .panel-head { margin-bottom: 4px; }
+.display-slots-panel .panel-head { align-items: center; }
+.display-slots-panel .panel-head h3 { margin: 0; }
+.display-slots-panel .badge { flex: 0 0 auto; }
+.display-slots { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.slot-card { padding: 9px; gap: 6px; }
+.slot-card-head { font-size: 12px; }
+.slot-card .input, .slot-card .select { font-size: 13px; }
+.display-push-panel { position: sticky; bottom: 10px; z-index: 5; background: rgba(255, 255, 255, .97); backdrop-filter: blur(6px); box-shadow: 0 -2px 14px rgba(23, 43, 79, .10); }
+.display-push-panel .row { align-items: center; justify-content: space-between; }
+@media (max-width: 1100px) {
+  .display-admin-workspace { grid-template-columns: 1fr; }
+  .display-push-panel { position: static; box-shadow: none; }
+}
+@media (max-width: 760px) {
+  .display-slots { grid-template-columns: 1fr; }
+}

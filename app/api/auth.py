@@ -4,7 +4,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta
 from .. import config, db, security
-from ..errors import bad_request, unauthorized
+from ..errors import ApiError, bad_request, unauthorized
 from ..http_server import route
 
 
@@ -15,9 +15,21 @@ def login(ctx):
     password = body.get("password") or ""
     if not username or not password:
         raise bad_request("请填写用户名和密码")
+    ip = ctx.remote_addr or ""
+    retry = security.login_retry_after(ip, username)
+    if retry:
+        raise ApiError(429, "login_locked", f"登录尝试过于频繁，请在 {retry} 秒后重试",
+                       {"retry_after": retry})
     row = db.q1(ctx.conn, "SELECT * FROM users WHERE username=? AND active=1", (username,))
     if row is None or not security.verify_password(password, row['password_hash'], row['salt']):
+        retry = security.record_login_failure(ip, username)
+        security.audit(ctx.conn, None, "login_failed", "user", None,
+                       {"username": username, "ip": ip, "retry_after": retry})
+        if retry:
+            raise ApiError(429, "login_locked", f"登录尝试过于频繁，请在 {retry} 秒后重试",
+                           {"retry_after": retry})
         raise unauthorized("用户名或密码不正确")
+    security.clear_login_failures(ip, username)
     # PBKDF2 在写锁外执行；短事务内复核密码与 active，不能接受同时重置的旧密码。
     with db.tx(ctx.conn):
         fresh = db.q1(ctx.conn, "SELECT * FROM users WHERE id=? AND active=1", (row['id'],))

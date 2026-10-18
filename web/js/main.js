@@ -21,7 +21,7 @@ export const state = {
 const NAV = [
   { group: '赛事管理', items: ['dashboard', 'setup'] },
   { group: '比赛管理', items: ['workspace'] },
-  { group: '比赛执行', items: ['field'] },
+  { group: '比赛执行', items: ['field', 'display'] },
   { group: '成绩', items: ['school'] },
   { group: '系统维护', items: ['admin', 'users'] },
   { group: '个人', items: ['account'] },
@@ -220,6 +220,12 @@ async function renderRoute(force = false, scope = null) {
         signal: scope?.signal, requestContext: scope?.context, isCurrent: () => scopeCurrent(scope) });
     } catch (err) {
       if (err.cancelled || !scopeCurrent(scope)) return;
+      if (err instanceof ApiError && err.status === 403) {
+        toast(err.message || '当前角色不能查看该部分', 'error');
+        const home = roleHome();
+        if (location.hash !== home) location.hash = home;
+        return;
+      }
       clear(content);
       content.append(h('div.panel',
         h('h3', '页面加载失败'),
@@ -229,7 +235,9 @@ async function renderRoute(force = false, scope = null) {
           : err.offline
             ? h('div.warn-box.mt', '当前离线：本页需要联网读取数据。三人赛与个人赛记录页可用本机缓存继续记录。')
             : null,
-        h('button.btn.mt', { onclick: () => route(true) }, '重试')));
+        h('div.row.mt',
+          h('button.btn.mt', { onclick: () => route(true) }, '重试'),
+          h('button.btn.mt', { onclick: () => { location.hash = roleHome(); } }, '返回可用首页'))));
     }
     if (scopeCurrent(scope)) renderedHash = location.hash;
   } finally {
@@ -369,6 +377,7 @@ function roleHome() {
   const role = state.user ? state.user.role : '';
   if (role === 'recorder') return '#/field';
   if (role === 'viewer') return '#/school';
+  if (role === 'display_operator') return '#/display';
   return '#/dashboard';
 }
 
@@ -461,6 +470,7 @@ async function loadViews() {
     import('./views/bracket.js'),
     import('./views/school.js'),
     import('./views/admin.js'),
+    import('./views/displayAdmin.js'),
   ]);
 }
 

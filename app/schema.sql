@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   salt          TEXT NOT NULL,
   display_name  TEXT NOT NULL DEFAULT '',
-  role          TEXT NOT NULL CHECK (role IN ('admin','organizer','recorder','viewer')),
+  role          TEXT NOT NULL CHECK (role IN ('admin','organizer','recorder','viewer','display_operator')),
   active        INTEGER NOT NULL DEFAULT 1,
   snapshot_revision INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
@@ -520,3 +520,63 @@ CREATE TABLE IF NOT EXISTS match_schedule_meta (
   policy_json TEXT NOT NULL,
   batch_uid TEXT NOT NULL
 );
+
+-- 体育馆大屏：设备凭据与一次性配对码（注册库使用；赛事库中同样建表但不由赛事接口使用）。
+CREATE TABLE IF NOT EXISTS display_screens (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL,
+  event_id     INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  token_hash   TEXT NOT NULL UNIQUE,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  last_seen_at TEXT NOT NULL DEFAULT '',
+  revoked_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_display_screens_event ON display_screens(event_id, id);
+CREATE TABLE IF NOT EXISTS display_pair_codes (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_hash   TEXT NOT NULL UNIQUE,
+  device_hash TEXT NOT NULL,
+  screen_id   INTEGER REFERENCES display_screens(id) ON DELETE CASCADE,
+  event_id    INTEGER REFERENCES events(id) ON DELETE CASCADE,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  expires_at  TEXT NOT NULL,
+  claimed_at  TEXT,
+  token_once  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_display_pair_codes_expiry ON display_pair_codes(expires_at);
+
+-- 体育馆大屏：当前已推送配置（每赛事一行）。
+CREATE TABLE IF NOT EXISTS display_config (
+  id                 INTEGER PRIMARY KEY CHECK (id = 1),
+  layout             INTEGER NOT NULL DEFAULT 8,
+  mode               TEXT NOT NULL DEFAULT 'score' CHECK (mode IN ('score','announce','standby')),
+  slots_json         TEXT NOT NULL DEFAULT '[]',
+  visible_slots_json TEXT NOT NULL DEFAULT '[]',
+  announcement_title TEXT NOT NULL DEFAULT '',
+  announcement_body  TEXT NOT NULL DEFAULT '',
+  poll_ms            INTEGER NOT NULL DEFAULT 500 CHECK (poll_ms BETWEEN 100 AND 1000),
+  revision           INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  updated_at         TEXT NOT NULL DEFAULT '',
+  updated_by         INTEGER REFERENCES users(id)
+);
+
+-- 体育馆大屏：计分端实时快照（仅展示，不是正式成绩）。
+CREATE TABLE IF NOT EXISTS display_live (
+  match_id      INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+  revision      INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  event_seq     INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'live',
+  current_set   INTEGER,
+  home_points   INTEGER NOT NULL DEFAULT 0,
+  away_points   INTEGER NOT NULL DEFAULT 0,
+  home_sets     INTEGER NOT NULL DEFAULT 0,
+  away_sets     INTEGER NOT NULL DEFAULT 0,
+  sets_json     TEXT NOT NULL DEFAULT '[]',
+  lineup_hash   TEXT NOT NULL DEFAULT '',
+  recorder_id   INTEGER REFERENCES users(id),
+  draft_uid     TEXT NOT NULL DEFAULT '',
+  updated_at    TEXT NOT NULL DEFAULT '',
+  expires_at    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_display_live_expiry ON display_live(expires_at);
+

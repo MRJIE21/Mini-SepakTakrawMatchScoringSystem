@@ -22,6 +22,7 @@ import test_api
 from app import config, db, idempotency
 from app.api import individual_draw as api
 from app.domain.individual_draw import fingerprint
+from helpers.backups import find_backup
 
 
 class IndividualDrawApiTest(unittest.TestCase):
@@ -381,9 +382,10 @@ class IndividualDrawApiTest(unittest.TestCase):
         c.close()
         db.init_db(path)
         db.init_db(path)
-        backup = Path(str(path) + '.before-individual-draw-session-v1.sqlite')
+        backup = find_backup(path, 'before-individual-draw-session-v1')
+        self.assertIsNotNone(backup)
         self.assertTrue(backup.exists())
-        self.assertNotIn(backup, list(path.parent.glob('event_*.db')), '启动扫描不能升级备份文件')
+        self.assertEqual(backup.parent.name, 'backups', '升级备份必须移出赛事目录')
         restored = sqlite3.connect(backup)
         try:
             self.assertNotIn('individual_draw_sessions', {r[0] for r in restored.execute(

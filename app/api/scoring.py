@@ -319,6 +319,13 @@ def _stale_pools(conn, plan_id: int) -> list[dict]:
         db.run(conn, "UPDATE pool_rank_snapshots SET status='pending' WHERE pool_id=?", (pool["id"],))
         out.append({"pool_id": pool["id"], "pool_name": pool["name"],
                     "hint": "成绩变化后小组名次与已确认快照不一致，已退回待确认，请重新确认名次"})
+    if out:
+        plan = db.q1(conn, "SELECT category_id FROM plans WHERE id = ?", (plan_id,))
+        if plan:
+            from .standings import mark_manual_placements_for_review
+            mark_manual_placements_for_review(
+                conn, plan["category_id"],
+                "成绩变化后小组名次失效，项目名次需重新核对")
     return out
 
 

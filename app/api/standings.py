@@ -284,12 +284,14 @@ def confirm_pool(ctx):
         if after["base_results"] != data["base_results"]:
             raise conflict("小组签位成员已更新，请重新加载排名并确认", code="ranking_changed")
         revalidated = revalidate_derived_placements(ctx.conn, plan["category_id"])
+        manual_review = review_manual_placements_after_pool_confirm(
+            ctx.conn, plan["category_id"], confirmed)
     security.audit(ctx.conn, ctx.user, "confirm_pool", "pool", pool["id"],
                    {"ranks": [s[0] for s in snapshot], "forced": False,
-                    "unfinished_matches": []})
+                    "unfinished_matches": [], "manual_review": manual_review})
     return {"message": f"已确认 {len(snapshot)} 个名次",
             "affected": result["affected"],
-            "placements": revalidated, "standings": after}
+            "placements": revalidated, "manual_review": manual_review, "standings": after}
 
 
 def _validate_resolutions(raw, data, pool):
@@ -430,6 +432,57 @@ def revalidate_derived_placements(conn, category_id: int) -> dict:
             updated += 1
     recompute_category_points(conn, category_id)
     return {"updated": updated, "invalidated": invalidated_items, "conflicts": conflicts}
+
+
+def _confirmed_manual_placements(conn, category_id):
+    return db.q(conn,
+                """SELECT * FROM placements WHERE category_id = ? AND status = 'confirmed'
+                     AND source NOT IN ('auto','standings','individual') ORDER BY rank_no, id""",
+                (category_id,))
+
+
+def mark_manual_placements_for_review(conn, category_id: int, reason: str) -> list[dict]:
+    """成绩更正后，依赖旧小组名次的人工项目名次必须退出正式口径。
+
+    只标记 team 项目的人工/现场确认名次；个人赛名次与淘汰赛自动推导名次由各自
+    流程处理。保留原 rank_no 作为提示，但 pending 不计入学校总分与正式公告。
+    """
+    cat = category_context(conn, category_id)
+    if cat["kind"] != "team":
+        return []
+    changed = []
+    for row in _confirmed_manual_placements(conn, category_id):
+        db.update(conn, "placements", row["id"], {
+            "status": "pending", "note": reason, "version": row["version"] + 1,
+            "confirmed_by": None, "confirmed_at": None})
+        changed.append({"participation_id": row["participation_id"],
+                        "previous_rank": row["rank_no"], "reason": reason})
+    if changed:
+        recompute_category_points(conn, category_id)
+    return changed
+
+
+def review_manual_placements_after_pool_confirm(conn, category_id: int, pool) -> list[dict]:
+    """小组名次重新确认后，把仍与快照冲突的人工名次退回待核对。"""
+    cat = category_context(conn, category_id)
+    if cat["kind"] != "team" or (pool["rank_from"] or 1) != 1:
+        return []
+    snapshots = {row["participation_id"]: row["rank_no"] for row in db.q(
+        conn, "SELECT participation_id, rank_no FROM pool_rank_snapshots "
+              "WHERE pool_id = ? AND status = 'confirmed'", (pool["id"],))}
+    changed = []
+    for row in _confirmed_manual_placements(conn, category_id):
+        expected = snapshots.get(row["participation_id"])
+        if expected is not None and row["rank_no"] != expected:
+            db.update(conn, "placements", row["id"], {
+                "status": "pending",
+                "note": f"小组名次已重新确认（现第{expected}名），项目名次需重新核对",
+                "version": row["version"] + 1, "confirmed_by": None, "confirmed_at": None})
+            changed.append({"participation_id": row["participation_id"],
+                            "previous_rank": row["rank_no"], "expected_rank": expected})
+    if changed:
+        recompute_category_points(conn, category_id)
+    return changed
 
 
 @route("GET", r"/api/categories/(?P<category_id>\d+)/placements")
@@ -574,6 +627,56 @@ def auto_placements(ctx):
                    {"count": saved, "confirm": confirm})
     return {"saved": saved, "confirmed": confirm, "placements": derived, "conflicts": conflicts,
             "notes": notes + ["未列出的名次需通过评次赛或现场确认录入，系统不会自动补造"]}
+
+
+@route("POST", r"/api/categories/(?P<category_id>\d+)/placements/from-pools", roles=ORG)
+@atomic_result
+def placements_from_pools(ctx):
+    """单组循环项目的现场名次一键按已确认小组名次重生成。
+
+    仅适用于恰好一个 confirmed 的 round_robin 小组、且没有淘汰/名次赛的项目；
+    多组或含淘汰的项目必须人工核对，避免系统替裁判做跨组排序。
+    """
+    category_id = int(ctx.params["category_id"])
+    cat = category_context(ctx.conn, category_id)
+    if cat["kind"] != "team":
+        raise bad_request("个人赛名次请使用个人赛成绩确认")
+    plan = effective_plan(ctx.conn, category_id)
+    if plan is None:
+        raise bad_request("该项目尚未建立编排方案")
+    stages = db.q(ctx.conn, "SELECT * FROM stages WHERE plan_id = ? ORDER BY seq", (plan["id"],))
+    if len(stages) != 1 or stages[0]["kind"] != "round_robin":
+        raise conflict("仅适用于单组循环项目；多组或含淘汰/名次赛的项目请手工核对",
+                       code="not_single_pool")
+    pools = db.q(ctx.conn, "SELECT * FROM pools WHERE stage_id = ? AND kind = 'group' ORDER BY seq",
+                 (stages[0]["id"],))
+    if len(pools) != 1:
+        raise conflict("仅适用于单组循环项目；多组项目请手工核对", code="not_single_pool")
+    pool = pools[0]
+    if pool["status"] != "confirmed":
+        raise conflict("请先确认小组名次，再生成项目名次", code="pool_not_confirmed")
+    snapshot = db.q(ctx.conn,
+                    "SELECT * FROM pool_rank_snapshots WHERE pool_id = ? AND status = 'confirmed' "
+                    "ORDER BY rank_no", (pool["id"],))
+    if not snapshot:
+        raise conflict("小组名次快照不存在，请重新确认小组名次", code="pool_not_confirmed")
+    with db.tx(ctx.conn):
+        db.run(ctx.conn, "DELETE FROM placements WHERE category_id = ? AND source <> 'individual'",
+               (category_id,))
+        for row in snapshot:
+            db.insert(ctx.conn, "placements", {
+                "category_id": category_id, "participation_id": row["participation_id"],
+                "rank_no": row["rank_no"], "status": "confirmed", "source": "standings",
+                "note": f"{pool['name']}名次确认", "confirmed_by": ctx.user["id"],
+                "confirmed_at": db.now(ctx.conn)})
+        recompute_category_points(ctx.conn, category_id)
+    security.audit(ctx.conn, ctx.user, "placements_from_pools", "category", category_id,
+                   {"pool_id": pool["id"], "count": len(snapshot)})
+    placements = db.q(ctx.conn,
+                      "SELECT id, participation_id, rank_no, status, source, note FROM placements "
+                      "WHERE category_id = ? ORDER BY rank_no, id", (category_id,))
+    return {"message": f"已按小组名次生成 {len(snapshot)} 个项目名次",
+            "placements": [dict(row) for row in placements]}
 
 
 def _ranks_from_elimination(conn, pool, notes: list[str]) -> list[dict]:

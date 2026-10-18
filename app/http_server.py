@@ -56,7 +56,7 @@ def json_response(data, status: int = 200) -> Response:
 
 
 class Context:
-    def __init__(self, conn, user, body, query, params, headers, method, path):
+    def __init__(self, conn, user, body, query, params, headers, method, path, remote_addr=""):
         self.conn = conn
         self.user = user
         self.body = body
@@ -65,6 +65,7 @@ class Context:
         self.headers = headers
         self.method = method
         self.path = path
+        self.remote_addr = remote_addr or ""
 
     def arg(self, name, default=None):
         vals = self.query.get(name)
@@ -256,6 +257,25 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             token = auth[7:].strip()
+        # Display devices use a separate read-only credential; they must never
+        # reach normal business routes.
+        display_token = auth[8:].strip() if auth.lower().startswith("display ") else ""
+        display_screen = None
+        if display_token:
+            from . import display_store
+            display_screen = display_store.screen_for_token(registry_conn, display_token)
+            if display_screen is None:
+                raise ApiError(401, "display_unauthorized", "大屏凭据无效或已撤销")
+            if method == "GET" and path == "/api/display/state":
+                from . import display_state
+                try:
+                    event_conn = db.get_event_conn(int(display_screen["event_id"]))
+                except (FileNotFoundError, ValueError):
+                    raise ApiError(404, "event_database_not_found", "赛事数据库不存在") from None
+                with db.read_tx(event_conn):
+                    state = display_state.build_state(event_conn, display_screen)
+                return json_response({"ok": True, **state})
+            raise ApiError(403, "display_forbidden", "大屏凭据只能读取展示状态")
         # 不接受 URL 查询串里的令牌：避免被浏览器历史、日志与 Referer 泄露
         user = security.user_for_token(registry_conn, token)
 
@@ -310,7 +330,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not target_deployment or identity["deployment_id"] != target_deployment['v']:
                         raise ApiError(409, "deployment_identity_mismatch", "提交包部署身份与当前部署不一致")
             ctx = Context(conn, user, body, query, match.groupdict(),
-                          dict(self.headers), method, path)
+                          dict(self.headers), method, path,
+                          self.client_address[0] if self.client_address else "")
             from . import access
             if not public:
                 access.authorize(ctx, scope)
@@ -460,10 +481,46 @@ def _listen(host: str, port: int | None = None):
         raise original
 
 
+EVENT_DB_NAME = re.compile(r'event_\d+\.db')
+
+
+def init_event_databases() -> list:
+    """只初始化真正的赛事库；备份/临时文件不得进入迁移流程。
+
+    旧版本把升级前备份命名为 ``event_N.db.before-*.db`` 放在同一目录，
+    启动 glob ``event_*.db`` 会把它当成赛事库反复迁移。现在严格匹配
+    ``event_<数字>.db``，其它文件只告警并跳过。
+    """
+    if not config.EVENTS_DIR.is_dir():
+        return []
+    canonical, stray = [], []
+    for path in sorted(config.EVENTS_DIR.iterdir()):
+        if not path.is_file():
+            continue
+        if EVENT_DB_NAME.fullmatch(path.name):
+            canonical.append(path)
+        else:
+            stray.append(path)
+    if stray:
+        print(f"提示：赛事目录中有 {len(stray)} 个非赛事库文件（备份/临时文件），已跳过、不会被迁移：")
+        for path in stray[:5]:
+            print(f"  - {path.name}")
+        if len(stray) > 5:
+            print(f"  … 其余 {len(stray) - 5} 个同类文件")
+        print(f"  确认无用后可人工移出 {config.EVENTS_DIR} 或删除；升级前备份现在保存在 {config.backups_dir()}。")
+    for event_path in canonical:
+        try:
+            db.init_db(event_path)
+        except sqlite3.DatabaseError as exc:
+            raise RuntimeError(
+                f"赛事数据库损坏：{event_path}；请从 {config.backups_dir()} 恢复备份，"
+                f"或移出该文件后重启服务。") from exc
+    return canonical
+
+
 def serve(host: str | None = None, port: int | None = None):
     db.init_db()
-    for event_path in config.EVENTS_DIR.glob('event_*.db'):
-        db.init_db(event_path)
+    init_event_databases()
     conn = db.connect()
     try:
         initial_password = security.ensure_default_users(conn)
@@ -504,4 +561,4 @@ def serve(host: str | None = None, port: int | None = None):
 
 def load_routes():
     """导入所有接口模块以注册路由。"""
-    from .api import auth, catalog, scheduling, schedule, auto_schedule, individual_draw, matches, scoring, standings, exports, admin, imports, school_registration, school_import, group_draw  # noqa: F401
+    from .api import auth, catalog, scheduling, schedule, auto_schedule, individual_draw, matches, scoring, standings, exports, admin, imports, school_registration, school_import, group_draw, display  # noqa: F401

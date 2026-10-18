@@ -10,6 +10,7 @@ import {
 } from '../ui.js';
 import { addPoint, summarize, undoEvent, isSetOpen, SET_CAP } from '../scoring.js';
 import { buildMatchPayload } from '../submit.js';
+import { syncDisplaySnapshot, stopDisplaySync } from '../displaySync.js';
 import { DEFAULT_RULES, normalizeRules, rulesSummary, sameRules, setsToWin } from '../teamRules.js';
 
 const canScore = () => ['admin', 'organizer', 'recorder'].includes(state.user.role);
@@ -390,7 +391,12 @@ async function renderConsole(matchId, container, params) {
       let saved = null, threw = false;
       try { saved = await localStore.put(snapshot); } catch (error) { threw = true; toast(error.message, 'error'); }
       storageFailed = !saved;
-      if (saved) { draft.revision = saved.revision; draft.updated_at = saved.updated_at; lastSavedAt = saved.updated_at; }
+      if (saved) {
+        draft.revision = saved.revision;
+        draft.updated_at = saved.updated_at;
+        lastSavedAt = saved.updated_at;
+        syncDisplaySnapshot(draft, match);
+      }
       else if (!threw) {
         // A failed write alone does not prove another page changed this draft.
         // Keep transient failures retryable, while retaining the CAS fence.
@@ -581,11 +587,13 @@ async function submitMatch(match, draft, draw, persist, params) {
     if (!await localStore.finalize(draft, res.result.receipt)) {
       draft.status = 'failed';
       draft.submission_unknown = true;
+      stopDisplaySync();
       await persist();
       toast('服务器已接收，本机清理失败；请重试确认', 'error');
       return;
     }
     draft.status = 'submitted';
+    stopDisplaySync();
     toast(res.result.message || '成绩已提交并确认', 'ok');
     if (res.result.affected && res.result.affected.length) {
       modal({

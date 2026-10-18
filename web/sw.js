@@ -1,10 +1,10 @@
 /* 离线页面资源：在线时优先取最新页面，断网时回退到已缓存副本（设计大纲 9.1、9.2）。
    比赛数据不在这里缓存：提交结果以服务器为准，未提交记录保存在 IndexedDB。 */
-const CACHE = 'stss-shell-v73';
+const CACHE = 'stss-shell-v75';
 const SHELL = [
-  '/', '/index.html', '/css/app.css', '/manifest.webmanifest',
+  '/', '/index.html', '/display.html', '/css/app.css', '/manifest.webmanifest',
   '/js/main.js', '/js/api.js', '/js/store.js', '/js/ui.js', '/js/labels.js', '/js/scoring.js',
-  '/js/dateTime.js',
+  '/js/dateTime.js', '/js/display.js', '/js/displaySync.js',
   '/js/workspaceContext.js',
   '/js/autoSchedule.js',
   '/js/individualDraw.js',
@@ -23,7 +23,7 @@ const SHELL = [
   '/js/views/field.js',
   '/js/views/scoring.js', '/js/views/matchAdmin.js', '/js/views/individual.js',
   '/js/views/review.js', '/js/views/results.js', '/js/views/bracket.js',
-  '/js/views/school.js', '/js/views/admin.js',
+  '/js/views/school.js', '/js/views/admin.js', '/js/views/displayAdmin.js',
 ];
 
 self.addEventListener('install', (event) => {
@@ -42,6 +42,7 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;   // 接口不缓存
+  const displayShell = url.pathname === '/display.html' || url.pathname === '/js/display.js';
 
   event.respondWith(
     fetch(event.request).then((resp) => {
@@ -50,6 +51,7 @@ self.addEventListener('fetch', (event) => {
         caches.open(CACHE).then((cache) => cache.put(event.request, copy));
       }
       return resp;
-    }).catch(() => caches.match(event.request).then((hit) => hit || caches.match('/index.html'))),
+    }).catch(() => caches.match(event.request).then((hit) => hit
+      || (displayShell ? caches.match('/display.html') : caches.match('/index.html')))),
   );
 });

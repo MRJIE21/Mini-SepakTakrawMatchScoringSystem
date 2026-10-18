@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>体育馆大屏</title>
+<style>
+  :root{--line:rgba(160,190,230,.16);--muted:#93a9c6;--blue:#7fb2ff;--orange:#ffb27f;
+    --gold:#f4c95d;--green:#35d07f;--radius:16px}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:#07101f;color:#f2f6fc;
+    font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .hidden{display:none!important}
+  .screen{height:100vh;padding:.35rem .45rem;position:relative;
+    background:radial-gradient(ellipse at 50% -10%,rgba(80,160,255,.16),transparent 55%),#07101f}
+  .grid{height:100%;display:grid;gap:.45rem;min-height:0}
+  .grid[data-layout="8"]{grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(2,1fr)}
+  .grid[data-layout="4"]{grid-template-columns:repeat(2,1fr);grid-template-rows:repeat(2,1fr)}
+  .grid[data-layout="3"]{grid-template-columns:repeat(3,1fr);grid-template-rows:1fr}
+  .grid[data-layout="2"]{grid-template-columns:repeat(2,1fr);grid-template-rows:1fr}
+  .grid[data-layout="1"]{grid-template-columns:1fr;grid-template-rows:1fr}
+  .grid.empty{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:1.1rem}
+
+  .tile{position:relative;min-height:0;display:flex;flex-direction:column;gap:.2rem;
+    padding:.4rem .5rem .35rem;border-radius:var(--radius);overflow:hidden;
+    border:1px solid rgba(255,255,255,.07);
+    background:linear-gradient(90deg,rgba(127,178,255,.20),rgba(127,178,255,.03) 32%,transparent 48%,transparent 52%,rgba(255,178,127,.03) 68%,rgba(255,178,127,.20)),radial-gradient(circle at 50% 18%,#203b60 0,#101d31 43%,#0b1422 100%);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.04)}
+  .tile-top{display:flex;align-items:center;justify-content:space-between;gap:.4rem;flex:0 0 auto}
+  .court{font-size:.58rem;font-weight:800;color:#d7e6f8;letter-spacing:.03em;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .court .round{font-weight:500;color:rgba(255,255,255,.55);font-size:.48rem;margin-left:.35rem}
+  .chip{font-size:.5rem;font-weight:700;padding:.12rem .38rem;border-radius:999px;
+    border:1px solid transparent;white-space:nowrap}
+  .chip.live{color:#8ff2bd;background:rgba(53,208,127,.12);border-color:rgba(53,208,127,.35)}
+  .chip.upcoming{color:#ffd98a;background:rgba(244,201,93,.10);border-color:rgba(244,201,93,.32)}
+  .chip.finished{color:#c2cfdf;background:rgba(160,180,205,.10);border-color:rgba(160,180,205,.28)}
+  .chip.stale{color:#ffbd7a;background:rgba(255,159,67,.12);border-color:rgba(255,159,67,.4)}
+  .chip.empty{color:var(--muted);background:rgba(143,164,191,.08);border-color:rgba(143,164,191,.22)}
+  .board{flex:1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.7fr) minmax(0,1fr);
+    align-items:center;gap:.2rem;min-height:0}
+  .team{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.08rem;min-width:0}
+  .team .name{font-size:1.7rem;font-weight:900;line-height:1.15;text-align:center;
+    overflow-wrap:anywhere;max-width:100%}
+  .team .points{font-size:7.2rem;font-weight:900;line-height:.88;font-variant-numeric:tabular-nums;
+    letter-spacing:-.05em}
+  .team.home .points{color:var(--blue)}
+  .team.away .points{color:var(--orange)}
+  .mid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.15rem;min-width:0}
+  .series{display:flex;align-items:baseline;justify-content:center;gap:.2rem;line-height:1}
+  .series .val{font-size:2rem;font-weight:900;font-variant-numeric:tabular-nums}
+  .series .home{color:#9bc4ff}.series .away{color:#ffc09a}
+  .series .sep{font-size:.95rem;color:rgba(255,255,255,.45)}
+  .setlabel{font-size:.48rem;color:rgba(255,255,255,.62);letter-spacing:.08em;white-space:nowrap}
+  .sets{display:flex;justify-content:center;gap:.18rem;flex-wrap:wrap;max-width:100%;margin-top:.1rem}
+  .set-pill{padding:.06rem .2rem;border-radius:4px;background:#23324a;font-size:.4rem;font-weight:700;
+    color:rgba(255,255,255,.9);white-space:nowrap}
+  .set-pill.done{background:#14532d}
+  .set-pill.live{background:#1d4ed8;box-shadow:0 0 0 1px rgba(127,178,255,.28)}
+  .tile.status-stale{border-color:rgba(255,159,67,.45)}
+  .tile.status-stale .team .points{color:#ffbd7a}
+  .tile.status-unassigned{opacity:.65}
+
+  .grid[data-layout="1"] .tile{border:0;border-radius:0;padding:1rem 1.6rem .8rem}
+  .grid[data-layout="1"] .court{font-size:1.35rem}
+  .grid[data-layout="1"] .court .round{font-size:1rem;margin-left:.5rem}
+  .grid[data-layout="1"] .chip{font-size:.95rem;padding:.42rem .9rem}
+  .grid[data-layout="1"] .board{grid-template-columns:minmax(0,1fr) minmax(0,.5fr) minmax(0,1fr);gap:1rem}
+  .grid[data-layout="1"] .team .name{font-size:3.4rem}
+  .grid[data-layout="1"] .team .points{font-size:14rem}
+  .grid[data-layout="1"] .series .val{font-size:3.4rem}
+  .grid[data-layout="1"] .series .sep{font-size:1.8rem}
+  .grid[data-layout="1"] .setlabel{font-size:1.1rem}
+  .grid[data-layout="1"] .set-pill{font-size:.95rem;padding:.2rem .58rem}
+  .grid[data-layout="1"] .sets{gap:.35rem;margin-top:.35rem}
+  .grid[data-layout="2"] .team .name{font-size:2.1rem}
+  .grid[data-layout="2"] .team .points{font-size:8.2rem}
+  .grid[data-layout="2"] .series .val{font-size:2.4rem}
+  .grid[data-layout="3"] .team .name{font-size:1.75rem}
+  .grid[data-layout="3"] .team .points{font-size:6.4rem}
+  .grid[data-layout="3"] .series .val{font-size:2rem}
+  .grid[data-layout="4"] .team .name{font-size:1.9rem}
+  .grid[data-layout="4"] .team .points{font-size:7rem}
+  .grid[data-layout="4"] .series .val{font-size:2.2rem}
+
+  .reconnect{position:absolute;left:50%;top:.6rem;transform:translateX(-50%);z-index:20;
+    background:rgba(255,159,67,.16);border:1px solid rgba(255,159,67,.5);color:#ffd0a3;
+    padding:.35rem .85rem;border-radius:999px;font-size:.7rem;font-weight:700;white-space:nowrap}
+  .overlay{position:absolute;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;padding:6rem;gap:1.4rem;
+    background:radial-gradient(ellipse at 50% 20%,rgba(90,169,255,.18),transparent 58%),#07101f}
+  .overlay .eyebrow{font-size:1rem;letter-spacing:.35em;color:var(--gold);font-weight:800}
+  .overlay h1{font-size:4.6rem;margin:0;font-weight:900;line-height:1.15}
+  .overlay p{font-size:1.5rem;color:#c9d8ea;margin:0;max-width:70ch;line-height:1.7}
+  .overlay .hint{font-size:.85rem;color:var(--muted);margin-top:.7rem}
+
+  .pairing{height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem;
+    background:radial-gradient(ellipse at 50% 20%,rgba(90,169,255,.18),transparent 58%),#07101f}
+  .pair-card{width:min(92vw,650px);border:1px solid var(--line);border-radius:22px;
+    background:rgba(13,24,42,.92);padding:2.2rem 2rem;text-align:center}
+  .pair-card h1{margin:0;font-size:1.6rem;font-weight:900}
+  .pair-card p{color:var(--muted);font-size:.9rem;line-height:1.7;margin:.5rem 0 0}
+  .pair-code{font-size:5.4rem;font-weight:900;letter-spacing:.35em;color:var(--gold);
+    margin:1.4rem 0 .6rem;font-variant-numeric:tabular-nums;text-indent:.35em}
+  .pair-hint{font-size:.8rem;color:var(--muted)}
+  .pair-actions{display:flex;gap:.6rem;justify-content:center;margin-top:1.4rem}
+  .pair-actions button{cursor:pointer;border:1px solid var(--line);background:#152238;color:#dbe7f7;
+    border-radius:10px;padding:.55rem 1rem;font-size:.8rem}
+  .pair-status{font-size:.8rem;color:#ffd98a;margin-top:.8rem;min-height:1.2em}
+</style>
+</head>
+<body>
+<div id="pairing" class="pairing hidden">
+  <div class="pair-card">
+    <h1>体育馆大屏配对</h1>
+    <p>请在管理员控制台的“大屏”页面输入下面的配对码。<br>配对成功后本页会自动进入比分展示。</p>
+    <div class="pair-code" id="pair-code">------</div>
+    <div class="pair-hint">配对码 10 分钟内有效；大屏只读取展示状态，不能修改比赛。</div>
+    <div class="pair-status" id="pair-status"></div>
+    <div class="pair-actions"><button id="pair-refresh" type="button">换一个配对码</button></div>
+  </div>
+</div>
+
+<div id="screen" class="screen hidden">
+  <div id="grid" class="grid" data-layout="8"></div>
+  <div id="reconnect" class="reconnect hidden">连接中断，正在重连…</div>
+  <div id="overlay" class="overlay hidden">
+    <div class="eyebrow" id="ov-eyebrow">赛事公告</div>
+    <h1 id="ov-title"></h1>
+    <p id="ov-text"></p>
+    <div class="hint" id="ov-hint"></div>
+  </div>
+</div>
+<script type="module" src="/js/display.js"></script>
+</body>
+</html>

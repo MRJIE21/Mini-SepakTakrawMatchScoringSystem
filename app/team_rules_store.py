@@ -23,24 +23,9 @@ def backup_before_upgrade(conn):
 
 
 def _backup(conn, suffix):
-    path = conn.execute('PRAGMA database_list').fetchone()['file']
-    if not path:
-        return
-    backup = Path(path + suffix)
-    if backup.exists():
-        saved = sqlite3.connect(backup.resolve().as_uri() + '?mode=ro', uri=True)
-        try:
-            if (saved.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or
-                    not saved.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='categories'").fetchone()):
-                raise RuntimeError('升级前备份无效，请保留文件并核对：' + str(backup))
-        finally:
-            saved.close()
-        return  # Preserve a verified first pre-upgrade backup on retry.
-    target = sqlite3.connect(backup)
-    try:
-        conn.backup(target)
-    finally:
-        target.close()
+    """Write a validated pre-upgrade snapshot under config.BACKUPS_DIR."""
+    from . import backup
+    return backup.online_backup(conn, suffix)
 
 
 def install(conn):

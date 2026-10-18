@@ -181,7 +181,11 @@ class ExportFormatTest(unittest.TestCase):
                 'away_participation': detail['away']['participation_id'],
                 'event_identity': dict(self.event_identity)})
             sheet = self.text(f'/api/exports/record-sheet.html?match_id={match_id}')
-            self.assertIn('本场无逐局比分（弃权/未完成/取消），结果以系统记录为准。', sheet)
+            if status in ('unfinished', 'cancelled'):
+                self.assertIn('本场已取消/未完成，原局分作废；结果以系统记录为准。', sheet)
+                self.assertNotIn('本表已填入系统记录的局分与结果', sheet)
+            else:
+                self.assertIn('本场无逐局比分（弃权/未完成/取消），结果以系统记录为准。', sheet)
             self.assertNotIn('本表为空白记录表', sheet)
             self.assertIn(f'结果状态：{label}', sheet)
             self.assertIn('☑', sheet)

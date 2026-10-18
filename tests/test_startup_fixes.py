@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,14 +100,15 @@ class StartupFixesTest(unittest.TestCase):
 
     def test_startup_displays_both_adapter_urls(self):
         server = SimpleNamespace(server_port=8000, serve_forever=Mock(side_effect=KeyboardInterrupt), server_close=Mock())
-        with patch('app.http_server.db.init_db'), patch('app.http_server.db.connect'), \
-                patch.object(config, 'EVENTS_DIR', SimpleNamespace(glob=lambda _: [])), \
-                patch.object(config, 'HOST', '0.0.0.0'), \
-                patch('app.http_server.security.ensure_default_users', return_value=None), \
-                patch('app.http_server._listen', return_value=server), \
-                patch('app.http_server._local_ips', return_value=['10.145.142.5', '10.153.172.225']):
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                serve()
+        with tempfile.TemporaryDirectory(prefix='stss-startup-events-') as events:
+            with patch('app.http_server.db.init_db'), patch('app.http_server.db.connect'), \
+                    patch.object(config, 'EVENTS_DIR', Path(events)), \
+                    patch.object(config, 'HOST', '0.0.0.0'), \
+                    patch('app.http_server.security.ensure_default_users', return_value=None), \
+                    patch('app.http_server._listen', return_value=server), \
+                    patch('app.http_server._local_ips', return_value=['10.145.142.5', '10.153.172.225']):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    serve()
         self.assertIn('http://10.145.142.5:8000/', output.getvalue())
         self.assertIn('http://10.153.172.225:8000/', output.getvalue())
         self.assertIn('Wi-Fi', output.getvalue())
