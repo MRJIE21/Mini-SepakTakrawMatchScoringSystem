@@ -16,16 +16,22 @@ def sha(path: Path) -> str:
 class VersionManifestTest(unittest.TestCase):
     def test_version_and_cache_are_bumped(self):
         package = json.loads((PRODUCT / 'package.json').read_text(encoding='utf-8'))
-        self.assertEqual(package['version'], '1.3.16')
+        self.assertEqual(package['version'], '1.3.18')
         sw = (PRODUCT / 'web/sw.js').read_text(encoding='utf-8')
-        self.assertIn("const CACHE = 'stss-shell-v77'", sw)
+        self.assertIn("const CACHE = 'stss-shell-v79'", sw)
         readme = (PRODUCT / 'README.md').read_text(encoding='utf-8')
-        self.assertIn('1.3.16', readme.splitlines()[0])
+        self.assertIn('1.3.18', readme.splitlines()[0])
         changelog = (PRODUCT / 'CHANGELOG.md').read_text(encoding='utf-8')
-        self.assertIn('## 1.3.16', changelog)
+        self.assertIn('## 1.3.18', changelog)
         usage = (PRODUCT / 'docs/体育馆大屏使用说明-20261017.md').read_text(encoding='utf-8')
-        self.assertIn('1.3.16', usage)
-        self.assertIn('stss-shell-v77', usage)
+        self.assertIn('1.3.18', usage)
+        self.assertIn('stss-shell-v79', usage)
+        template_note = (PRODUCT / 'docs/报名模板填写说明-20261018.md').read_text(encoding='utf-8')
+        self.assertIn('1.3.18', template_note)
+        self.assertIn('stss-shell-v79', template_note)
+        fix_note = (PRODUCT / 'docs/报名页错误反馈修复-20261018.md').read_text(encoding='utf-8')
+        self.assertIn('1.3.17', fix_note)
+        self.assertIn('stss-shell-v78', fix_note)
 
     def test_role_documentation_matches_readonly_setup_roles(self):
         readme = (PRODUCT / 'README.md').read_text(encoding='utf-8')

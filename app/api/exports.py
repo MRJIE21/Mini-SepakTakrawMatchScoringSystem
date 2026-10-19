@@ -111,6 +111,16 @@ def _safe_cell(value) -> str:
     return f"'{text}" if text[:1] in _FORMULA_PREFIXES else text
 
 
+def _download_disposition(filename: str) -> str:
+    """中文文件名：同时给出 UTF-8 filename* 与 ASCII 回退，避免代理/旧浏览器乱码。"""
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in '"\\' else "_" for ch in filename) or "download"
+    if any(ord(ch) > 126 for ch in filename):
+        from urllib.parse import quote
+        return ("attachment; filename*=UTF-8''" + quote(filename, safe="") +
+                f'; filename="{fallback}"')
+    return f'attachment; filename="{filename}"'
+
+
 def _csv_response(rows: list[list], filename: str) -> Response:
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -118,7 +128,7 @@ def _csv_response(rows: list[list], filename: str) -> Response:
         writer.writerow([_safe_cell(cell) for cell in row])
     data = "\ufeff" + buf.getvalue()          # BOM 便于 Excel 打开中文
     return Response(data.encode("utf-8"), 200, "text/csv; charset=utf-8",
-                    {"Content-Disposition": f'attachment; filename="{filename}"'})
+                    {"Content-Disposition": _download_disposition(filename)})
 
 
 @route("GET", r"/api/exports/schedule.csv")

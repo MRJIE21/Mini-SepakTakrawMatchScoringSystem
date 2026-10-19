@@ -71,8 +71,14 @@ def normalize_members(conn, body: dict, school_id: int, cat: dict) -> tuple[list
                                  f"{GENDER_NAMES[cat['gender']]}项目不符")
             continue
         seen.add(athlete_id)
+        # 常用号码是自由档案字段；只有合法的 1—20 才能回填本项目号码，
+        # 否则会在 validate_categories 里以另一条文案拒绝用户从未填写的值。
+        fallback = str(athlete["jersey_no"] or "").strip()
+        if fallback and not (fallback.isdecimal() and 1 <= int(fallback) <= 20
+                             and str(int(fallback)) == fallback):
+            fallback = ""
         members.append({"athlete_id": athlete_id,
-                        "jersey_no": jersey or (athlete["jersey_no"] or "")})
+                        "jersey_no": jersey or fallback})
     if errors:
         raise invalid_fields(errors["members"], errors)
     if len(members) > 6:
