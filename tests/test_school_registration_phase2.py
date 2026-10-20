@@ -81,6 +81,25 @@ class SchoolPhase2Test(unittest.TestCase):
         result = self.req('POST', self.path+'import-preview', dict(self.payload(), csv_text=text))
         self.assertFalse(result['errors']); self.assertEqual(result['payload']['people'], []); self.assertEqual(result['payload']['projects'], [])
 
+    def test_formula_escaped_name_ambiguity_requires_id(self):
+        self.req('PUT', f'/api/athletes/{self.a}', {'name': '=甲'})
+        literal = self.person("'=甲")
+        before = self.snapshot()
+        result = self.imported([self.row(name="'=甲")])
+        self.assertTrue(result['errors'])
+        self.assertIn('运动员ID', result['errors'][0]['message'])
+        self.assertEqual(before, self.snapshot())
+        for identity in (self.a, literal):
+            result = self.imported([self.row(name="'=甲", 运动员ID=str(identity))])
+            self.assertFalse(result['errors'])
+            self.assertEqual(result['model']['projects'][0]['members'][0]['athlete_key'], f'a:{identity}')
+            self.assertEqual(result['payload']['people'], [])
+
+    def test_unknown_quoted_name_is_not_unescaped(self):
+        result = self.imported([self.row(name="'=新人员")])
+        self.assertFalse(result['errors'])
+        self.assertEqual(result['payload']['people'][0]['name'], "'=新人员")
+
     def test_empty_team_can_round_trip_template(self):
         payload = self.payload(); payload['projects'] = [self.project('team', members=[])]; self.save(payload)
         text = self.req('GET', self.path+'import-template.csv', raw=True)

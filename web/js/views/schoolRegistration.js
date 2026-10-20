@@ -5,6 +5,8 @@ import { readPendingRequest, writePendingRequest, removePendingRequest, captureP
 import { h, clear, field, textInput, selectInput as uiSelectInput, formDialog, confirmAsync, toast, setPageLeaveGuard } from '../ui.js';
 import { clone, submission, eligibility, occupancy, jerseyOrEmpty, localIssues, errorSummary, reconcile } from '../schoolRegistrationModel.js';
 import { openSchoolImport } from '../schoolRegistrationImport.js';
+import { registrationId } from '../registrationId.js';
+import { refreshPersonReview, hasPersonInput, removeNewPerson } from '../schoolRegistrationModel.js';
 import { workspaceSchoolLink, resolveSchoolContext } from '../workspaceContext.js';
 
 const genders = [{ value: '', label: '待补充' }, { value: 'male', label: '男子' }, { value: 'female', label: '女子' }];
@@ -69,7 +71,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   const status = h('div.small', { role: 'status' }), errors = h('div.form-errors.hidden', { role: 'alert', tabindex: '-1' });
   const summary = h('div.school-registration-summary'), footerError = h('div.small.field-error', { role: 'alert', hidden: true });
   const action = btn('预览整批变更', () => runPreview(), true, { dataset: { action: 'school-preview' } });
-  const importButton = btn('粘贴 / 导入学校报名表', () => openSchoolImport({ path, text: model.importText || '', payload: currentPayload(),
+  const importButton = btn('粘贴 / 导入学校报名表', () => openSchoolImport({ path, text: model.importText || '', getPayload: currentPayload,
     requestContext, signal, isCurrent: currentPage,
     onText: (text) => { model.importText = text; edit(); },
     onApply: (imported) => { model.people = imported.people; model.projects = imported.projects; model.importText = ''; errors.textContent = ''; errors.classList.add('hidden'); edit(); draw(); },
@@ -185,7 +187,8 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     return p.people.length > 0 || p.projects.length > 0 || hasUnaddedPeople() || !!model.importText?.trim();
   }
   function hasUnaddedPeople() {
-    return Object.values(model.newPersonForms || {}).some((v) => v.name?.trim() || v.note?.trim() || v.jersey_no?.trim());
+    return Object.entries(model.newPersonForms || {}).some(([slot, v]) => hasPersonInput(v,
+      model.categories.find(c => String(c.id) === slot)?.gender || ''));
   }
   function retainRequest() {
     storageOK = pending ? writePendingRequest(requestKey, pending, storageScope) : removePendingRequest(requestKey, storageScope);
@@ -299,7 +302,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   function addPersonForm(cat = null) {
     const project = cat && model.projects.find((p) => p.category_id === cat.id);
     const joinProject = cat && !cat.roster_locked_reason && project.choice === 'participate'
-      && (cat.kind === 'individual' || project.members.length < 6);
+      && (cat.kind === 'individual' ? !project.athlete_key : project.members.length < 6);
     const slot = cat ? String(cat.id) : 'people';
     model.newPersonForms ||= {};
     const buffer = model.newPersonForms[slot] || {};
@@ -333,11 +336,14 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       if (same.length && (!verified.checked || !personNote || same.some((p) => p.note.trim().toLowerCase() === personNote.toLowerCase()))) {
         showError(new Error('同名新增需确认不同人，并填写不同的区分信息')); return;
       }
-      const person = { key: `new:${crypto.randomUUID()}`, name: personName, gender: gender.value,
+      let key;
+      try { key = `new:${registrationId()}`; } catch (error) { showError(error); return; }
+      const person = { key, name: personName, gender: gender.value,
         jersey_no: jersey.value.trim(), note: personNote,
         same_name_candidates: base.people.filter((p) => p.name.trim().toLowerCase() === personName.toLowerCase()).map((p) => ({ id: p.id, rev: p.rev })).sort((a, b) => a.id - b.id),
         confirm_distinct_person: !!same.length && verified.checked };
       model.people.push(person);
+      refreshPersonReview(base, model, person);
       delete model.newPersonForms[slot];
       if (joinProject && !eligibility(person, cat, model)) {
         const p = model.projects.find((p) => p.category_id === cat.id);
@@ -348,6 +354,8 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     }, true);
     return h('div.school-registration-add', cat && !joinProject ? h('p.small.muted', cat.roster_locked_reason
       ? '当前项目阵容已冻结。新增人员只加入学校人员名单。'
+      : cat.kind === 'individual' && project.athlete_key ? '本项目已有参赛运动员，新增人员只加入学校名单；需要换人时请明确选择。'
+      : project.choice !== 'participate' ? '本项目当前未参加，新增人员只加入学校名单。'
       : '本项目已满 6 人。新增人员先加入学校人员名单，调整阵容后可再选择。') : null,
       field('姓名', name), field('性别', gender),
       field('常用号码', jersey), field('区分信息', note), check, h('div.toolbar', add, btn('清空新增输入', () => {
@@ -357,23 +365,35 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   function drawPeople() {
     content.append(h('h3', '全校人员名单'), h('p.small.muted', '人员使用稳定档案 ID。同名人员分别保留，项目号码在项目报名中填写。'));
     for (const p of model.people) {
+      const review = h('div.same-name-review');
+      const updateReview = () => {
+        if (!p.key.startsWith('new:')) return;
+        const peers = refreshPersonReview(base, model, p);
+        clear(review);
+        if (!peers.length && !p.same_name_candidates.length) return;
+        const confirm = h('input', { type: 'checkbox', checked: p.confirm_distinct_person,
+          onchange: () => { p.confirm_distinct_person = confirm.checked; edit(); } });
+        review.append(...peers.map(other => h('div', personLabel(other))),
+          h('label.row.tight', confirm, '已核对全校同名人员，确认新增的是另一人'));
+      };
+      updateReview();
       const gender = selectInput(genders, p.gender);
       gender.onchange = () => { p.gender = gender.value; edit(); };
       const assigned = (occupancy(model).get(p.key) || []).map((c) => c.name).join('、');
       const genderConflicts = (occupancy(model).get(p.key) || [])
         .filter((c) => p.gender && c.gender && p.gender !== c.gender);
       content.append(h('div.school-registration-person', { dataset: { person: p.key } },
-        field('姓名', input(p.name, (v) => { p.name = v; })), field('性别', gender),
+        field('姓名', input(p.name, (v) => { p.name = v; updateReview(); })), field('性别', gender),
         field('常用号码', input(p.jersey_no, (v) => { p.jersey_no = v; })),
-        field('区分信息', input(p.note, (v) => { p.note = v; })),
+        field('区分信息', input(p.note, (v) => { p.note = v; updateReview(); })), review,
         h('div.small.muted', assigned || '尚未分配项目'),
         genderConflicts.length ? h('div.field-error', `性别与已报名项目不符：${genderConflicts.map((c) => c.name).join('、')}`) : null,
         p.key.startsWith('new:') ? btn('移除新增人员', () => {
-          if (assigned) { showError(new Error('请先从项目中移除此人员')); return; }
-          model.people = model.people.filter((x) => x.key !== p.key); edit(); draw();
+          try { removeNewPerson(model, p.key); } catch (error) { showError(error); return; }
+          edit(); draw();
         }) : h('span.small.muted', `档案 #${p.id}`)));
     }
-    content.append(h('details.mt', { open: !!model.newPersonForms?.people?.name }, h('summary', '＋ 新增人员'), addPersonForm()));
+    content.append(h('details.mt', { open: hasPersonInput(model.newPersonForms?.people) }, h('summary', '＋ 新增人员'), addPersonForm()));
   }
   function drawProjects() {
     const grid = h('div.school-registration-projects');
@@ -395,7 +415,12 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       grid.append(card);
       if (cat.edit_notice) card.append(h('p.notice.small', cat.edit_notice));
       else if (cat.roster_locked_reason || cat.locked_reason) card.append(h('p.notice.small', cat.roster_locked_reason || cat.locked_reason));
-      if (p.choice !== 'participate') { card.append(h('p.small.muted', choices.find((x) => x.value === p.choice)?.label)); continue; }
+      if (p.choice !== 'participate') {
+        card.append(h('p.small.muted', choices.find((x) => x.value === p.choice)?.label));
+        if (hasPersonInput(model.newPersonForms?.[cat.id], cat.gender)) card.append(
+          h('details.mt', { open: true }, h('summary', '尚未添加的人员输入'), addPersonForm(cat)));
+        continue;
+      }
       const roster = h('div.school-registration-roster', { dataset: { edit: 'roster' } });
       card.append(roster);
       const selected = new Set(cat.kind === 'team' ? p.members.map((m) => m.athlete_key) : [p.athlete_key]);
@@ -447,7 +472,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       const blocked = model.people.filter((a) => !selected.has(a.key) && eligibility(a, cat, model));
       if (blocked.length) roster.append(h('details', h('summary', `查看暂不可报名人员（${blocked.length}）`),
         ...blocked.map((a) => h('div.small.mt', personLabel(a), h('div.muted', eligibility(a, cat, model))))));
-      card.append(h('details.mt', { open: !!model.newPersonForms?.[cat.id]?.name }, h('summary', '＋ 就地新增人员'), addPersonForm(cat)),
+      card.append(h('details.mt', { open: hasPersonInput(model.newPersonForms?.[cat.id], cat.gender) }, h('summary', '＋ 就地新增人员'), addPersonForm(cat)),
         field('种子序号', input(p.seed_no || '', (v) => { p.seed_no = v || null; }, { inputmode: 'numeric', dataset: { edit: 'entry' } })),
         field('报名备注', input(p.note, (v) => { p.note = v; })));
     }
@@ -475,15 +500,26 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     if (!currentPage()) return;
     resolveSchoolContext(structure, params, formal);
     latest = formal;
-    base = latest; model = clone(latest); preview = null; pending = null; savedResult = null;
+    base = latest; model = clone(latest); preview = null; pending = null; pendingUnknown = false; savedResult = null;
+    tab = 'projects';
     removePendingRequest(requestKey, storageScope); status.textContent = '已读取正式报名'; clearErrorNote(); draw();
   }
   async function runPreview() {
     if (busy || deletionLocked() || !currentPage()) return;
     if (pending || preview) { await commit(); return; }
-    if (hasUnaddedPeople()) { showError(new Error('请先添加新增人员，或清空尚未添加的输入，再预览提交。')); return; }
+    if (hasUnaddedPeople()) {
+      tab = hasPersonInput(model.newPersonForms?.people) ? 'people' : 'projects'; draw();
+      showError(new Error('请先添加新增人员，或清空尚未添加的输入，再预览提交。')); return;
+    }
     if (model.importText?.trim()) { showError(new Error('还有尚未合入的表格，请打开导入窗口核对并合入，或清空表格输入。')); return; }
     const issues = localIssues(model);
+    for (const p of model.people.filter(p => p.key.startsWith('new:'))) {
+      const peers = refreshPersonReview(base, model, p);
+      if ((peers.length || p.same_name_candidates.length) && (!p.confirm_distinct_person || !p.note.trim()
+          || peers.some(other => other.note.trim().toLowerCase() === p.note.trim().toLowerCase()))) {
+        tab = 'people'; draw(); showError(new Error(`请重新核对「${p.name}」的同名人员并填写不同的区分信息`)); return;
+      }
+    }
     if (issues.length) { showError(new Error(issues.join('；'))); return; }
     busy = true; clearErrorNote(); updateFooter();
     try {
@@ -498,14 +534,16 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   async function commit() {
     if (busy || deletionLocked() || !currentPage()) return;
     if (!pending) {
-      pending = { ...currentPayload(), preview_hash: preview.preview_hash, request_uid: crypto.randomUUID() };
+      try { pending = { ...currentPayload(), preview_hash: preview.preview_hash, request_uid: registrationId() }; }
+      catch (error) { showError(error); return; }
+      pendingUnknown = false;
     }
     if (!retainRequest()) { showError(new Error('原提交未能保存到本机，请恢复存储后重试；当前页面保留输入。')); return; }
     const retryingUnknown = pendingUnknown;
     busy = true; clearErrorNote(); updateFooter();
     try {
       savedResult = await client.post(`${path}/registration-commit`, pending);
-      pending = null; preview = null; removePendingRequest(requestKey, storageScope);
+      pending = null; pendingUnknown = false; preview = null; removePendingRequest(requestKey, storageScope);
       if (!currentPage()) return;
       toast('学校报名已整批保存');
     } catch (error) {

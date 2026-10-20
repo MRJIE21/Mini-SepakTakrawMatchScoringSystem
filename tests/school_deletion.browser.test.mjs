@@ -176,7 +176,7 @@ try {
     const zeroTeam = (await api('POST', `/api/categories/${teamCat.id}/teams`, { school_id: zeroId, member_ids: [] })).team_id;
     await api('POST', `/api/categories/${teamCat.id}/participations`, { team_id: zeroTeam });
     assert.equal((await schools()).find(s => s.id === zeroId).athlete_count, 0);
-    await openSchool(zeroId); await confirmDelete(); await expectFeedback('该学校已进入参赛名单'); await waitEnabled();
+    await openSchool(zeroId); await confirmDelete(); await expectFeedback('该学校已有参赛报名，不能删除'); await waitEnabled();
     assert.equal((await schools()).some(s => s.id === zeroId), true);
     assert.equal((await api('GET', `/api/categories/${teamCat.id}/participations`)).participations.some(p => p.team_id === zeroTeam), true);
     checks.push('zero people does not bypass the actual team participation deletion guard');
@@ -187,7 +187,7 @@ try {
     await openSchool(enrolledId); await page.getByRole('tab', { name: '人员名单', exact: true }).click();
     const personNote = page.locator(`[data-person="a:${enrolledPerson}"]`).getByLabel('区分信息', { exact: true });
     await personNote.fill('拒绝删除后仍保留的输入');
-    await confirmDelete(); await expectFeedback('该学校已进入参赛名单'); await waitEnabled();
+    await confirmDelete(); await expectFeedback('该学校已有参赛报名，不能删除'); await waitEnabled();
     assert.equal(await personNote.inputValue(), '拒绝删除后仍保留的输入');
     assert.equal((await api('GET', `/api/schools/${enrolledId}/athletes`)).athletes[0].note, '');
     assert.equal((await api('GET', `/api/categories/${individualCat.id}/participations`)).participations.some(p => p.athlete_id === enrolledPerson), true);

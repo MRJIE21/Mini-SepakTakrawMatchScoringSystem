@@ -166,6 +166,10 @@ def convert(snapshot, initial, text):
             if not p or not escaped_match(name, p['name']):
                 raise bad_request('运动员ID不存在、不属于本校，或与姓名不符')
         elif not create:
+            # Export quoting is meaningful only against an existing identity.
+            # Include both literal and escaped candidates so ambiguity needs an ID.
+            matches = [p for p in model['people']
+                       if escaped_match(name.lower(), p['name'].strip().lower())]
             if len(matches) > 1:
                 raise bad_request('全校存在同名人员，请填写运动员ID明确复用，或确认新建不同人')
             p = matches[0] if matches else None

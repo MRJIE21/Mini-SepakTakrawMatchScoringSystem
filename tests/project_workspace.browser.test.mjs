@@ -136,6 +136,7 @@ try {
   await page.screenshot({ path: path.join(artifacts, 'team-scoring-nav-workspace-1365.png'), fullPage: true });
   console.log('PASS: 独立记录菜单移除，工作台比赛页实际进入记录、刷新和返回，高亮仍归属项目工作台');
   await navigation().getByRole('link', { name: '赛程', exact: true }).click();
+  await page.getByRole('heading', { name: '比赛赛程', exact: true }).waitFor();
   await page.getByRole('navigation', { name: '项目工作台导航', exact: true }).getByRole('link', { name: '分组', exact: true }).click();
   await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
   assert.equal(await navigation().isVisible(), true);

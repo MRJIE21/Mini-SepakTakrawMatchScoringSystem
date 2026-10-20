@@ -34,13 +34,13 @@ const EXAMPLE_ROWS = [
   { project: '女子个人赛', choice: '尚未决定', person: '', gender: '', usual: '', jersey: '', captain: '', seed: '' }
 ];
 
-export function openSchoolImport({ path, text = '', payload, onText, onApply, onConflict,
+export function openSchoolImport({ path, text = '', payload, getPayload = () => payload, onText, onApply, onConflict,
     requestContext = captureRequestContext(), signal, isCurrent = () => true }) {
   const identity = JSON.stringify(getApiEventContext());
   const source = textarea(text, { rows: 9, placeholder: '从 Excel 复制含表头的项目、运动员等列，或上传 CSV' });
   const file = h('input', { type: 'file', accept: '.csv,text/csv', 'aria-label': '学校报名 CSV 文件' });
   const report = h('div', { 'aria-live': 'polite' });
-  let result = null, ticket = 0, closed = false;
+  let result = null, reviewedPayload = null, ticket = 0, closed = false;
   const alive = () => !closed && !signal?.aborted && isCurrent();
   const ensureContext = () => {
     if (!alive() || identity !== JSON.stringify(getApiEventContext())) throw new Error('页面已切换，请进入对应学校重新导入');
@@ -83,17 +83,20 @@ export function openSchoolImport({ path, text = '', payload, onText, onApply, on
     { title: '核对导入结果', body: report }],
     actions: [{ label: '核对表格', keepOpen: true, run: async () => {
       ensureContext(); result = null; dlg.setActionDisabled(1, true);
+      const current = ++ticket, snapshot = JSON.stringify(getPayload());
       source.disabled = true; file.disabled = true;
       try {
-        const data = await api.post(`${path}/registration-import-preview`, { ...payload, csv_text: source.value }, { context: requestContext, signal });
-        if (!alive()) return;
+        const data = await api.post(`${path}/registration-import-preview`, { ...JSON.parse(snapshot), csv_text: source.value }, { context: requestContext, signal });
+        if (!alive() || current !== ticket) return;
         ensureContext(); clear(report);
+        if (snapshot !== JSON.stringify(getPayload())) throw new Error('报名内容已变化，请重新核对表格；当前输入已保留');
         if (data.errors.length) {
           report.append(h('div.warn-box', '请修正全部错误后重新核对。当前没有修改报名表或保存正式报名。'),
             h('div.table-scroll', table([{ label: '原表行号', render: (r) => r.line ?? '整批校验' }, { label: '问题', key: 'message' }], data.errors)));
           return;
         }
         result = data;
+        reviewedPayload = snapshot;
         report.append(h('div.table-scroll', table([{ label: '原表行号', key: 'line' }, { label: '项目', key: 'project' }, { label: '人员', key: 'person' }, { label: '处理', key: 'message' }], data.items)),
           h('h4', '完整调整结果'), h('ul', ...data.review.changes.map((s) => h('li', s))));
         if (data.review.people_review.length) report.append(h('h4', '人员资料调整'), ...data.review.people_review.map((p) => h('p', `${p.name} · ${({ male: '男', female: '女', '': '性别待补' })[p.gender || '']} · 常用号码 ${p.jersey_no || '未填'} · ${p.note || '区分信息未填'}`)));
@@ -101,10 +104,14 @@ export function openSchoolImport({ path, text = '', payload, onText, onApply, on
         if (data.review.warnings.length) report.append(h('h4', '赛前待补充'), h('ul', ...data.review.warnings.map((w) => h('li', w.message))));
         report.append(h('p.small.muted', '应用到报名表后，请预览核对并整批提交。'));
         dlg.setActionDisabled(1, false);
-      } catch (error) { if (alive()) { onConflict(error); throw error; } }
-      finally { if (alive()) { source.disabled = false; file.disabled = false; } }
+      } catch (error) { if (alive() && current === ticket) { result = null; onConflict(error); throw error; } }
+      finally { if (alive() && current === ticket) { source.disabled = false; file.disabled = false; } }
     } }, { label: '应用到报名表', primary: true, run: async () => {
       ensureContext(); if (!result) throw new Error('请先核对表格');
+      if (reviewedPayload !== JSON.stringify(getPayload())) {
+        result = null; dlg.setActionDisabled(1, true); clear(report);
+        throw new Error('报名内容已变化，请重新核对表格；当前输入已保留');
+      }
       onApply(result.model);
     } }] });
   dlg.setActionDisabled(1, true);

@@ -171,7 +171,9 @@ try {
     await page.getByRole('tab', { name: '人员名单', exact: true }).click(); assert.equal(await note().inputValue(), '未提交的班级');
     await page.getByRole('button', { name: '取消未提交修改', exact: true }).click();
     await page.getByRole('dialog', { name: '取消未提交修改', exact: true }).getByRole('button', { name: '取消修改', exact: true }).click();
-    await page.waitForFunction(id => document.querySelector(`[data-person="a:${id}"]`)?.querySelectorAll('input')[2]?.value === '', people[0].id).catch(async () => assert.equal(await note().inputValue(), ''));
+    await page.locator('.school-registration-project').first().waitFor();
+    await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    assert.equal(await note().inputValue(), '');
     pass('组别和项目切换取消保留地址、选择器与输入，学校内页签共用同一模型');
     await page.getByRole('tab', { name: '项目报名', exact: true }).click();
     await project(team).getByLabel('参赛选择').selectOption('participate');

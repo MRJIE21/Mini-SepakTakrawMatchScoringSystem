@@ -74,6 +74,8 @@ class DisplayLiveTest(unittest.TestCase):
         cls.server.server_close()
 
     def setUp(self):
+        from app import display_store
+        display_store.reset_rate_limits()
         self.base = f"http://127.0.0.1:{self.port}"
         self.admin = self.login("admin", "admin123")
         self.recorder = self.login("recorder", "recorder123")
@@ -100,6 +102,7 @@ class DisplayLiveTest(unittest.TestCase):
 
     def pair_display(self):
         started = self.request("POST", "/api/display/pair/start", {"device_secret": "device-secret-live-123"})
+        self.assertNotIn('_status', started, started)
         claimed = self.request("POST", "/api/display/pair/claim",
                                {"code": started["code"], "event_id": 1, "name": "1 号屏"}, token=self.admin)
         status = self.request(

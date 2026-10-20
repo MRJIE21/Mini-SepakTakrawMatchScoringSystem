@@ -1,14 +1,14 @@
 {
   "name": "NEW-PROJIECT",
-  "version": "1.3.18",
-  "feature": "import-template-usability",
-  "created_at": "2026-10-18T16:00:53.464Z",
+  "version": "1.3.19",
+  "feature": "registration-boundaries",
+  "created_at": "2026-10-19T10:54:37.565367+00:00",
   "startup": "start.cmd",
-  "previous_release_commit": "e88f6b779b481b271100ca182627dddd45142533",
-  "previous_release_manifest_sha256": "ec8c32dd0ef1affdff1c0bf0a353a6ba228769cd94c86d842242abeb73cebae5",
-  "source_manifest_sha256": "f9b8aede836543f0f6450d2b7ea30ceae082a9b022c33f7677ed45585dff9b53",
-  "workflow_code_hash": "cf693b80ac97b143b61a67e02578e35f22e73ca81ed9f499089980a504103635",
-  "schema_change": "None; 1.3.18 changes template/guide/example downloads and the import dialog only; no database schema or data migration.",
+  "previous_release_commit": "092027cb8e15960f1202a7fa4a953141d27ae6b9",
+  "previous_release_manifest_sha256": "ebb3153fed512afd9071aede1589d1411de7b88d52d1075189d60549969fe493",
+  "source_manifest_sha256": "dc90294bd65319017c9e77c11d843129f2dfa1fb7d8d35e6184958c81e4a2a69",
+  "workflow_code_hash": "cfa7f85dcd42b59fecb25047700792ee7b2dc6af59a1887ca820733df7d17142",
+  "schema_change": "None; registration boundary fixes and approved CSV escaped-name identity matching compatibility fix.",
   "files": [
     {
       "path": ".gitignore",
@@ -17,13 +17,13 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "d9ee0388d6eed1d084c055a2737f6c44b08348cb18bbdcf8e47d75c40d3a1c61",
-      "bytes": 46841
+      "sha256": "9bf1a3830b204ebb31c146ab5774490223274db583b60d62606449f2afff58ce",
+      "bytes": 46860
     },
     {
       "path": "README.md",
-      "sha256": "6ad27214c97e3325ba3f9c6f917728b7d8d03972a887e6dc6574b6ff2dc3d33f",
-      "bytes": 45511
+      "sha256": "a3380b44acf097bb6dab9cd146ecd55fc4afd8f23d8868eb3e451a32e820fc2c",
+      "bytes": 45354
     },
     {
       "path": "app/__init__.py",
@@ -317,8 +317,8 @@
     },
     {
       "path": "app/school_import.py",
-      "sha256": "2e007c9612b847a8279a00659a12cdbbdd3ad8081e67f2704ceec71fe2809701",
-      "bytes": 17725
+      "sha256": "c4a2c9d17b3e5d9ad566c491ec1bb7f5e72e0c8f9dccc8a7e66ca906c7e95e96",
+      "bytes": 17716
     },
     {
       "path": "app/security.py",
@@ -367,8 +367,8 @@
     },
     {
       "path": "docs/体育馆大屏使用说明-20261017.md",
-      "sha256": "396db54519c256e84a72de2a446478634f5899b646b09e52829ad364254f6861",
-      "bytes": 5028
+      "sha256": "5a0a55e5ba53074e2630f2635357fc051cc2d1a48140766578493b3f85c51827",
+      "bytes": 4955
     },
     {
       "path": "docs/分组与赛程使用说明-20261015.md",
@@ -417,13 +417,18 @@
     },
     {
       "path": "docs/报名模板填写说明-20261018.md",
-      "sha256": "850176de9db5fda86d3c4c3f0e3701bc8973739b9ebd8d9fa701e4e084aaba24",
-      "bytes": 2941
+      "sha256": "08a1f7dbff52b29a044c1e8720542ff0027ac1b1ed4be4596c11057c340dbcc8",
+      "bytes": 3076
     },
     {
       "path": "docs/报名流程重构建议.md",
       "sha256": "bb6f8adb54800639184e819f730e24529478b10b3399b5b401b607055b3f0586",
       "bytes": 15867
+    },
+    {
+      "path": "docs/报名页边界修复-20261019.md",
+      "sha256": "baf49338ad5bc2235c1ac65056d9f2dcf1866dd3b219b7f64f177b24281b94dd",
+      "bytes": 1687
     },
     {
       "path": "docs/报名页错误反馈修复-20261018.md",
@@ -477,8 +482,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "49a15c412c0586207bb35bd6d381387907078088fbe6c312798d6faaa7aeab97",
-      "bytes": 362
+      "sha256": "86b30d6ec9141fbed59a2401da6de2ef77437bdfb8fc4763d022920d73add379",
+      "bytes": 352
     },
     {
       "path": "run.py",
@@ -662,8 +667,8 @@
     },
     {
       "path": "tests/p2a_resources.browser.test.mjs",
-      "sha256": "1e03d34779335e18cb49483861a1e816e2239b1985919cb284f1aa6c9fa4e26e",
-      "bytes": 9002
+      "sha256": "1912c1a1a3d6529a367e3ccc10aa309c26133b4d0065745324d529d8187d9bab",
+      "bytes": 9009
     },
     {
       "path": "tests/p2a_ui_consistency.browser.test.mjs",
@@ -687,8 +692,8 @@
     },
     {
       "path": "tests/project_workspace.browser.test.mjs",
-      "sha256": "ed74fe34501cd683e12da316f8fe95ce6f253062d23d84bb43243d32d991624e",
-      "bytes": 13145
+      "sha256": "791df9100e11cb9218198fdc5c06b84ccfad1fb23b488ab86e0a4999161b2e00",
+      "bytes": 13229
     },
     {
       "path": "tests/responsive_dialog.browser.test.mjs",
@@ -707,8 +712,8 @@
     },
     {
       "path": "tests/schedule_defects.browser.test.mjs",
-      "sha256": "7e3db39d32c6e9755d56399ef0dfc20698accb22496b77a225534660bbfcd5c2",
-      "bytes": 24686
+      "sha256": "e74d593c91f5b91b720b6e8242cd7a0fc01f6c6b74a36123fce4527a399b78b9",
+      "bytes": 24729
     },
     {
       "path": "tests/schedule_management.browser.test.mjs",
@@ -717,8 +722,8 @@
     },
     {
       "path": "tests/school_deletion.browser.test.mjs",
-      "sha256": "7b306c175e433c4496a874c8d705a6e4e2ff36e06272c62fafc4b6ab85cf1c7c",
-      "bytes": 34900
+      "sha256": "14073e52c14182e35f3436dbf127a4e2849451f407f7b98356682e4001238e27",
+      "bytes": 34924
     },
     {
       "path": "tests/school_enrollment.browser.test.mjs",
@@ -737,8 +742,8 @@
     },
     {
       "path": "tests/school_registration_workspace.browser.test.mjs",
-      "sha256": "4afb28a9f138e7ef88d1c698bf59fb7abdce8aea2ff4e030e0632cb1d4a148e1",
-      "bytes": 17452
+      "sha256": "44d6c94b90061a40efb30d2024852833b81507e3d22c029b226b30b1f6402543",
+      "bytes": 17227
     },
     {
       "path": "tests/setup_model.test.mjs",
@@ -802,8 +807,8 @@
     },
     {
       "path": "tests/test_display_live.py",
-      "sha256": "e6f867be2dbf06b0520d6e2ad6c01dee9ada359f77a2b24792b5c020a9297032",
-      "bytes": 8585
+      "sha256": "1f297c8e6588a679e44c5109732024725cfe8131a144532c32e7eebccb43b7fa",
+      "bytes": 8719
     },
     {
       "path": "tests/test_display_state.py",
@@ -1002,8 +1007,8 @@
     },
     {
       "path": "tests/test_school_registration_phase2.py",
-      "sha256": "1df0d9c813b9be63e8bcf5861548992a339d4891e1ff7ea3967f5918140d8c74",
-      "bytes": 8719
+      "sha256": "a9811e7bfdec4953f4d77c9c9fe1fbe498a2e82087e3ea2e0b071b9b61be7564",
+      "bytes": 9611
     },
     {
       "path": "tests/test_startup_fixes.py",
@@ -1027,8 +1032,8 @@
     },
     {
       "path": "tests/test_version_manifest.py",
-      "sha256": "18a42b2771208087a70e9006be44ff9f6f565e8d70e92aad6919222a5ee0fcaf",
-      "bytes": 3456
+      "sha256": "423a0772911609115602c0338b03cee085f71df368e486371b7e490e77b79a79",
+      "bytes": 3388
     },
     {
       "path": "tests/ui_layout.browser.test.mjs",
@@ -1056,9 +1061,14 @@
       "bytes": 2094
     },
     {
+      "path": "tests/workspace_registration_boundaries.test.mjs",
+      "sha256": "a098ea138eabbf07464f27156c244911ecfc40690ef5ba57ddf4909ea41c2363",
+      "bytes": 3212
+    },
+    {
       "path": "tests/workspace_school_registration.browser.test.mjs",
-      "sha256": "811b57a9753bf11c4fb12e9efa3ec3373d487ec555776b446ab0e589dcf2fecc",
-      "bytes": 28688
+      "sha256": "004df0f6e4cc95aa57d1623b2ac851a7201002596ab862ec957379ef35088a88",
+      "bytes": 28681
     },
     {
       "path": "tests/workspace_school_registration.integration.test.mjs",
@@ -1069,6 +1079,11 @@
       "path": "tests/workspace_school_registration.test.mjs",
       "sha256": "d06184dabfab91cef66db778b056d3e17e8d61b9d1506475e98d67bea0b6bf18",
       "bytes": 3884
+    },
+    {
+      "path": "tests/workspace_school_registration_boundaries.browser.test.mjs",
+      "sha256": "977fe28ed2529eb702feb4e0373ae94152c3d74c487f252dd189a5400c313c7f",
+      "bytes": 20067
     },
     {
       "path": "tests/workspace_school_registration_feedback.browser.test.mjs",
@@ -1196,19 +1211,24 @@
       "bytes": 1244
     },
     {
+      "path": "web/js/registrationId.js",
+      "sha256": "9661e8263c5eb800cc9940be7e356aae7f0d7e71de654a97ef59fa2cc22daef3",
+      "bytes": 730
+    },
+    {
       "path": "web/js/scheduleStageModel.js",
       "sha256": "057196e66a18ab2e1e72d14e52d392ae650eb780525c36156f193b29b81e8271",
       "bytes": 1266
     },
     {
       "path": "web/js/schoolRegistrationImport.js",
-      "sha256": "9e6043544fcff90fd1444e06a3c6af20c8d04dd69ec4aa421c54ea760d377c4c",
-      "bytes": 9627
+      "sha256": "e6f70daad1af9872878782b9dfbd0aa9908c5e4f8640cf55fc4de5d2286453bf",
+      "bytes": 10153
     },
     {
       "path": "web/js/schoolRegistrationModel.js",
-      "sha256": "13183378b6a900965706923ea27d929290a23c06fff3cd5caed22c82a1d24782",
-      "bytes": 5808
+      "sha256": "44cef131e021a9803cdf94be0cdbb116625026a06c28b589a987e4788bec8b5d",
+      "bytes": 7718
     },
     {
       "path": "web/js/scoring.js",
@@ -1307,8 +1327,8 @@
     },
     {
       "path": "web/js/views/schoolRegistration.js",
-      "sha256": "3f686904b99e3e615efd25b9ed880d89d7f8b4238a8add400b3787e8066935ed",
-      "bytes": 40562
+      "sha256": "1eb5a9fdb717f65227440717c3596c215ba7d5d37669c3b9e0d6566f0b78d98a",
+      "bytes": 42821
     },
     {
       "path": "web/js/views/scoring.js",
@@ -1342,8 +1362,8 @@
     },
     {
       "path": "web/sw.js",
-      "sha256": "b316890dded868619cf794c9af8507d1e4aac5ae30806cfd68633ddab5f5437a",
-      "bytes": 2739
+      "sha256": "5d0cb5a7bb5b0a6006d2a16fcf4959822d380bf03c87fb5d7cba6a86daef4be8",
+      "bytes": 2706
     },
     {
       "path": "web/vendor/tom-select/LICENSE",

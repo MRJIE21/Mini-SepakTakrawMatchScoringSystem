@@ -91,7 +91,8 @@ try {
   };
   let first;
   if (phase !== 'fields') {
-    await page.goto(base); await page.locator('#btn-new-event').waitFor();
+    await page.goto(base);
+    await page.getByRole('button', { name: '开始创建赛事', exact: true }).waitFor();
     await check('完整创建首个赛事直接进入新赛事工作台', async () => {
       first = await createWizard('首次创建回归'); await assertLanding(first);
       await page.reload(); await page.locator('.ctx-bar').waitFor();

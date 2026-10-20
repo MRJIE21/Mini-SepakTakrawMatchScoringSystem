@@ -5,6 +5,39 @@ export const projectValues = (p) => ({ category_id: p.category_id, choice: p.cho
   members: p.members || [], captain_key: p.captain_key || '', athlete_key: p.athlete_key || '',
   seed_no: p.seed_no || null, note: p.note || '' });
 export const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const normalizedName = value => String(value || '').trim().toLowerCase();
+export function refreshPersonReview(base, model, person) {
+  const name = normalizedName(person.name);
+  const peers = model.people.filter(p => p.key !== person.key && normalizedName(p.name) === name);
+  const candidates = base.people.filter(p => normalizedName(p.name) === name)
+    .map(p => ({ id: p.id, rev: p.rev })).sort((a, b) => a.id - b.id);
+  const signature = JSON.stringify([name, normalizedName(person.note), candidates,
+    peers.map(p => [p.key, normalizedName(p.note)])]);
+  if (person.reviewSignature !== undefined && person.reviewSignature !== signature) person.confirm_distinct_person = false;
+  person.reviewSignature = signature;
+  person.same_name_candidates = candidates;
+  return peers;
+}
+export function hasPersonInput(form, defaultGender = '') {
+  return !!form && (!!form.name?.trim() || !!form.note?.trim() || !!form.jersey_no?.trim()
+    || (form.gender !== undefined && form.gender !== defaultGender));
+}
+export function removeNewPerson(model, key) {
+  if (!key.startsWith('new:')) throw new Error('只能移除尚未提交的新增人员');
+  const references = model.projects.filter(p => p.athlete_key === key || p.captain_key === key
+    || p.members.some(m => m.athlete_key === key));
+  if (references.some(p => p.choice === 'participate')) throw new Error('请先从项目中移除此人员');
+  if (references.some(p => {
+    const cat = model.categories.find(c => c.id === p.category_id);
+    return cat?.roster_locked_reason || cat?.locked_reason;
+  })) throw new Error('人员仍被已冻结的项目引用，请先核对项目名单');
+  for (const p of references) {
+    p.members = p.members.filter(m => m.athlete_key !== key);
+    if (p.captain_key === key) p.captain_key = '';
+    if (p.athlete_key === key) p.athlete_key = '';
+  }
+  model.people = model.people.filter(p => p.key !== key);
+}
 export function submission(base, model) {
   const people = model.people.filter((p) => {
     const old = base.people.find((x) => x.key === p.key);

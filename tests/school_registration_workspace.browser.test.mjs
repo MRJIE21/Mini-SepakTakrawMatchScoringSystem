@@ -155,7 +155,7 @@ try {
   await ar().getByLabel('区分信息', { exact: true }).fill('本机二班');
   await api('PUT', `/api/athletes/${a.id}`, { note: '其他窗口三班' });
   await submit().click();
-  await page.getByText('后台报名已被其他入口更新，已读取最新名单。当前未提交修改未生效，请重新填写。', { exact: true }).waitFor();
+  await page.locator('.form-errors-title').filter({ hasText: '处本地修改与后台冲突，已采用后台版本，请核对后重新预览' }).waitFor();
   assert.equal(await ar().getByLabel('区分信息', { exact: true }).inputValue(), '其他窗口三班');
   assert.equal(await submit().isDisabled(), true);
   assert.equal(await page.locator('select[data-resolve]').count(), 0);
@@ -178,7 +178,7 @@ try {
   await page.getByRole('tab', { name: '人员名单', exact: true }).click();
   await page.getByText('＋ 新增人员', { exact: true }).click();
   await page.getByLabel('新增人员姓名', { exact: true }).fill('甲');
-  assert.ok((await page.locator('.same-name-review').textContent()).includes(individual.name));
+  assert.ok((await page.locator('.school-registration-add .same-name-review').textContent()).includes(individual.name));
   await page.getByLabel('新增人员区分信息', { exact: true }).fill('另一位四班');
   await page.getByRole('checkbox').check();
   await page.getByRole('button', { name: '添加人员', exact: true }).click();
