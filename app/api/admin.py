@@ -27,11 +27,17 @@ def _invalidate_event_cache():
 @route("GET", r"/api/users", roles=ADMIN, scope="registry")
 def list_users(ctx):
     rows = db.q(ctx.conn, "SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id")
+    # 赛事名随账号范围一起由服务端给出：客户端不再依赖启动时的赛事快照，
+    # 跨标签页/多管理员同时改赛事后，列表里的“所属赛事”仍与后台一致。
+    event_names = {int(row["id"]): row["name"]
+                   for row in db.q(ctx.conn, "SELECT id, name FROM events")}
     out = []
     for r in rows:
         item = dict(r)
         item["role_name"] = security.ROLE_NAMES.get(r["role"], r["role"])
         item['event_ids'] = access.event_ids(ctx.conn, r)
+        item['event_names'] = [event_names.get(int(eid), f"赛事 {eid}")
+                               for eid in (item['event_ids'] or [])]
         sync = db.q1(ctx.conn, "SELECT COUNT(*) AS pending,MAX(last_error) AS error FROM user_snapshot_outbox WHERE user_id=?", (r['id'],))
         item['snapshot_sync_pending'] = sync['pending']
         item['snapshot_sync_error'] = sync['error'] or ''
@@ -41,8 +47,13 @@ def list_users(ctx):
 
 @route("POST", r"/api/users", roles=ADMIN, scope="registry")
 def create_user(ctx):
-    username = (ctx.body.get("username") or "").strip()
-    password = ctx.body.get("password") or ""
+    raw_username = ctx.body.get("username")
+    raw_password = ctx.body.get("password")
+    # 字段必须是文本：数字/对象等类型若直接 .strip() 会抛异常并变成 500。
+    if not isinstance(raw_username, str) or not isinstance(raw_password, str):
+        raise bad_request("用户名和密码必须为文本")
+    username = raw_username.strip()
+    password = raw_password
     role = ctx.body.get("role") or "recorder"
     if role not in security.ROLES:
         raise bad_request('角色不合法')
@@ -74,6 +85,22 @@ def reset_password(ctx):
             "snapshot_sync_pending": True}
 
 
+def _active_admin_count(conn) -> int:
+    return int(db.q1(conn, "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active=1")["n"])
+
+
+def _guard_last_admin(conn, user_id: int, fields: dict) -> None:
+    """最后一个启用中的管理员不能被停用或降级，否则所有账号将无法再管理账号。"""
+    if fields.get("role", "admin") == "admin" and int(fields.get("active", 1)) == 1:
+        return
+    current = db.q1(conn, "SELECT role, active FROM users WHERE id=?", (user_id,))
+    if current is None or current["role"] != "admin" or not current["active"]:
+        return
+    if _active_admin_count(conn) <= 1:
+        raise conflict("不能停用或降级最后一个启用中的赛事管理员；请先启用或新建另一个管理员",
+                       code="last_admin")
+
+
 @route("PUT", r"/api/users/(?P<user_id>\d+)", roles=ADMIN, scope="registry")
 def update_user(ctx):
     user_id = int(ctx.params["user_id"])
@@ -87,6 +114,7 @@ def update_user(ctx):
         fields["role"] = ctx.body["role"]
     if "active" in ctx.body:
         fields["active"] = 1 if ctx.body["active"] else 0
+    _guard_last_admin(ctx.conn, user_id, fields)
     if 'event_ids' in ctx.body:
         access.set_events(ctx.conn, user_id, ctx.body['event_ids'])
         _invalidate_event_cache()

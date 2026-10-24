@@ -1,3 +1,4 @@
+import {registrationEdit,registrationProject} from './helpers/registration_ui.mjs';
 import { installLegacyRosterFixture } from './helpers/legacy_roster_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
@@ -86,8 +87,7 @@ try {
   await page.goto(url);
   await page.getByRole('heading', { name: school.name, exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: /共享草稿/ }).count(), 0);
-  const project = cat => page.locator(`[data-category="${cat.id}"]`);
-  assert.ok((await project(individual).textContent()).includes('尚未决定'));
+  assert.ok((await (await registrationProject(page,individual.id)).textContent()).includes('尚未决定'));
   // Neither matching-base nor stale cached rosters may replace backend people/projects.
   const formal = await api('GET', `/api/schools/${school.id}/registration-workspace`);
   const poison = async stale => page.evaluate(async ({ formal, stale }) => {
@@ -104,19 +104,19 @@ try {
     await poison(stale);
     await page.reload();
     await page.getByRole('heading', { name: school.name, exact: true }).waitFor();
-    assert.equal(await project(team).getByLabel('甲本项目号码', { exact: true }).inputValue(), '3');
+    assert.equal(await (await registrationProject(page,team.id)).getByLabel('甲本项目号码', { exact: true }).inputValue(), '3');
     assert.ok((await page.locator('.school-registration-summary').textContent()).includes('后台已保存：1 项报名'));
     assert.equal(await page.locator('[data-resolve]').count(), 0);
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    await registrationEdit(page);
     assert.equal(await page.locator('.school-registration-person').count(), 2);
     assert.equal(await page.locator(`[data-person="a:${a.id}"]`).getByLabel('姓名', { exact: true }).inputValue(), '甲');
-    await page.getByRole('tab', { name: '项目报名', exact: true }).click();
+    await registrationEdit(page);
   }
-  await project(team).getByRole('button', { name: '移除', exact: true }).click();
-  await project(team).getByLabel(`${team.name}选人`, { exact: true }).selectOption(`a:${b.athlete_id}`);
-  await project(individual).getByLabel('参赛选择').selectOption('participate');
-  await project(individual).getByLabel(`${individual.name}选人`, { exact: true }).selectOption(`a:${a.id}`);
-  for (const cat of group.categories.filter(c => c.gender === 'female')) await project(cat).getByLabel('参赛选择').selectOption('not_participating');
+  await (await registrationProject(page,team.id)).getByRole('button', { name: '移除', exact: true }).click();
+  await (await registrationProject(page,team.id)).getByLabel(`${team.name}选人`, { exact: true }).selectOption(`a:${b.athlete_id}`);
+  await (await registrationProject(page,individual.id)).getByLabel('参赛选择').selectOption('participate');
+  await (await registrationProject(page,individual.id)).getByLabel(`${individual.name}选人`, { exact: true }).selectOption(`a:${a.id}`);
+  for (const cat of group.categories.filter(c => c.gender === 'female')) await (await registrationProject(page,cat.id)).getByLabel('参赛选择').selectOption('not_participating');
   assert.ok((await page.locator('.school-registration-summary').textContent()).includes('后台已保存：1 项报名'), 'unsubmitted inputs cannot change formal statistics');
   await page.screenshot({ path: path.join(artifacts, 'school-workspace-projects-desktop.png'), fullPage: true });
   const submit = () => page.locator('[data-action="school-preview"]');
@@ -138,18 +138,18 @@ try {
   assert.equal((await api('GET', `/api/categories/${individual.id}/participations`)).participations.length, 1);
   await page.reload();
   await page.getByRole('button', { name: '核实并重试原提交', exact: true }).waitFor();
-  assert.equal(await project(team).getByLabel('参赛选择').isDisabled(), true);
-  assert.equal(await project(team).getByLabel('乙本项目号码', { exact: true }).inputValue(), '5', 'lost-response recovery displays the saved backend roster');
+  assert.equal(await (await registrationProject(page,team.id)).getByLabel('参赛选择').isDisabled(), true);
+  assert.equal(await (await registrationProject(page,team.id)).getByLabel('乙本项目号码', { exact: true }).inputValue(), '5', 'lost-response recovery displays the saved backend roster');
   await submit().click();
   await page.getByRole('button', { name: '预览整批变更', exact: true }).waitFor();
   assert.equal((await api('GET', `/api/schools/${school.id}/athletes`)).athletes.length, 2);
   await page.unroute('**/registration-commit');
   // Refresh ignores local inputs; an in-session concurrency rejection loads backend values.
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+  await registrationEdit(page);
   const ar = () => page.locator(`[data-person="a:${a.id}"]`);
   await ar().getByLabel('区分信息', { exact: true }).fill('本机二班');
   await page.reload();
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+  await registrationEdit(page);
   assert.equal(await ar().getByLabel('区分信息', { exact: true }).inputValue(), '');
   assert.equal(await submit().isDisabled(), true);
   await ar().getByLabel('区分信息', { exact: true }).fill('本机二班');
@@ -162,7 +162,7 @@ try {
   assert.equal((await api('GET', `/api/schools/${school.id}/athletes`)).athletes.find(p => p.id === a.id).note, '其他窗口三班');
   await ar().getByLabel('区分信息', { exact: true }).fill('重新填写二班');
   await submit().click();
-  await page.getByRole('button', { name: '确认整批提交' }).waitFor();
+  await page.getByRole('button', { name: '确认整批提交', exact: true }).waitFor();
   await page.route('**/registration-workspace', route => route.abort('failed'));
   await submit().click();
   const reread = page.getByRole('button', { name: '读取最新正式名单', exact: true });
@@ -175,14 +175,14 @@ try {
   await page.getByRole('button', { name: '预览整批变更', exact: true }).waitFor();
   assert.equal((await api('GET', `/api/schools/${school.id}/athletes`)).athletes.find(p => p.id === a.id).note, '重新填写二班');
   // Existing occupied athletes are still included in same-name verification.
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+  await registrationEdit(page);
   await page.getByText('＋ 新增人员', { exact: true }).click();
-  await page.getByLabel('新增人员姓名', { exact: true }).fill('甲');
-  assert.ok((await page.locator('.school-registration-add .same-name-review').textContent()).includes(individual.name));
-  await page.getByLabel('新增人员区分信息', { exact: true }).fill('另一位四班');
+  await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('甲');
+  assert.ok((await page.locator('.school-registration-people .school-registration-add .same-name-review').textContent()).includes(individual.name));
+  await page.locator('.school-registration-people').getByLabel('新增人员区分信息', { exact: true }).fill('另一位四班');
   await page.getByRole('checkbox').check();
   await page.getByRole('button', { name: '添加人员', exact: true }).click();
-  await submit().click(); await page.getByRole('button', { name: '确认整批提交' }).waitFor();
+  await submit().click(); await page.getByRole('button', { name: '确认整批提交', exact: true }).waitFor();
   await submit().click(); await page.getByRole('button', { name: '预览整批变更', exact: true }).waitFor();
   assert.equal((await api('GET', `/api/schools/${school.id}/athletes`)).athletes.filter(p => p.name === '甲').length, 2);
   // Legacy team quick-add uses the same complete same-name review.
@@ -211,20 +211,21 @@ try {
   await newSchool.getByLabel('学校名称').fill('界面创建测试校');
   await newSchool.getByRole('button', { name: '创建并整理报名', exact: true }).click();
   await page.getByRole('heading', { name: '界面创建测试校', exact: true }).waitFor();
-  assert.equal(await page.locator('.school-registration-project').count(), group.categories.length);
+  assert.equal(await page.locator('.school-registration-project').count(), 1);
+  assert.equal(await page.locator('.school-registration-catalog button').count(), group.categories.length);
   await page.goto(url);
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+  await registrationEdit(page);
   await page.getByText('＋ 新增人员', { exact: true }).click();
-  await page.getByLabel('新增人员姓名', { exact: true }).fill('尚未加入的人员');
+  await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('尚未加入的人员');
   await page.reload();
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
-  assert.equal(await page.getByLabel('新增人员姓名', { exact: true }).inputValue(), '');
+  await registrationEdit(page);
+  assert.equal(await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).inputValue(), '');
   await page.getByText('＋ 新增人员', { exact: true }).click();
-  await page.getByLabel('新增人员姓名', { exact: true }).fill('本次尚未加入的人员');
+  await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('本次尚未加入的人员');
   await submit().click();
   assert.ok((await page.locator('.form-errors:not(.hidden)').textContent()).includes('请先添加新增人员'));
-  await page.getByRole('button', { name: '清空新增输入', exact: true }).click();
-  await page.getByRole('tab', { name: '项目报名', exact: true }).click();
+  await page.locator('.school-registration-people').getByRole('button', { name: '清空新增输入', exact: true }).click();
+  await registrationEdit(page);
   for (const width of [390, 768, 1024]) {
     await page.setViewportSize({ width, height: 844 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `overflow at ${width}`);

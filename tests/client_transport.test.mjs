@@ -9,7 +9,7 @@ setApiEventContext({ event_id: 2, event_uuid: 'event-B', deployment_id: 'deploym
 let headers;
 globalThis.fetch = async (_path, options) => { headers = options.headers; return new Response('{}'); };
 await api.post('/api/example', {}, { context });
-assert.equal(headers['X-Event-UUID'], 'event-A'); assert.equal(headers['X-Client-Protocol'], '2');
+assert.equal(headers['X-Event-UUID'], 'event-A'); assert.equal(headers['X-Client-Protocol'], '3');
 assert.equal(headers['X-Actor-ID'], '7');
 setApiUser({ id: 8 });
 await assert.rejects(api.post('/api/example', {}, { context }), (error) => error.code === 'account_changed');

@@ -2,7 +2,9 @@
 const TOKEN_KEY = 'stss_display_token';
 const SECRET_KEY = 'stss_display_secret';
 const STATUS_TEXT = {
-  live: '进行中', upcoming: '待开始', finished: '已结束', stale: '数据暂未同步',
+  live: '进行中', upcoming: '待开始', finished: '正式成绩', stale: '数据暂未同步',
+  pending_review: '待复核', pending_review_stale: '待复核 · 最后直播快照',
+  cancelled: '已取消', unfinished: '未完成',
   unassigned: '未指定', missing: '场次不存在', void: '轮空',
 };
 const MAX_FAILURES = 2;
@@ -258,7 +260,8 @@ function tileNode(tile) {
   const top = el('div', 'tile-top');
   const court = el('span', 'court', tile.court || '');
   if (tile.round) court.append(el('span', 'round', tile.round));
-  top.append(court, el('span', `chip ${tile.status}`, STATUS_TEXT[tile.status] || tile.status));
+  top.append(court, el('span', `chip ${tile.status}`, tile.result_disputed
+    ? '正式成绩 · 争议处理中' : STATUS_TEXT[tile.status] || tile.status));
   article.append(top);
 
   const board = el('div', 'board');
@@ -278,7 +281,7 @@ function teamNode(team, side) {
 function midNode(tile) {
   const mid = el('div', 'mid');
   const series = el('div', 'series');
-  if (tile.status === 'live' || tile.status === 'finished' || tile.status === 'stale') {
+  if (['live','finished','stale','pending_review','pending_review_stale'].includes(tile.status) && tile.home?.points != null) {
     series.append(
       el('span', 'val home', tile.home?.sets ?? 0),
       el('span', 'sep', ':'),
@@ -290,14 +293,18 @@ function midNode(tile) {
   mid.append(series);
   let label = '';
   if (tile.status === 'live') label = tile.current_set ? `第 ${tile.current_set} 局` : '进行中';
-  else if (tile.status === 'finished') label = '已结束';
+  else if (tile.status === 'finished') label = tile.result_disputed ? '最后正式成绩 · 争议处理中' : '正式成绩';
+  else if (tile.status === 'pending_review') label = '待复核 · 直播非正式成绩';
+  else if (tile.status === 'pending_review_stale') label = '待复核 · 最后直播快照';
+  else if (tile.status === 'cancelled') label = '已取消';
+  else if (tile.status === 'unfinished') label = '未完成';
   else if (tile.status === 'stale') label = '数据暂未同步';
   else if (tile.status === 'upcoming') label = tile.scheduled_at ? String(tile.scheduled_at).slice(11, 16) : '待开始';
   else if (tile.status === 'void') label = '轮空';
   else if (tile.status === 'missing') label = '场次不存在';
   else label = '未选择';
   mid.append(el('div', 'setlabel', label));
-  if (tile.status === 'live' || tile.status === 'finished' || tile.status === 'stale') {
+  if (['live','finished','stale','pending_review','pending_review_stale'].includes(tile.status) && tile.home?.points != null) {
     const sets = el('div', 'sets');
     for (const item of tile.sets || []) {
       sets.append(el('div', `set-pill ${item.state || ''}`, item.label));
@@ -326,7 +333,13 @@ function render(data) {
   const layout = [1, 2, 3, 4, 8].includes(Number(data.layout)) ? Number(data.layout) : 8;
   grid.dataset.layout = String(layout);
   grid.innerHTML = '';
-  const tiles = (data.slots || []).filter((tile) => tile.visible);
+  const visibleTiles = (data.slots || []).filter((tile) => tile.visible);
+  /* 首次配对、控制台从未推送过布局时（config_revision=0），状态接口仍返回 visible=true 的
+     “未指定”槽位；此时没有任何可展示的场次，走空态提示，避免大屏出现 8 个空窗口。
+     已推送过布局（config_revision>0）的渲染保持不变，避免影响控制台“先摆窗口再绑场次”的用法。 */
+  const neverPushed = !(Number(data.config_revision) > 0);
+  const tiles = neverPushed && visibleTiles.every((tile) => tile.status === 'unassigned')
+    ? [] : visibleTiles;
   if (!tiles.length) {
     grid.classList.add('empty');
     grid.append(el('div', '', '当前没有显示窗口，请在控制台选择场次并推送。'));

@@ -9,8 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from app import db, idempotency, result_migrations
+from app import db, idempotency, result_migrations, result_candidates
 from app.api import scoring, standings
+from helpers.historical_materialization import correction, cancel, reset_review
 from app.domain import advancement, ranking, validation
 from app.errors import ApiError
 from app.http_server import Context
@@ -38,6 +39,7 @@ class ResultSafetyTest(unittest.TestCase):
         self.stage = self.make_stage("single_elim")
         self.pool = self.make_pool(self.stage, "bracket")
         self.mid = self.make_match(self.stage, self.pool, result="home", label="决赛")
+        result_candidates.initialize(self.conn)
 
     def tearDown(self):
         self.conn.close()
@@ -101,16 +103,16 @@ class ResultSafetyTest(unittest.TestCase):
         return self.ctx(body, params={"pool_id": str(pid)})
 
     def test_correction_version_replay_actor_and_scope(self):
-        self.error(scoring.correct_match, self.ctx({"reason": "review"}), "client_upgrade_required")
+        self.error(correction, self.ctx({"reason": "review"}), "client_upgrade_required")
         body = self.correction()
-        saved = scoring.correct_match(self.ctx(body))
+        saved = correction(self.ctx(body))
         self.assertEqual(saved["receipt"]["applied_version"], 2)
-        replay = scoring.correct_match(self.ctx(body))
+        replay = correction(self.ctx(body))
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["receipt"], saved["receipt"])
-        self.error(scoring.correct_match, self.ctx(self.correction(uid="other")), "version_conflict")
-        self.error(scoring.correct_match, self.ctx(body, user=self.users[1]), "request_uid_reused")
-        self.error(scoring.cancel_match, self.ctx(body, action="cancel"), "request_uid_reused")
+        self.error(correction, self.ctx(self.correction(uid="other")), "version_conflict")
+        self.error(correction, self.ctx(body, user=self.users[1]), "request_uid_reused")
+        self.error(cancel, self.ctx(body, action="cancel"), "request_uid_reused")
         self.assertEqual(self.row()["result_version"], 2)
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM request_log")[0], 1)
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM audit_logs WHERE action='correct_match'")[0], 1)
@@ -118,17 +120,17 @@ class ResultSafetyTest(unittest.TestCase):
     def test_frozen_event_identity_and_full_payload_hash(self):
         body = self.correction(event_identity={"event_id": self.event, "event_uuid": "fixture-uuid",
                                               "deployment_id": "fixture-deploy"})
-        saved = scoring.correct_match(self.ctx(body))
+        saved = correction(self.ctx(body))
         self.assertEqual(saved["receipt"]["payload_hash"], validation.payload_hash(body))
         changed = {**body, "event_identity": {**body["event_identity"], "deployment_id": "elsewhere"}}
-        self.error(scoring.correct_match, self.ctx(changed), "event_identity_mismatch")
-        self.error(scoring.correct_match, self.ctx({**body, "reason": "different"}), "request_uid_reused")
+        self.error(correction, self.ctx(changed), "event_identity_mismatch")
+        self.error(correction, self.ctx({**body, "reason": "different"}), "request_uid_reused")
 
     def test_cancel_preserves_history_but_revokes_automatic_points(self):
         standings.auto_placements(self.ctx({}, params={"category_id": str(self.cat)}))
         self.assertEqual(db.q1(self.conn, "SELECT SUM(points) FROM school_points")[0], 32)
         with db.tx(self.conn):
-            scoring.cancel_match(self.ctx({"request_uid": "cancel", "base_version": 1, "reason": "cancel"}, action="cancel"))
+            cancel(self.ctx({"request_uid": "cancel", "base_version": 1, "reason": "cancel"}, action="cancel"))
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM match_sets WHERE match_id=?", (self.mid,))[0], 2)
         self.assertTrue(all(r[2] == "pending" and r[1] is None for r in self.ranks()))
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM school_points")[0], 0)
@@ -141,7 +143,7 @@ class ResultSafetyTest(unittest.TestCase):
         with db.tx(self.conn):
             with patch.object(scoring.security, "audit", side_effect=RuntimeError("audit fault")):
                 with self.assertRaises(RuntimeError):
-                    scoring.correct_match(self.ctx(self.correction()))
+                    correction(self.ctx(self.correction()))
             db.insert(self.conn, "settings", {"k": "unrelated", "v": "committed"})
         self.assertEqual(self.row()["result_version"], 1)
         self.assertEqual(self.ranks(), ranks_before)
@@ -157,14 +159,14 @@ class ResultSafetyTest(unittest.TestCase):
             return original_insert(conn, table, data)
         with patch.object(db, "insert", side_effect=failing_insert):
             with self.assertRaises(RuntimeError):
-                scoring.correct_match(self.ctx(self.correction()))
+                correction(self.ctx(self.correction()))
         self.assertEqual(self.row()["result_version"], 1)
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM audit_logs WHERE action='correct_match'")[0], 0)
         self.assertFalse(self.conn.in_transaction)
 
     def test_receipt_read_survives_assignment_change_and_is_private(self):
         body = self.correction()
-        result = scoring.correct_match(self.ctx(body, user=self.users[1]))
+        result = correction(self.ctx(body, user=self.users[1]))
         db.insert(self.conn, "settings", {"k": f"recording:match:{self.mid}", "v": json.dumps({"user_id": self.users[3]["id"]})})
         owner_ctx = self.ctx(user=self.users[1], params={"uid": "c1"})
         self.assertEqual(scoring.result_receipt(owner_ctx)["receipt"], result["receipt"])
@@ -183,7 +185,7 @@ class ResultSafetyTest(unittest.TestCase):
                 conn = db.connect(path)
                 try:
                     try:
-                        result = scoring.correct_match(self.ctx(body, conn=conn))
+                        result = correction(self.ctx(body, conn=conn))
                         return (200, result.get("replayed", False))
                     except ApiError as exc:
                         return (exc.status, exc.code)
@@ -218,7 +220,7 @@ class ResultSafetyTest(unittest.TestCase):
         self.assertFalse(confirmed["standings"]["needs_reconfirm"])
         self.assertEqual(confirmed["standings"]["base_results"], basis)
         standings.auto_placements(self.ctx({}, params={"category_id": str(self.cat)}))
-        scoring.correct_match(self.ctx(self.correction(uid="placement", winner="away"), mid=mid))
+        correction(self.ctx(self.correction(uid="placement", winner="away"), mid=mid))
         self.assertEqual(db.q1(self.conn, "SELECT status FROM pools WHERE id=?", (pool,))[0], "finished")
         self.assertTrue(all(r[0] == "pending" for r in db.q(self.conn, "SELECT status FROM pool_rank_snapshots WHERE pool_id=?", (pool,))))
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM school_points")[0], 0)
@@ -269,7 +271,7 @@ class ResultSafetyTest(unittest.TestCase):
         standings.auto_placements(self.ctx({}, params={"category_id": str(self.cat)}))
         row = db.q1(self.conn, "SELECT * FROM placements WHERE participation_id=?", (self.parts[0],))
         db.update(self.conn, "placements", row["id"], {"source": "manual"})
-        scoring.correct_match(self.ctx(self.correction()))
+        correction(self.ctx(self.correction()))
         stored = self.ranks()
         self.assertEqual(stored[0][1:], (1, "confirmed", "manual"))
         self.assertEqual(stored[1][1:3], (None, "pending"))
@@ -287,7 +289,7 @@ class ResultSafetyTest(unittest.TestCase):
         self.assertEqual(reset["stage_id"], stage)
         self.assertEqual(reset["home_participation"], self.parts[0])
         db.insert(self.conn, "settings", {"k": f"recording:match:{reset['id']}", "v": json.dumps({"user_id": self.users[2]["id"]})})
-        self.error(scoring.correct_match, self.ctx(self.correction(uid="parent", winner="home"), mid=parent), "reset_requires_review")
+        self.error(correction, self.ctx(self.correction(uid="parent", winner="home"), mid=parent), "reset_requires_review")
         self.assertEqual(self.row(parent)["result_version"], 1)
         self.assertEqual(self.row(reset["id"])["reset_state"], "active")
         for s in self.sets("away"):
@@ -295,13 +297,13 @@ class ResultSafetyTest(unittest.TestCase):
         db.update(self.conn, "matches", reset["id"], {"status": "finished", "result_status": "normal", "result_version": 1})
         body = self.correction(uid="resolved", winner="home", reset_resolutions=[{
             "match_id": reset["id"], "base_version": 1, "action": "deactivate", "reason": "parent reversed"}])
-        scoring.correct_match(self.ctx(body, mid=parent))
+        correction(self.ctx(body, mid=parent))
         self.assertEqual(self.row(reset["id"])["reset_state"], "inactive")
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM match_sets WHERE match_id=?", (reset["id"],))[0], 2)
-        self.error(scoring.correct_match, self.ctx(self.correction(uid="again", version=2), mid=parent), "reset_requires_review")
+        self.error(correction, self.ctx(self.correction(uid="again", version=2), mid=parent), "reset_requires_review")
         new_body = self.correction(uid="fresh-reset", version=2, reset_resolutions=[{
             "match_id": reset["id"], "base_version": 2, "action": "replace", "reason": "new reset identity"}])
-        scoring.correct_match(self.ctx(new_body, mid=parent))
+        correction(self.ctx(new_body, mid=parent))
         active = db.q1(self.conn, "SELECT * FROM matches WHERE reset_parent_id=? AND reset_state='active'", (parent,))
         self.assertNotEqual(active["id"], reset["id"])
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM match_sets WHERE match_id=?", (active["id"],))[0], 0)
@@ -336,7 +338,7 @@ class ResultSafetyTest(unittest.TestCase):
         audit_count = db.q1(self.conn, "SELECT COUNT(*) FROM audit_logs")[0]
         result_migrations.install(self.conn)
         self.assertEqual(db.q1(self.conn, "SELECT COUNT(*) FROM audit_logs")[0], audit_count)
-        resolved = scoring.review_reset_match(self.ctx({"request_uid": "review", "base_version": 1,
+        resolved = reset_review(self.ctx({"request_uid": "review", "base_version": 1,
                     "action": "deactivate", "reason": "uncertain historical final"}, mid=reset, action="reset-review"))
         self.assertEqual(resolved["match"]["reset_state"], "inactive")
 

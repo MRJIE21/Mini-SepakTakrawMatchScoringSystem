@@ -1,4 +1,5 @@
 """Real HTTP stage lifecycle and played group/knockout/placement tournaments."""
+from helpers.reviewed_result import reviewed_result
 import itertools
 import tempfile
 from pathlib import Path
@@ -122,7 +123,7 @@ class ScheduleApiTest(unittest.TestCase):
             self.assertEqual(len(set(ranks)), len(ranks))
             self.assertTrue(self.ok('GET', f"/api/categories/{self.fx['team_cat']}/schedule")['plan']['stages'][0]['pools'])
             final = next(m for s in self.plan()['stages'] for m in s['matches'] if m['schedule_role'] == 'final')
-            self.ok('POST', f"/api/matches/{final['id']}/correction", {'reason': '裁判复核', 'result_status': 'home_forfeit', 'sets': [], 'events': []})
+            reviewed_result(self, 'POST', f"/api/matches/{final['id']}/correction", {'reason': '裁判复核', 'result_status': 'home_forfeit', 'sets': [], 'events': []}, expected=200)
             ranks_after = self.ok('GET', f"/api/categories/{self.fx['team_cat']}/placements")['placements']
             winner_after = next(p for p in ranks_after if p['rank_no'] == 1)
             self.assertEqual(winner_after['participation_id'], final['away']['participation_id'])

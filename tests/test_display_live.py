@@ -87,7 +87,7 @@ class DisplayLiveTest(unittest.TestCase):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method)
         req.add_header("Content-Type", "application/json")
-        req.add_header("X-Client-Protocol", "2")
+        req.add_header("X-Client-Protocol", "3")
         if token:
             req.add_header("Authorization", f"Bearer {token}")
         for key, value in (headers or {}).items():
@@ -118,11 +118,14 @@ class DisplayLiveTest(unittest.TestCase):
         }, token=self.admin)
         self.assertEqual(published["config"]["layout"], 1)
 
+        started=self.request('POST','/api/display/live/start',{'match_id':1,'draft_uid':'draft-1',
+            'claim_epoch':1,'expected_stream_epoch':0},token=self.recorder,headers={'X-Event-ID':'1'})
+        self.assertIn('stream_epoch',started,started)
         synced = self.request("POST", "/api/display/live", {
             "match_id": 1, "event_seq": 1, "status": "live", "current_set": 1,
             "home_points": 5, "away_points": 3, "home_sets": 0, "away_sets": 0,
             "sets": [{"set_no": 1, "home_points": 5, "away_points": 3, "winner_side": ""}],
-            "draft_uid": "draft-1", "lineup_hash": "lineup-1",
+            "draft_uid": "draft-1", "lineup_hash": "lineup-1",'claim_epoch':1,'stream_epoch':started['stream_epoch'],
         }, token=self.recorder, headers={"X-Event-ID": "1"})
         self.assertEqual(synced["home_points"], 5)
 

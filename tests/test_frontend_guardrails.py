@@ -110,6 +110,61 @@ class FrontendGuardrailTest(unittest.TestCase):
             self.assertNotIn("go('schoolRegistration'", body,
                              f"{name} 不应再把用户送出项目工作台")
 
+    def test_unknown_hash_is_normalized_with_explicit_feedback(self):
+        """未知 hash 必须归一到角色首页并提示，不能再静默渲染首页且保留错误地址（D06）。"""
+        main = (WEB / "js" / "main.js").read_text(encoding="utf-8")
+        block = main[main.index("async function renderRoute"):]
+        block = block[:block.index("\n}\n") + 3]
+        self.assertIn("if (!state.views[requestedName])", block)
+        self.assertIn("链接无效，已返回首页", block)
+        self.assertIn("history.replaceState(null, '', home)", block)
+        self.assertIn("resolvedName = homeName", block)
+
+    def test_admin_organizer_land_on_dashboard(self):
+        """D07：管理员/编排人员落地赛事首页；记录员/查看者/大屏操作员保持不变。"""
+        main = (WEB / "js" / "main.js").read_text(encoding="utf-8")
+        block = main[main.index("function roleHome()"):]
+        block = block[:block.index("\n}\n") + 3]
+        self.assertIn("if (role === 'recorder') return '#/field';", block)
+        self.assertIn("if (role === 'viewer') return '#/school';", block)
+        self.assertIn("if (role === 'display_operator') return '#/display';", block)
+        self.assertIn("return '#/dashboard';", block)
+        self.assertNotIn("'#/workspace'", block)
+
+    def test_review_entry_is_named_pending_verification(self):
+        """D04：旧 #/review 保留，但用户可见名称统一为“待核实提交”。"""
+        review = (WEB / "js" / "views" / "review.js").read_text(encoding="utf-8")
+        self.assertIn("'待核实提交'", review)
+        self.assertNotIn("label: '提交重试'", review)
+        hits = []
+        for path in self.js_files():
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "提交重试" in line:
+                    hits.append(f"{path.relative_to(WEB)}:{lineno}: {line.strip()}")
+        self.assertEqual(hits, [], "待核实提交入口改名后不应残留旧文案")
+
+    def test_school_total_rank_placeholder_is_shared_by_page_and_exports(self):
+        """D01：本组存在未确认名次时，页面/CSV/XLSX/打印公告都使用“—（待确认）”占位。"""
+        exports = (Path(__file__).resolve().parent.parent / "app" / "api" / "exports.py").read_text(encoding="utf-8")
+        points = (Path(__file__).resolve().parent.parent / "app" / "domain" / "points.py").read_text(encoding="utf-8")
+        school = (WEB / "js" / "views" / "school.js").read_text(encoding="utf-8")
+        self.assertIn('rank_provisional', points)
+        self.assertIn('—（待确认）', exports)
+        self.assertIn('—（待确认）', school)
+
+    def test_multi_pool_rank_recovery_goes_to_manual_entry(self):
+        """D05：多组项目不再提供一键重生成，按钮改为手工核对并跳转手工录入。"""
+        results = (WEB / "js" / "views" / "results.js").read_text(encoding="utf-8")
+        self.assertIn("multiPool", results)
+        self.assertIn("多组项目请手工核对名次", results)
+        self.assertIn("openManualPlacement(cat, pdata.placements", results)
+
+    def test_readonly_roles_see_export_help_instead_of_buttons(self):
+        """D03：查看者/大屏操作员不能自行导出/打印，页面给出联系成绩人员的说明。"""
+        for name in ("views/results.js", "views/school.js"):
+            text = (WEB / "js" / name).read_text(encoding="utf-8")
+            self.assertIn("只读账号如需", text, f"{name} 应给只读角色导出/打印说明")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

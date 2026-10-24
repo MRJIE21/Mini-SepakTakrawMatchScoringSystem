@@ -1,3 +1,4 @@
+import {registrationEdit,registrationProject} from './helpers/registration_ui.mjs';
 /* 使用独立数据库检查主要页面、报名布局和窄屏溢出；实际赛事不参与测试。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -28,10 +29,11 @@ server = create_server(('127.0.0.1', 0), QuietHandler)
 print(json.dumps({'port': server.server_port}), flush=True)
 server.serve_forever()
 `;
-const child = spawn(process.env.STSS_PYTHON || 'python', ['-u', '-c', serverCode], {
+const child = spawn(process.env.STSS_PYTHON || 'python', ['-B', '-u', '-c', serverCode], {
   cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, STSS_DATA_DIR: dataDir, STSS_DB: path.join(dataDir, 'registry.db'),
-    STSS_EVENTS_DIR: path.join(dataDir, 'events'), STSS_ADMIN_PASSWORD: 'LayoutTest123', PYTHONUTF8: '1' },
+    STSS_EVENTS_DIR: path.join(dataDir, 'events'), STSS_ADMIN_PASSWORD: 'LayoutTest123', PYTHONUTF8: '1',
+    PYTHONDONTWRITEBYTECODE: '1' },
 });
 let serverErrors = '', browser;
 child.stderr.on('data', chunk => { serverErrors += chunk; });
@@ -151,7 +153,7 @@ try {
         assert.ok(await totals.evaluate(el => el.scrollLeft > 0), '总分表可横向查看后面的列');
       }
     }
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    await registrationEdit(page);
     await audit('school-people', viewport.width);
     if ([1365, 390].includes(viewport.width)) await page.screenshot({ path: path.join(artifacts, `school-people-${viewport.width}.png`), fullPage: true });
     await navigate('schoolRegistration');
@@ -190,7 +192,7 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('.school-registration-school').length === 9);
     assert.equal(await cards.count(), 9, '组别切换进入该组学校列表');
     await cards.first().click();
-    await page.getByRole('tab', { name: '人员名单', exact: true }).waitFor();
+    await page.getByRole('tab', { name: '统一编辑', exact: true }).waitFor();
     console.log(`PASS: ${report.length} 个页面与尺寸组合、学校筛选与进入、弹窗边界、工具栏间距和卡片信息；无脚本错误或整页横向溢出`);
   }
 } finally {

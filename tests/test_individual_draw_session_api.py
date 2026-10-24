@@ -11,6 +11,7 @@
 隔离方式沿用 tests/test_individual_draw_api.py：setUpClass 把 config.DATA_DIR/DB_PATH/EVENTS_DIR
 指向临时目录，再调用 test_api.ApiTest.setUpClass；每个用例各自建赛事，全部请求走真实 HTTP。
 """
+from helpers.reviewed_result import reviewed_result
 import json
 import tempfile
 import unittest
@@ -119,10 +120,10 @@ class IndividualDrawSessionApiTest(unittest.TestCase):
         return self.rows('SELECT athlete_id FROM participations WHERE id=?', (participation_id,))[0]['athlete_id']
 
     def record_score(self, participation_id, value=30, uid=None):
-        return self.ok('POST', '/api/scoring/individual', {
+        return reviewed_result(self, 'POST', '/api/scoring/individual', {
             'event_identity': self.event_identity, 'submission_uid': uid or str(uuid.uuid4()),
             'participation_id': participation_id, 'base_version': 0, 'result_status': 'normal',
-            'result_value': value, 'error_count': 0, 'violation_count': 0, 'rank_no': None})
+            'result_value': value, 'error_count': 0, 'violation_count': 0, 'rank_no': None}, expected=200)
 
     def admin_id(self):
         registry = db.connect()

@@ -1,6 +1,9 @@
 @echo off
 setlocal
 chcp 65001 >nul
+rem 重定向输出到文件时也强制 UTF-8，避免按系统 locale(GBK) 落盘导致日志乱码
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0"
 set "STSS_LAUNCHER=1"
 

@@ -5,6 +5,7 @@
 以及幂等提交、版本冲突、15 分制校验、轮空/待定区分、甲乙丙隔离。
 """
 from __future__ import annotations
+from helpers.reviewed_result import reviewed_result
 from helpers.historical_schedule import fixture_schedule
 
 import json
@@ -63,7 +64,9 @@ class ApiTest(unittest.TestCase):
         # 每个用例各自建立赛事与名单，互不影响；数据库在整个测试类期间保持同一份
         self.base = f"http://127.0.0.1:{self.port}"
         self.event_headers = {}
-        self.use_event_database = False
+        # Review mutations require explicit event context and an event business
+        # database. Keep the original business vectors in that supported scope.
+        self.use_event_database = True
         self.token = self.login("admin", "admin123")
 
     # ------------------------------------------------------------ HTTP 工具
@@ -73,7 +76,7 @@ class ApiTest(unittest.TestCase):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
-        req.add_header("X-Client-Protocol", "2")
+        req.add_header("X-Client-Protocol", "3")
         for key, value in self.event_headers.items():
             req.add_header(key, value)
         tok = self.token if token is None else (token or None)
@@ -247,7 +250,7 @@ class ApiTest(unittest.TestCase):
         body.update(recorded)
         if self.event_headers and "event_identity" not in body:
             body["event_identity"] = self.event_identity
-        return self.request("POST", "/api/scoring/submit", body, expect=expect)
+        return reviewed_result(self, "POST", "/api/scoring/submit", body, expected=expect)
 
     def lineup_for(self, match_id) -> dict:
         """记录端下载场次数据时拿到的方案版本与对阵双方，提交时必须原样带回。"""
@@ -360,22 +363,26 @@ class ApiTest(unittest.TestCase):
         fx = self.build_event(team_count=0, individual_count=2)
         url = f"/api/categories/{fx['indiv_cat']}/workspace"
         def submit(index, value, version=0, status="normal", **extra):
-            self.ok("POST", "/api/scoring/individual", {
+            return reviewed_result(self, "POST", "/api/scoring/individual", {
                 "submission_uid": f"workspace-individual-{fx['event_id']}-{index}-{version}",
                 "participation_id": fx["indiv_parts"][index], "base_version": version,
                 "result_status": status, "result_value": value, "error_count": 0,
                 "violation_count": 0, "rank_no": None, **extra,
-            })
+            }, expected=200)
         submit(0, 20)
         partial = self.ok("GET", url)
         self.assertEqual(partial["counts"]["individual_results_missing"], 1)
         self.assertEqual(partial["primary_action"]["tab"], "entry")
-        submit(1, None, status="pending")
+        received = submit(1, None, status="pending")
         pending = self.ok("GET", url)
-        self.assertEqual(pending["counts"]["individual_results_missing"], 0)
-        self.assertEqual(pending["counts"]["individual_results_unconfirmed"], 1)
-        self.assertEqual(pending["primary_action"]["tab"], "entry")
-        submit(1, 10, version=1, reason="裁判已核对")
+        self.assertEqual(pending["counts"]["individual_results_missing"], 1)
+        self.assertEqual(pending["counts"]["candidates_pending"], 1)
+        self.assertEqual(pending["primary_action"]["tab"], "review")
+        self.request('POST', f"/api/result-candidates/{received['candidate_id']}/decision", {
+            'decision_uid':str(uuid.uuid4()),'action':'return','revision':received['receipt']['revision'],
+            'candidate_hash':received['receipt']['candidate_hash'],'base_version':0,'reason':'补全原始次数'},
+            token=self._review_fixture_users['reviewer'],expect=200)
+        submit(1, 10, version=0, submission_uid=str(uuid.uuid4()), reason="裁判已核对")
         complete = self.ok("GET", url)
         self.assertEqual(complete["primary_action"]["tab"], "results")
         self.assertEqual(complete["counts"]["placements_confirmed"], 0)
@@ -424,36 +431,36 @@ class ApiTest(unittest.TestCase):
         again = self.play(first["id"], [(15, 10), (15, 12)], uid="uid-first", expect=200)
         self.assertTrue(again["duplicate"])
         # 同 uid 不同内容 → 冲突
-        self.err("POST", "/api/scoring/submit",
+        reviewed_result(self, "POST", "/api/scoring/submit",
                  {"submission_uid": "uid-first", "match_id": first["id"],
                   "base_version": 0, "result_status": "normal",
                   "sets": [{"set_no": 1, "home_points": 15, "away_points": 1}], "events": []},
-                 expect=409, code="uid_conflict")
+                 expected=409, code="uid_conflict")
         # 旧版本提交 → 冲突
-        self.err("POST", "/api/scoring/submit",
+        reviewed_result(self, "POST", "/api/scoring/submit",
                   {"submission_uid": "uid-stale", "match_id": first["id"], "base_version": 0,
                    "result_status": "normal", "sets": [], "events": []},
-                  expect=409, code="version_conflict")
+                  expected=409, code="version_conflict")
         # 16 分超出上限
         bad = {"submission_uid": "uid-16", "match_id": first["id"], "base_version": 1,
                "result_status": "normal",
                "sets": [{"set_no": 1, "home_points": 16, "away_points": 14, "winner_side": "home"}],
                "events": [], **self.lineup_for(first["id"])}
-        self.err("POST", "/api/scoring/submit", bad, expect=422, code="invalid_package")
+        reviewed_result(self, "POST", "/api/scoring/submit", bad, expected=422, code="invalid_package")
         # 过程与结果不一致
         mismatch = {"submission_uid": "uid-mismatch", "match_id": first["id"], "base_version": 1,
                     "result_status": "normal",
                     "sets": [{"set_no": 1, "home_points": 15, "away_points": 12, "winner_side": "home"}],
                     "events": self.events_for([{"home_points": 15, "away_points": 5}]),
                     **self.lineup_for(first["id"])}
-        parsed = self.err("POST", "/api/scoring/submit", mismatch, expect=422, code="invalid_package")
+        parsed = reviewed_result(self, "POST", "/api/scoring/submit", mismatch, expected=422, code="invalid_package")
         self.assertTrue(any("不一致" in e for e in parsed["detail"]["errors"]))
 
         # 待定的后续场次不能计分
-        self.err("POST", "/api/scoring/submit",
+        reviewed_result(self, "POST", "/api/scoring/submit",
                   {"submission_uid": "uid-pending", "match_id": pending[0]["id"],
                    "base_version": 0, "result_status": "normal", "sets": [], "events": []},
-                  expect=409, code="not_ready")
+                  expected=409, code="not_ready")
 
         # 打完小组赛
         for m in pool_matches:
@@ -542,7 +549,7 @@ class ApiTest(unittest.TestCase):
         self.assertNotIn("11分", text)
 
         # 正式更正：改变决赛结果会提示受影响场次
-        correction = self.ok("POST", f"/api/matches/{final['id']}/correction",
+        correction = reviewed_result(self, "POST", f"/api/matches/{final['id']}/correction",
                              {"reason": "记录错误：第三局比分登记有误",
                               "result_status": "normal",
                               "sets": [{"set_no": 1, "home_points": 15, "away_points": 12,
@@ -553,7 +560,7 @@ class ApiTest(unittest.TestCase):
                                         "winner_side": "away"}],
                               "events": self.events_for([{"home_points": 15, "away_points": 12},
                                                          {"home_points": 12, "away_points": 15},
-                                                         {"home_points": 13, "away_points": 15}])})
+                                                         {"home_points": 13, "away_points": 15}])}, expected=200)
         self.assertEqual(correction["match"]["result_version"], 2)
         logs = self.ok("GET", "/api/audit-logs?entity_type=match&action=correct_match")
         self.assertEqual(len(logs["logs"]), 1)
@@ -719,29 +726,29 @@ class ApiTest(unittest.TestCase):
         fx = self.build_event(team_count=2, individual_count=3)
         cat = fx["indiv_cat"]
         pids = fx["indiv_parts"]
-        self.ok("POST", "/api/scoring/individual",
+        reviewed_result(self, "POST", "/api/scoring/individual",
                 {"submission_uid": "ind-1", "participation_id": pids[0], "base_version": 0,
                  "result_status": "normal", "result_value": 42, "error_count": 1,
-                 "violation_count": 0, "rank_no": None})
-        self.ok("POST", "/api/scoring/individual",
+                 "violation_count": 0, "rank_no": None}, expected=200)
+        reviewed_result(self, "POST", "/api/scoring/individual",
                 {"submission_uid": "ind-2", "participation_id": pids[1], "base_version": 0,
                  "result_status": "normal", "result_value": 38, "error_count": 2,
-                 "violation_count": 0, "rank_no": None})
+                 "violation_count": 0, "rank_no": None}, expected=200)
         # 原始成绩接口不能逐人直接确认名次
-        self.err("POST", "/api/scoring/individual",
+        reviewed_result(self, "POST", "/api/scoring/individual",
                   {"submission_uid": "ind-3", "participation_id": pids[2], "base_version": 0,
                    "result_status": "normal", "result_value": 30, "error_count": 3,
                    "violation_count": 0, "rank_no": 2},
-                  expect=400, code="rank_requires_project_confirmation")
+                  expected=400, code="rank_requires_project_confirmation")
         # 未完成不记名次
-        self.err("POST", "/api/scoring/individual",
+        reviewed_result(self, "POST", "/api/scoring/individual",
                   {"submission_uid": "ind-4", "participation_id": pids[2], "base_version": 0,
                    "result_status": "dnf", "rank_no": 3},
-                  expect=400, code="rank_requires_project_confirmation")
-        self.ok("POST", "/api/scoring/individual",
+                  expected=400, code="rank_requires_project_confirmation")
+        reviewed_result(self, "POST", "/api/scoring/individual",
                 {"submission_uid": "ind-5", "participation_id": pids[2], "base_version": 0,
                  "result_status": "normal", "result_value": 30, "error_count": 3,
-                 "violation_count": 0, "rank_no": None})
+                 "violation_count": 0, "rank_no": None}, expected=200)
         self.ok("POST", f"/api/categories/{cat}/individual-rankings/confirm")
         placements = self.ok("GET", f"/api/categories/{cat}/placements")["placements"]
         self.assertEqual(len(placements), 3)
@@ -755,9 +762,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(top["个人2校"]["total"], 7)
         self.assertEqual(top["个人3校"]["total"], 6)
         # 提交查询
-        found = self.ok("GET", "/api/submissions/ind-1")
+        found = self.ok("GET", "/api/candidate-receipts/ind-1")
         self.assertTrue(found["found"])
-        self.assertFalse(self.ok("GET", "/api/submissions/not-exist")["found"])
+        self.assertFalse(self.ok("GET", "/api/candidate-receipts/not-exist")["found"])
 
 
     def test_roles(self):
@@ -770,19 +777,22 @@ class ApiTest(unittest.TestCase):
         organizer = self.make_user("organizer")
         # 查看者不能锁定、不能提交
         self.err("POST", f"/api/plans/{plan}/lock", {}, token=viewer, expect=403)
-        self.err("POST", "/api/scoring/submit",
-                  {"submission_uid": "u1", "match_id": 1, "base_version": 0}, token=viewer, expect=403)
+        reviewed_result(self, "POST", "/api/scoring/submit",
+                  {"submission_uid": "u1", "match_id": 1, "base_version": 0}, token=viewer, expected=403)
         # 记录员不能锁定方案
         self.err("POST", f"/api/plans/{plan}/lock", {}, token=recorder, expect=403)
         # 编排人员可以在管理员之外执行锁定以外的编排工作，但锁定必须由管理员完成
-        self.err("POST", f"/api/plans/{plan}/lock", {}, token=organizer, expect=403)
+        self.err("POST", f"/api/plans/{plan}/lock", {}, token=organizer, expect=410, code="planner_retired")
+        stage = self.ok("GET", f"/api/plans/{plan}")["plan"]["stages"][0]["id"]
+        for unauthorized in (viewer, recorder, organizer):
+            self.err("POST", f"/api/schedule-stages/{stage}/confirm", {}, token=unauthorized, expect=403)
         self.fixture_schedule("POST", f"/api/plans/{plan}/lock")
         match = self.match_list(category_id=fx["team_cat"])[0]
         # 记录员可以提交成绩
         self.play(match["id"], [(15, 9), (15, 9)], uid="u2")
         # 记录员不能做正式更正
-        self.err("POST", f"/api/matches/{match['id']}/correction",
-                  {"reason": "x", "sets": [], "events": []}, token=recorder, expect=403)
+        reviewed_result(self, "POST", f"/api/matches/{match['id']}/correction",
+                  {"request_uid": str(uuid.uuid4()), "reason": "x", "sets": [], "events": []}, token=recorder, expected=403)
         # 匿名不能读取
         self.err("GET", "/api/events", token="", expect=401)
 
@@ -841,6 +851,9 @@ class ApiTest(unittest.TestCase):
         """向导式配置：自定义组别/项目/小组命名、手动分组、可配置排名积分。"""
         event = self.ok("POST", "/api/events", {"name": "灵活配置测试赛"})
         event_id = event["event_id"]
+        self.event_headers = {'X-Event-ID': str(event_id), 'X-Event-UUID': event['event_uuid']}
+        self.event_identity = {"event_id": event_id, "event_uuid": event["event_uuid"],
+                               "deployment_id": self.ok("GET", "/api/events")["deployment_id"]}
 
         # 组别自定义命名 + 重命名
         group = self.ok("POST", f"/api/events/{event_id}/groups",
@@ -1056,22 +1069,22 @@ class ApiTest(unittest.TestCase):
         # ① 个人赛：取消成绩后旧名次与积分必须释放
         fx = self.build_event(team_count=2, individual_count=2)
         pids = fx["indiv_parts"]
-        self.ok("POST", "/api/scoring/individual",
+        reviewed_result(self, "POST", "/api/scoring/individual",
                 {"submission_uid": "ind-champ", "participation_id": pids[0], "base_version": 0,
                  "result_status": "normal", "result_value": 40, "error_count": 1,
-                 "violation_count": 0, "rank_no": None})
-        self.ok("POST", "/api/scoring/individual",
+                 "violation_count": 0, "rank_no": None}, expected=200)
+        reviewed_result(self, "POST", "/api/scoring/individual",
                 {"submission_uid": "ind-runner", "participation_id": pids[1], "base_version": 0,
                  "result_status": "normal", "result_value": 30, "error_count": 1,
-                 "violation_count": 0, "rank_no": None})
+                 "violation_count": 0, "rank_no": None}, expected=200)
         self.ok("POST", f"/api/categories/{fx['indiv_cat']}/individual-rankings/confirm")
         group_a = fx["groups"]["甲"]["id"]
         totals = {r["name"]: r for r in self.ok("GET", f"/api/groups/{group_a}/school-totals")["rows"]}
         self.assertEqual(totals["个人1校"]["total"], 9)
         # 改为取消成绩：名次退回待确认，积分归零
-        self.ok("POST", "/api/scoring/individual",
+        reviewed_result(self, "POST", "/api/scoring/individual",
                 {"submission_uid": "ind-dsq", "participation_id": pids[0], "base_version": 1,
-                 "result_status": "dsq", "rank_no": None, "reason": "裁判复核后取消成绩"})
+                 "result_status": "dsq", "rank_no": None, "reason": "裁判复核后取消成绩"}, expected=200)
         placements = self.ok("GET", f"/api/categories/{fx['indiv_cat']}/placements")["placements"]
         row = [p for p in placements if p["participation_id"] == pids[0]][0]
         self.assertIsNone(row["rank_no"])
@@ -1097,10 +1110,10 @@ class ApiTest(unittest.TestCase):
         totals = {r["name"]: r for r in self.ok("GET", f"/api/groups/{group}/school-totals")["rows"]}
         self.assertEqual(totals["甲1校"]["total"], 18, "冠军学校应有 18 分")
         # 正式更正：改为对手获胜
-        self.ok("POST", f"/api/matches/{final['id']}/correction",
+        reviewed_result(self, "POST", f"/api/matches/{final['id']}/correction",
                 {"reason": "记录错误：胜负登记反了", "result_status": "normal",
                  "sets": [{"set_no": 1, "home_points": 5, "away_points": 15, "winner_side": "away"},
-                          {"set_no": 2, "home_points": 6, "away_points": 15, "winner_side": "away"}]})
+                          {"set_no": 2, "home_points": 6, "away_points": 15, "winner_side": "away"}]}, expected=200)
         placements = self.ok("GET", f"/api/categories/{fx2['team_cat']}/placements")["placements"]
         ranks_after = {p["participation_id"]: (p["rank_no"], p["status"]) for p in placements}
         winner_after = [pid for pid, (r, st) in ranks_after.items() if r == 1 and st == "confirmed"]
@@ -1126,10 +1139,10 @@ class ApiTest(unittest.TestCase):
         self.ok("POST", f"/api/pools/{pool['id']}/confirm", {})
         self.assertEqual(self.ok("GET", f"/api/pools/{pool['id']}/standings")["confirmed"], True)
         # 更正比赛结果（双方比分对调）→ 小组名次快照失效
-        self.ok("POST", f"/api/matches/{match['id']}/correction",
+        reviewed_result(self, "POST", f"/api/matches/{match['id']}/correction",
                 {"reason": "比分登记方向错误", "result_status": "normal",
                  "sets": [{"set_no": 1, "home_points": 5, "away_points": 15, "winner_side": "away"},
-                          {"set_no": 2, "home_points": 6, "away_points": 15, "winner_side": "away"}]})
+                          {"set_no": 2, "home_points": 6, "away_points": 15, "winner_side": "away"}]}, expected=200)
         after = self.ok("GET", f"/api/pools/{pool['id']}/standings")
         self.assertFalse(after["confirmed"], "成绩变化后小组名次应退回待确认")
         self.assertTrue(after["needs_reconfirm"])
@@ -1161,10 +1174,10 @@ class ApiTest(unittest.TestCase):
         old_lineup = (loaded["home"]["participation_id"], loaded["away"]["participation_id"])
 
         # 更正小组赛结果 → 小组名次退回待确认，决赛签位随之失效；重新确认后双方对调
-        self.ok("POST", f"/api/matches/{rr['id']}/correction",
+        reviewed_result(self, "POST", f"/api/matches/{rr['id']}/correction",
                 {"reason": "比分登记方向错误", "result_status": "normal",
                  "sets": [{"set_no": 1, "home_points": 10, "away_points": 15, "winner_side": "away"},
-                          {"set_no": 2, "home_points": 11, "away_points": 15, "winner_side": "away"}]})
+                          {"set_no": 2, "home_points": 11, "away_points": 15, "winner_side": "away"}]}, expected=200)
         self.assertEqual(self.ok("GET", f"/api/matches/{final['id']}")["match"]["status"], "pending")
         self.ok("POST", f"/api/pools/{pool_id}/confirm", {})
         current = self.ok("GET", f"/api/matches/{final['id']}")["match"]
@@ -1178,7 +1191,7 @@ class ApiTest(unittest.TestCase):
                  "result_status": "normal",
                  "sets": [{"set_no": 1, "home_points": 15, "away_points": 9, "winner_side": "home"}],
                  "events": []}
-        parsed = self.err("POST", "/api/scoring/submit", stale, expect=409, code="lineup_changed")
+        parsed = reviewed_result(self, "POST", "/api/scoring/submit", stale, expected=409, code="lineup_changed")
         self.assertEqual(parsed["detail"]["recorded"], list(old_lineup))
         self.assertEqual(parsed["detail"]["current"], list(new_lineup))
         self.assertEqual(self.match_status(final["id"]), "ready", "被拒的提交不得改变场次状态")
@@ -1186,7 +1199,7 @@ class ApiTest(unittest.TestCase):
         missing = {k: v for k, v in stale.items()
                    if k not in ("home_participation", "away_participation")}
         missing["submission_uid"] = "uid-no-lineup"
-        self.err("POST", "/api/scoring/submit", missing, expect=400, code="missing_lineup")
+        reviewed_result(self, "POST", "/api/scoring/submit", missing, expected=400, code="missing_lineup")
         # 按当前对阵重新记录即可提交
         self.play(final["id"], [(15, 9), (15, 8)], uid="uid-new-lineup")
         self.assertEqual(self.match_status(final["id"]), "finished")
@@ -1233,6 +1246,7 @@ class ApiTest(unittest.TestCase):
 
     def test_cross_category_writes_rejected(self):
         """名次与参赛名单的写入必须限定在本项目内。"""
+        # 事件作用域接口现在强制携带 X-Event-ID，跨项目/跨赛事隔离在事件库上验证。
         fx = self.build_event(team_count=2)
         # 乙组的参赛主体不能写进甲组项目的名次
         self.err("POST", f"/api/categories/{fx['team_cat']}/placements",
@@ -1256,13 +1270,21 @@ class ApiTest(unittest.TestCase):
         # 学校总分并列的现场确认只能录入本大组别报名的学校
         self.err("POST", f"/api/groups/{fx['groups']['甲']['id']}/school-tiebreak",
                  {"school_ids": [fx["schools"][0], 999999]}, expect=400)
-        # 场地不能跨赛事安排
+        # 场地不能跨赛事安排：赛事作用域接口要求头与路径一致，
+        # 用 A 的身份写 B 的场地会被拒绝（此前会错写进 A 的赛事库造成数据源错位）。
         other = self.ok("POST", "/api/events", {"name": "另一赛事", "start_date": "2026-09-21"})
-        venue = self.ok("POST", f"/api/events/{other['event_id']}/venues", {"name": "外校场地"})
-        self.err("PUT", f"/api/matches/{self.match_list(category_id=fx['team_cat'])[0]['id']}",
-                 {"venue_id": venue["venue_id"]}, expect=400)
+        self.err("POST", f"/api/events/{other['event_id']}/venues", {"name": "外校场地"},
+                 expect=409, code="event_identity_mismatch")
+        match_id = self.match_list(category_id=fx['team_cat'])[0]['id']
+        saved_headers, saved_identity = self.event_headers, self.event_identity
+        self.event_headers = {'X-Event-ID': str(other['event_id']), 'X-Event-UUID': other['event_uuid']}
+        try:
+            # 换成 B 的身份后，A 的比赛在所选事件库中不存在，不能跨赛事混用数据。
+            self.err("PUT", f"/api/matches/{match_id}", {"venue_id": 1}, expect=404)
+        finally:
+            self.event_headers, self.event_identity = saved_headers, saved_identity
         self.err("POST", "/api/matches/bulk-schedule",
-                 {"match_ids": [999999], "venue_id": venue["venue_id"]}, expect=404)
+                 {"match_ids": [999999], "venue_id": 1}, expect=404)
 
     def test_pool_confirm_requires_finished_matches(self):
         """小组还有未打场次时不能确认名次；强制确认必须写原因并记入审计。"""
@@ -1312,6 +1334,8 @@ class ApiTest(unittest.TestCase):
         """打印页转义录入内容（防存储型 XSS），CSV 阻断公式注入。"""
         event = self.ok("POST", "/api/events", {"name": "转义校验赛事", "start_date": "2026-09-20"})
         event_id = event["event_id"]
+        # 事件作用域接口必须携带所选赛事身份（与真实客户端一致）。
+        self.event_headers = {'X-Event-ID': str(event_id), 'X-Event-UUID': event['event_uuid']}
         self.ok("POST", f"/api/events/{event_id}/bootstrap")
         group = self.ok("GET", f"/api/events/{event_id}/structure")["groups"][0]
         cat = next(c for c in group["categories"] if c["kind"] == "team")
@@ -1915,9 +1939,9 @@ class ApiTest(unittest.TestCase):
         for rank, pid in enumerate(fx['team_parts'], 1):
             self.ok('POST', f"/api/categories/{fx['team_cat']}/placements", {'participation_id': pid, 'rank_no': rank})
         for i, pid in enumerate(fx['indiv_parts']):
-            self.ok('POST', '/api/scoring/individual', {'submission_uid': f'audit-ind-{pid}',
+            reviewed_result(self, 'POST', '/api/scoring/individual', {'submission_uid': f'audit-ind-{pid}',
                 'participation_id': pid, 'base_version': 0, 'result_value': 20-i,
-                'error_count': 0, 'violation_count': 0, 'result_status': 'normal'})
+                'error_count': 0, 'violation_count': 0, 'result_status': 'normal'}, expected=200)
         def category(cid):
             data = self.ok('GET', f"/api/events/{fx['event_id']}/dashboard")
             return next(c for g in data['groups'] for c in g['categories'] if c['id'] == cid)
@@ -1926,9 +1950,9 @@ class ApiTest(unittest.TestCase):
         self.assertFalse(category(fx['indiv_cat'])['completed'])
         self.ok('POST', f"/api/categories/{fx['indiv_cat']}/individual-rankings/confirm", {})
         self.assertTrue(category(fx['indiv_cat'])['completed'])
-        self.ok('POST', '/api/scoring/individual', {'submission_uid': f"audit-correction-{fx['indiv_parts'][0]}",
+        reviewed_result(self, 'POST', '/api/scoring/individual', {'submission_uid': f"audit-correction-{fx['indiv_parts'][0]}",
             'participation_id': fx['indiv_parts'][0], 'base_version': 1, 'result_value': 22,
-            'error_count': 0, 'violation_count': 0, 'result_status': 'normal', 'reason': '核对原始记录'})
+            'error_count': 0, 'violation_count': 0, 'result_status': 'normal', 'reason': '核对原始记录'}, expected=200)
         self.assertFalse(category(fx['indiv_cat'])['completed'], '更正后需要重新确认名次')
         self.ok('PUT', f'/api/matches/{mid}', {'note': '等待前序场次结果确认'})
         self.assertEqual(self.ok('GET', f'/api/matches/{mid}')['match']['note'], '')
@@ -1950,7 +1974,7 @@ class ApiTest(unittest.TestCase):
         package = {'submission_uid': f'receipt-score-{mid}', 'match_id': mid, 'base_version': 0,
                    'result_status': 'normal', 'sets': sets, 'events': self.events_for(sets),
                    'event_identity': dict(self.event_identity), **self.lineup_for(mid)}
-        saved = self.request('POST', '/api/scoring/submit', package, token=recorder, expect=200)
+        saved = reviewed_result(self, 'POST', '/api/scoring/submit', package, token=recorder, expected=200)
         original_receipt = saved['receipt']
         self.assertEqual(original_receipt['applied_version'], 1)
         conn = db.connect(db.event_db_path(fx['event_id']))
@@ -1960,17 +1984,20 @@ class ApiTest(unittest.TestCase):
                    (json.dumps({'user_id': other_id}), f'recording:match:{mid}'))
         finally:
             conn.close()
-        self.err('POST', '/api/scoring/submit', package, token=recorder, expect=403)
-        queried = self.ok('GET', f"/api/receipts/{package['submission_uid']}", token=recorder)
-        self.assertEqual(queried['receipt'], original_receipt)
-        self.assertFalse(self.ok('GET', f"/api/receipts/{package['submission_uid']}", token=other)['found'])
+        # Original candidate retries remain readable after transfer, independently
+        # of formal decision receipts belonging to the independent reviewer.
+        replayed = reviewed_result(self, 'POST', '/api/scoring/submit', package, token=recorder, expected=200)
+        self.assertEqual(replayed['receipt'], original_receipt)
+        queried = self.ok('GET', f"/api/candidate-receipts/{package['submission_uid']}", token=recorder)
+        self.assertEqual(queried['receipt'], saved['candidate_receipt'])
+        self.assertFalse(self.ok('GET', f"/api/candidate-receipts/{package['submission_uid']}", token=other)['found'])
         correction = {'request_uid': f'receipt-correct-{mid}', 'base_version': 1, 'reason': 'review',
                       'event_identity': dict(self.event_identity), 'result_status': 'away_forfeit',
                       'sets': [], 'events': []}
-        corrected = self.request('POST', f'/api/matches/{mid}/correction', correction, expect=200)
-        self.request('POST', f'/api/matches/{mid}/cancel', {'request_uid': f'receipt-cancel-{mid}',
-            'base_version': 2, 'reason': 'cancel', 'event_identity': dict(self.event_identity)}, expect=200)
-        replay = self.request('POST', f'/api/matches/{mid}/correction', correction, expect=200)
+        corrected = reviewed_result(self, 'POST', f'/api/matches/{mid}/correction', correction, expected=200)
+        reviewed_result(self, 'POST', f'/api/matches/{mid}/cancel', {'request_uid': f'receipt-cancel-{mid}',
+            'base_version': 2, 'reason': 'cancel', 'event_identity': dict(self.event_identity)}, expected=200)
+        replay = reviewed_result(self, 'POST', f'/api/matches/{mid}/correction', correction, expected=200)
         self.assertTrue(replay['replayed'])
         self.assertEqual(replay['receipt'], corrected['receipt'])
         self.assertEqual(replay['receipt']['applied_version'], 2)

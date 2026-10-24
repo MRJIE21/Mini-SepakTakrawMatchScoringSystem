@@ -42,6 +42,10 @@ def import_template(ctx):
 def _parse(text: str, cat: dict) -> list[dict]:
     if not isinstance(text, str) or not text.strip():
         raise bad_request("请上传 CSV 文件或粘贴含表头的报名表")
+    # 与学校报名表导入（app/school_import.py）保持同一口径：超过 2 MB 先给可执行的拆分提示，
+    # 避免大字段先把 csv 模块的 131072 字段上限错误抛给现场人员。
+    if len(text.encode("utf-8")) > 2 * 1024 * 1024:
+        raise bad_request("报名表超过 2 MB，请拆分")
     text = text.lstrip("\ufeff")
     delimiter = "\t" if "\t" in text.splitlines()[0] else ","
     try:

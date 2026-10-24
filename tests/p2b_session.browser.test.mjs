@@ -254,7 +254,8 @@ try {
   await check('REQ-006 审计页可切换赛事/账号范围并显示新增动作标签', async () => {
     const adminPage = await openPage(adminToken);
     page = adminPage;
-    await adminPage.goto(base + '/#/admin');
+    /* 1.5.0 起审计日志移入“更正与导出”页的 tab；不再单独占 #/admin 首页。 */
+    await adminPage.goto(base + '/#/admin?tab=audit');
     await adminPage.getByRole('heading', { name: '维护 · 关键操作记录（最近 60 条）', exact: true }).waitFor();
     await adminPage.locator('#content').getByRole('button', { name: '账号', exact: true }).click();
     await adminPage.waitForFunction(() => (document.querySelector('#content')?.innerText || '').includes('退出所有设备'));

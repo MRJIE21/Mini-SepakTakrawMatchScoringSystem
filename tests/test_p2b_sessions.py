@@ -142,6 +142,8 @@ class SessionSecurityTest(unittest.TestCase):
 
     def test_database_backup_contains_no_plaintext_token(self):
         self._me(self.token)
+        # 备份下载的是“当前赛事库”，事件作用域接口需要先选择赛事（X-Event-ID）。
+        self.build_event(team_count=0, individual_count=0)
         status, body = self.request('GET', '/api/admin/backup', expect=200, raw=True)
         self.assertEqual(status, 200)
         self.assertNotIn(self.token.encode(), body)

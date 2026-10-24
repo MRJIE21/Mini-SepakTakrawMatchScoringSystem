@@ -5,6 +5,9 @@ import { canView } from './permissions.js';
 import { setStoreUser } from './store.js';
 import { setPendingRequestScope } from './pendingRequests.js';
 
+/* 外壳版本：随 web/sw.js 的 CACHE 同步升级。侧栏底部显示，便于现场核对浏览器是否已加载新版。 */
+export const SHELL_VERSION = 'stss-shell-v99';
+
 export const state = {
   user: null,
   roles: {},
@@ -16,15 +19,36 @@ export const state = {
   offline: false,      // 本次会话是否正在使用本机缓存运行
 };
 
-/* 一级导航（改进方案 §3.1）：日常项目任务统一进入工作台，维护类靠后。
-   学校报名与三人赛记录统一从工作台进入，记录员从现场任务进入。 */
+/* 一级导航（本轮结构树重构）：按任务阶段分组，项目工作台仍是项目任务总入口；
+   学校报名、分组抽签、赛程与场地、成绩与名次从侧栏可直接到达，旧的隐藏路由保留别名。
+   每个条目可用 {view,label,href,roles,match} 覆盖默认视图链接；href 只影响落点，权限仍看 view。 */
 const NAV = [
-  { group: '赛事管理', items: ['dashboard', 'setup'] },
-  { group: '比赛管理', items: ['workspace'] },
-  { group: '比赛执行', items: ['field', 'display'] },
-  { group: '成绩', items: ['school'] },
-  { group: '系统维护', items: ['admin', 'users'] },
-  { group: '个人', items: ['account'] },
+  { group: '赛事管理', items: [
+    { view: 'dashboard' },
+    { view: 'setup' },
+  ] },
+  { group: '项目与赛程', items: [
+    { view: 'workspace' },
+    { view: 'schoolRegistration', label: '学校报名', href: '#/workspace?tab=registration', roles: ['admin', 'organizer'] },
+    { view: 'workspace', label: '分组与抽签', href: '#/workspace?tab=schedule&view=groups', roles: ['admin', 'organizer'] },
+    { view: 'workspace', label: '赛程与场地', href: '#/workspace?tab=schedule', roles: ['admin', 'organizer'] },
+  ] },
+  { group: '比赛执行', items: [
+    { view: 'field' },
+    { view: 'display' },
+  ] },
+  { group: '成绩', items: [
+    { view: 'results', label: '成绩与名次' },
+    { view: 'school' },
+    { view: 'resultReview' },
+    { view: 'admin' },
+  ] },
+  { group: '系统维护', items: [
+    { view: 'users' },
+  ] },
+  { group: '个人', items: [
+    { view: 'account' },
+  ] },
 ];
 
 export function registerView(def) {
@@ -54,7 +78,7 @@ function renderLogin(message) {
     placeholder: '请输入用户名', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', autofocus: true });
   const password = h('input', { id: 'login-password', name: 'password', type: 'password', value: '',
     placeholder: '请输入密码', autocomplete: 'current-password' });
-  const err = h('div.small', { style: 'color:#c0392b;min-height:18px' }, message || '');
+  const err = h('div.small.login-error', message || '');
   const submit = async () => {
     try {
       const res = await api.post('/api/login', { username: username.value, password: password.value });
@@ -78,7 +102,7 @@ function renderLogin(message) {
       h('label.field', '用户名', username),
       h('label.field', '密码', password),
       err,
-      h('button.btn.btn-primary', { type: 'submit', style: 'width:100%;margin-top:6px' }, '登录'),
+      h('button.btn.btn-primary.login-submit', { type: 'submit' }, '登录'),
       h('div.small.muted.mt', '使用管理员分配的账号登录；管理员首次启动时的初始密码见服务端启动输出。'),
     ),
   );
@@ -113,6 +137,10 @@ export async function logoutEverywhere() {
   location.reload();
 }
 
+/* 旧路由 → 现行页面的兼容映射（G5 旧链接巡检）：
+   catalog 旧“学校与人员”页已并入项目工作台，保留书签跳转而不是静默落到首页。 */
+const LEGACY_VIEW_ALIASES = { catalog: 'schoolRegistration' };
+
 /* ------------------------------------------------------------------ 外壳 */
 function navigationView(name) {
   if (name === 'scoring') return state.user.role === 'recorder' ? 'field' : 'workspace';
@@ -136,16 +164,35 @@ function renderShell() {
   setStoreUser(state.user);
   const nav = document.getElementById('sidenav');
   clear(nav);
-  const activeView = navigationView(location.hash.replace(/^#\/?/, '').split('?')[0]);
+  const rawHash = location.hash.replace(/^#\/?/, '');
+  const [currentView, currentQuery] = rawHash.split('?');
+  const activeView = navigationView(currentView);
+  const role = state.user.role;
   for (const group of NAV) {
-    const items = group.items.map((name) => state.views[name]).filter(Boolean)
-      .filter((v) => canView(state.user.role, v.name) && !(state.user.role === 'recorder' && ['workspace','scoring'].includes(v.name)));
+    const items = group.items.map((item) => {
+      const entry = typeof item === 'string' ? { view: item } : item;
+      return { ...entry, def: state.views[entry.view] };
+    }).filter((item) => item.def && canView(role, item.view))
+      .filter((item) => !item.roles || item.roles.includes(role))
+      .filter((item) => !(role === 'recorder' && ['workspace', 'scoring'].includes(item.view)));
     if (!items.length) continue;
     nav.append(h('div.nav-group', group.group));
-    for (const view of items) {
-      nav.append(h('a', { href: `#/${view.name}`, dataset: { view: view.name }, class: view.name === activeView ? 'active' : '' }, view.label));
+    for (const item of items) {
+      const href = item.href || `#/${item.view}`;
+      const active = !item.href && activeView === navigationView(item.view);
+      nav.append(h('a', {
+        href,
+        ...(item.href ? {} : { dataset: { view: item.view } }),
+        class: active ? 'active' : '',
+        'aria-current': active ? 'page' : null,
+      }, item.label || item.def.label));
     }
   }
+  /* 侧栏底部显示外壳版本：升级后若仍看到旧问题，可直接核对是否已加载新版本。 */
+  nav.append(h('div.nav-build', { 'aria-label': '当前界面版本' }, `版本 1.5.0 · ${SHELL_VERSION}`));
+  renderMobileNav();
+  setupMobileNav();
+  closeMobileNav();
   const select = document.getElementById('event-select');
   clear(select);
   for (const ev of state.events) {
@@ -179,6 +226,76 @@ function renderShell() {
   const ev = currentEvent();
   document.getElementById('event-line').textContent = ev
     ? `${ev.name}${ev.location ? ` · ${ev.location}` : ''}` : '尚未创建赛事';
+}
+
+/* ------------------------------------------------------------------ 移动导航（D08）
+   ≤620px：侧栏变成抽屉（保留分组树），底部提供 4 个快捷入口；≥621px 保持桌面/平板导航不变。 */
+const MOBILE_NAV_QUERY = '(max-width: 620px)';
+let mobileNavReady = false;
+
+function isMobileNav() {
+  return window.matchMedia(MOBILE_NAV_QUERY).matches;
+}
+
+function setMobileNav(open) {
+  const nav = document.getElementById('sidenav');
+  const toggle = document.getElementById('btn-mobile-nav');
+  const backdrop = document.getElementById('nav-backdrop');
+  if (!nav) return;
+  const openNow = !!open && isMobileNav();
+  nav.classList.toggle('open', openNow);
+  document.body.classList.toggle('nav-open', openNow);
+  if (toggle) toggle.setAttribute('aria-expanded', String(openNow));
+  if (backdrop) backdrop.hidden = !openNow;
+  if (openNow) requestAnimationFrame(() => nav.querySelector('a,button')?.focus());
+}
+
+function closeMobileNav() {
+  setMobileNav(false);
+}
+
+function setupMobileNav() {
+  if (mobileNavReady) return;
+  mobileNavReady = true;
+  document.getElementById('btn-mobile-nav')?.addEventListener('click', () => {
+    setMobileNav(!document.getElementById('sidenav')?.classList.contains('open'));
+  });
+  document.getElementById('nav-backdrop')?.addEventListener('click', closeMobileNav);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeMobileNav();
+  });
+  window.addEventListener('resize', () => {
+    if (!isMobileNav()) closeMobileNav();
+  });
+  document.getElementById('sidenav')?.addEventListener('click', (event) => {
+    if (event.target.closest('a')) closeMobileNav();
+  });
+}
+
+function renderMobileNav() {
+  const bar = document.getElementById('mobile-tabbar');
+  if (!bar) return;
+  clear(bar);
+  const role = state.user?.role || '';
+  const current = navigationView(location.hash.replace(/^#\/?/, '').split('?')[0]);
+  const items = role === 'recorder'
+    ? [{ label: '任务', view: 'field' }, { label: '复核', view: 'resultReview' }, { label: '账号', view: 'account' }]
+    : role === 'viewer'
+      ? [{ label: '总分', view: 'school' }, { label: '工作台', view: 'workspace' }, { label: '账号', view: 'account' }]
+      : role === 'display_operator'
+        ? [{ label: '大屏', view: 'display' }, { label: '工作台', view: 'workspace' }, { label: '账号', view: 'account' }]
+        : [{ label: '首页', view: 'dashboard' }, { label: '工作台', view: 'workspace' }, { label: '总分', view: 'school' }];
+  for (const item of items) {
+    bar.append(h('a', {
+      href: `#/${item.view}`,
+      class: current === navigationView(item.view) ? 'mobile-tab active' : 'mobile-tab',
+      'aria-current': current === navigationView(item.view) ? 'page' : null,
+    }, item.label));
+  }
+  bar.append(h('button.mobile-tab', {
+    type: 'button', 'aria-label': '打开全部导航', 'aria-controls': 'sidenav', 'aria-expanded': 'false',
+    onclick: () => setMobileNav(true),
+  }, '更多'));
 }
 
 /* ------------------------------------------------------------------ 路由 */
@@ -304,12 +421,26 @@ async function renderRoute(force = false, scope = null) {
   try {
     const raw = (scope?.hash || location.hash).replace(/^#\/?/, '') || 'dashboard';
     const [name, query] = raw.split('?');
-    const params = Object.fromEntries(new URLSearchParams(query || ''));
-    const view = state.views[name] || state.views.dashboard;
+    let params = Object.fromEntries(new URLSearchParams(query || ''));
+    const requestedName = LEGACY_VIEW_ALIASES[name] || name;
+    let resolvedName = requestedName;
+    if (!state.views[requestedName]) {
+      /* 未知 hash 不静默渲染首页：归一到角色首页并明确提示，同时规范化地址。 */
+      const home = roleHome();
+      const [homeName, homeQuery] = home.replace(/^#\/?/, '').split('?');
+      history.replaceState(null, '', home);
+      params = Object.fromEntries(new URLSearchParams(homeQuery || ''));
+      resolvedName = homeName;
+      toast('链接无效，已返回首页');
+    }
+    const view = state.views[resolvedName] || state.views.dashboard;
     if (!canView(state.user.role, view.name)) { location.hash = roleHome(); return; }
     const activeView = navigationView(view.name);
     document.querySelectorAll('.sidenav a').forEach((a) => {
-      a.classList.toggle('active', a.dataset.view === activeView);
+      const active = a.dataset.view === activeView;
+      a.classList.toggle('active', active);
+      if (active) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
     });
     const host = document.getElementById('content');
     const content = h('div.route-content');
@@ -427,12 +558,13 @@ export async function reloadShell(eventId) {
   const scope = activeReadScope;
   if (eventId) {
     state.eventId = eventId;
-    localStorage.setItem('stss_event', String(eventId));
+    storageSet('stss_event', String(eventId));
   }
   await loadEvents();
   assertScope(scope);
   const event = state.events.find((item) => item.id === state.eventId);
-  setPendingRequestScope(state.user, event ? { ...event, deployment_id: state.deploymentId } : null);
+  setPendingRequestScope(state.user, event
+    ? { ...event, event_uuid: event.uuid, deployment_id: state.deploymentId } : null);
   await loadStructure();
   assertScope(scope);
   renderShell();
@@ -444,19 +576,28 @@ export async function reloadShell(eventId) {
 const SESSION_KEY = 'stss_session_cache';
 const CONTEXT_KEY = 'stss_context_cache';
 
+/* 本机存储可能被禁用或写满（例如长期使用后 pending/done 键积累）。
+   缓存写入失败不能阻断启动或业务操作，因此统一兜底并返回是否成功。 */
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch { return false; }
+}
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
 function writeSessionCache(me) {
   setStoreUser(me.user);
-  localStorage.setItem(SESSION_KEY, JSON.stringify({ user: me.user, roles: me.roles || {} }));
+  storageSet(SESSION_KEY, JSON.stringify({ user: me.user, roles: me.roles || {} }));
 }
 function readSessionCache() {
-  try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; }
+  try { return JSON.parse(storageGet(SESSION_KEY)); } catch { return null; }
 }
 function writeContextCache() {
   if (!state.events || !state.structure) return;
-  localStorage.setItem(`${CONTEXT_KEY}:${state.user.id}:${state.user.role}`, JSON.stringify({
+  storageSet(`${CONTEXT_KEY}:${state.user.id}:${state.user.role}`, JSON.stringify({
     deploymentId: state.deploymentId, events: state.events, structure: state.structure, saved_at: Date.now(),
   }));
-  localStorage.setItem(structureCacheKey(), JSON.stringify(state.structure));
+  storageSet(structureCacheKey(), JSON.stringify(state.structure));
 }
 function structureCacheKey() {
   return `stss_structure:${state.user.id}:${state.user.role}:${state.deploymentId}:${currentEvent()?.uuid || ''}`;
@@ -486,7 +627,8 @@ async function boot() {
   await loadEvents(preferred);
   /* 重试请求按账号、部署和赛事 UUID 隔离。 */
   const event = state.events.find((item) => item.id === state.eventId);
-  setPendingRequestScope(state.user, event ? { ...event, deployment_id: state.deploymentId } : null);
+  setPendingRequestScope(state.user, event
+    ? { ...event, event_uuid: event.uuid, deployment_id: state.deploymentId } : null);
   await loadStructure();
   renderShell();
   updateNetBadge();
@@ -502,7 +644,8 @@ async function boot() {
   });
 }
 
-/* 角色默认落地页（§12.1）：记录员直接进现场，查看者进成绩总览 */
+/* 角色默认落地页（§12.1 / D07）：记录员进现场，查看者进成绩总览，大屏操作员进大屏；
+   管理员与编排人员进赛事首页的“下一步/待办”，项目工作台保持 1 次点击可达。 */
 function roleHome() {
   const role = state.user ? state.user.role : '';
   if (role === 'recorder') return '#/field';
@@ -562,16 +705,37 @@ function watchNetwork() {
   updateNetBadge();
 }
 
+/* 外壳缓存是 cache-first：发布后第一次刷新仍会先跑上一版本，用户会以为“修复没生效”。
+   新的 Service Worker 接管时给出显式提示，由用户决定何时刷新（不静默 reload，
+   避免打断记录或丢失未提交输入）。首次访问（此前无 controller）不提示。 */
+function showUpdateBanner() {
+  if (document.getElementById('app-update-banner')) return;
+  const banner = h('div.update-banner', { id: 'app-update-banner', role: 'status', 'aria-live': 'polite' },
+    h('span.update-banner-text', '系统已更新，刷新页面后使用新版。'),
+    h('button.btn.small.btn-primary', {
+      type: 'button',
+      onclick: () => { try { location.reload(); } catch { /* 刷新失败时保留提示 */ } },
+    }, '立即刷新'),
+    h('button.btn.small', {
+      type: 'button', 'aria-label': '稍后更新',
+      onclick: () => banner.remove(),
+    }, '稍后'));
+  document.body.append(banner);
+}
+
 function registerServiceWorker() {
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('/sw.js').catch(() => { /* 离线缓存不可用时忽略 */ });
-  }
+  if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) showUpdateBanner();
+  });
+  navigator.serviceWorker.register('/sw.js').catch(() => { /* 离线缓存不可用时忽略 */ });
 }
 
 export async function submitWithRetry(path, payload, options = {}) {
   try {
-    const kind = path.endsWith('/individual') ? 'individual' : 'match';
-    const subject = payload.match_id || payload.participation_id;
+    const kind = payload.subject_kind || (path.endsWith('/individual') ? 'individual' : 'match');
+    const subject = payload.subject_id || payload.match_id || payload.participation_id;
     return { ok: true, result: await api.post(path, payload, { ...options,
       validate: (result) => validateReceipt(result, payload, kind, subject) }) };
   } catch (err) {
@@ -598,6 +762,7 @@ async function loadViews() {
     import('./views/matchAdmin.js'),
     import('./views/individual.js'),
     import('./views/review.js'),
+    import('./views/resultReview.js'),
     import('./views/results.js'),
     import('./views/bracket.js'),
     import('./views/school.js'),
@@ -606,9 +771,33 @@ async function loadViews() {
   ]);
 }
 
+/* 启动失败兜底：离线或结构读取失败时给出可操作的页面，而不是停在空壳。
+   能读到会话缓存时保留离线说明，恢复联网后可重试；读不到会话则回到登录页。 */
+function renderStartupError(error) {
+  if (!state.user) { renderLogin(error?.message || '启动失败，请重新登录'); return; }
+  const content = document.getElementById('content');
+  if (!content) { toast(error?.message || '启动失败', 'error'); return; }
+  clear(content);
+  content.append(h('div.panel',
+    h('h2', '页面加载未完成'),
+    h('div.warn-box', error?.message || '页面未能完成启动'),
+    h('p.small.muted', state.offline
+      ? '当前离线：本机已保存的场次仍可继续记录；恢复联网后点“重试”。'
+      : '可能是网络不稳定或赛事数据读取失败，请稍后重试。'),
+    h('div.row.mt',
+      h('button.btn.btn-primary', { onclick: () => location.reload() }, '重试'),
+      h('button.btn', { onclick: () => { location.hash = roleHome(); } }, '返回可用页'))));
+  updateNetBadge();
+}
+
 (async function start() {
+  window.__stssStarted = true;
   watchNetwork();
   registerServiceWorker();
+  window.addEventListener('unhandledrejection', (event) => {
+    if (event.reason?.cancelled) return;
+    console.error('[stss] 未处理的启动/异步错误', event.reason);
+  });
   await loadViews();
   window.addEventListener('hashchange', async () => {
     if (skipNextHashRoute) { skipNextHashRoute = false; return; }
@@ -627,9 +816,10 @@ async function loadViews() {
   if (!getToken()) { renderLogin(); return; }
   let me = null;
   try {
-    me = await api.get('/api/me');
+    /* 启动校验缩短超时：服务不可达时尽快转入离线启动，避免长时间空壳。 */
+    me = await api.get('/api/me', { timeoutMs: 5000 });
   } catch (err) {
-    if (err.offline) {
+    if (err.offline || err.code === 'request_timeout') {
       const cached = readSessionCache();
       if (cached && cached.user) {
         state.user = cached.user;
@@ -637,7 +827,7 @@ async function loadViews() {
         setStoreUser(state.user);
         state.roles = cached.roles || {};
         state.offline = true;
-        await boot();
+        await boot().catch(renderStartupError);
         return;
       }
       renderLogin('当前离线且本机没有可用会话，请恢复联网后登录。');
@@ -654,5 +844,5 @@ async function loadViews() {
   state.roles = me.roles || {};
   state.offline = false;
   writeSessionCache(me);
-  await boot();
+  await boot().catch(renderStartupError);
 })();

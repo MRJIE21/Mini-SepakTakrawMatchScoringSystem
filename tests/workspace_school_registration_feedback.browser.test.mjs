@@ -1,3 +1,4 @@
+import {registrationEdit,registrationProject} from './helpers/registration_ui.mjs';
 /* 真实浏览器验证：报名页校验失败可见/聚焦，可预见的 400 在预览前被拦截。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -74,9 +75,7 @@ try {
   });
   const link = `${base}/#/workspace?${new URLSearchParams({ event: identity.event_id, group, category: team, tab: 'registration', school })}`;
   await page.goto(link);
-  await page.locator('.school-registration-detail-head').waitFor();
-  const teamCard = () => page.locator(`.school-registration-project[data-category="${team}"]`);
-  const individualCard = () => page.locator(`.school-registration-project[data-category="${individual}"]`);
+  await page.locator('header.page-head').filter({ has: page.getByRole('link', { name: '报名名单', exact: true }) }).waitFor();
   const choiceOf = card => card.locator('label.field', { hasText: '参赛选择' }).locator('select');
   const addPerson = async (card, name, commonNumber) => {
     const details = card.locator('details', { hasText: '就地新增人员' });
@@ -86,14 +85,14 @@ try {
     await card.getByRole('button', { name: /添加人员/ }).click();
     await card.getByText(name, { exact: false }).first().waitFor();
   };
-  await choiceOf(teamCard()).selectOption('participate');
-  await addPerson(teamCard(), '第一人', '23');
-  assert.equal(await teamCard().getByLabel('第一人本项目号码').inputValue(), '',
+  await choiceOf((await registrationProject(page,team))).selectOption('participate');
+  await addPerson((await registrationProject(page,team)), '第一人', '23');
+  assert.equal(await (await registrationProject(page,team)).getByLabel('第一人本项目号码').inputValue(), '',
     '常用号码 23 不能自动带入项目号码');
-  await addPerson(teamCard(), '第二人', '7');
-  assert.equal(await teamCard().getByLabel('第二人本项目号码').inputValue(), '7',
+  await addPerson((await registrationProject(page,team)), '第二人', '7');
+  assert.equal(await (await registrationProject(page,team)).getByLabel('第二人本项目号码').inputValue(), '7',
     '合法常用号码 7 仍按原规则预填');
-  await teamCard().locator('label.field', { hasText: '队长' }).locator('select').selectOption({ label: '第二人' });
+  await (await registrationProject(page,team)).locator('label.field', { hasText: '队长' }).locator('select').selectOption({ label: '第二人' });
   pass('常用号码带入规则：非法值留空、合法 1—20 仍预填');
 
   const errorBox = page.locator('.form-errors:not(.hidden)');
@@ -108,7 +107,7 @@ try {
       return rect.top >= 0 && rect.bottom <= innerHeight && document.activeElement === box;
     }, null, { timeout: 8000 });
   };
-  await teamCard().getByLabel('第一人本项目号码').fill('abc');
+  await (await registrationProject(page,team)).getByLabel('第一人本项目号码').fill('abc');
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
   const postsBefore = previewPosts;
   await preview.click();
@@ -121,13 +120,13 @@ try {
   await page.screenshot({ path: path.join(artifacts, 'feedback-server-error-1280.png') });
   pass('服务端 400：错误框滚入视口并聚焦、toast 与底部摘要同步');
 
-  await teamCard().getByLabel('第一人本项目号码').fill('9');
+  await (await registrationProject(page,team)).getByLabel('第一人本项目号码').fill('9');
   await preview.click();
   await page.getByRole('heading', { name: '核对整批变更' }).waitFor();
   assert.equal(await errorBox.count(), 0, '预览成功后应清除旧错误');
   pass('合法号码可正常进入核对页');
 
-  await page.getByRole('tab', { name: '人员名单' }).click();
+  await registrationEdit(page);
   const firstPersonRow = page.locator('.school-registration-person').nth(2);
   await firstPersonRow.locator('select').selectOption('female');
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
@@ -141,8 +140,8 @@ try {
   pass('已报名运动员性别冲突在预览前拦截并指到具体人员');
 
   await firstPersonRow.locator('select').selectOption('male');
-  await page.getByRole('tab', { name: '项目报名' }).click();
-  await choiceOf(individualCard()).selectOption('participate');
+  await registrationEdit(page);
+  await choiceOf((await registrationProject(page,individual))).selectOption('participate');
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
   const postsBeforeIndividual = previewPosts;
   await preview.click();
@@ -152,10 +151,10 @@ try {
   assert.equal(previewPosts, postsBeforeIndividual, '个人赛未选人应在预览前拦截');
   pass('个人赛参加未选人在预览前拦截并给出项目名');
 
-  await page.getByRole('tab', { name: '项目报名' }).click();
+  await registrationEdit(page);
   await page.setViewportSize({ width: 390, height: 844 });
-  await choiceOf(individualCard()).selectOption('not_participating');
-  await teamCard().getByLabel('第一人本项目号码').fill('abc');
+  await choiceOf((await registrationProject(page,individual))).selectOption('not_participating');
+  await (await registrationProject(page,team)).getByLabel('第一人本项目号码').fill('abc');
   await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
   await preview.click();
   await waitErrorVisible();
@@ -164,7 +163,7 @@ try {
   pass('390 窄屏同样可见并聚焦');
 
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('tab', { name: '人员名单' }).click();
+  await registrationEdit(page);
   const seededRow = () => page.locator(`.school-registration-person[data-person="a:${seeded}"]`);
   await seededRow().locator('input').first().fill('原有甲改');
   await api('PUT', `/api/athletes/${seededPeer}`, { note: '后台改动触发基线变化' });

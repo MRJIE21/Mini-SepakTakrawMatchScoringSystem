@@ -8,8 +8,12 @@ const catalogApi = fs.readFileSync(new URL('../app/api/catalog.py', import.meta.
 
 assert.ok(index.includes('id="btn-new-event"'), '顶栏必须保留新建赛事入口');
 assert.ok(setup.includes("params.action === 'new'"), '已有赛事时也必须可以进入新建流程');
-assert.ok(main.indexOf("group: '赛事管理'") < main.indexOf("group: '比赛管理'"),
-  '赛事管理必须排在比赛管理之前');
+assert.ok(main.indexOf("group: '赛事管理'") < main.indexOf("group: '项目与赛程'"),
+  '赛事管理必须排在项目与赛程之前');
+assert.ok(main.indexOf("group: '项目与赛程'") < main.indexOf("group: '成绩'"),
+  '项目与赛程必须排在成绩之前');
+assert.ok(main.includes("group: '成绩'") && main.includes("{ view: 'results', label: '成绩与名次' }"),
+  '成绩组必须包含成绩与名次入口');
 assert.ok(!main.includes("items: ['workspace', 'catalog']"),
   '学校和人员不得作为项目工作台之外的独立步骤');
 assert.ok(setup.includes("h('b', '赛事')") && setup.includes("h('span', '比赛项目')"),

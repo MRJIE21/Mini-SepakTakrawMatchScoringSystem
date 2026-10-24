@@ -164,21 +164,25 @@ try {
   /* ---------- REQ-013 账号页权限说明 5 角色 ---------- */
   page = await openPage({ authToken: adminToken, eventId: A.event_id });
   await check('REQ-013 账号页权限说明覆盖全部 5 个角色', async () => {
+    /* 1.5.0 账号页重做（web/js/views/admin.js:317-336）：页头标题为“账号管理”，
+       权限口径收敛为页头 meta 一行（五类角色 + 赛事范围说明），逐角色的菜单级只读说明
+       移到 README 角色表；页面以“按角色筛选”和“新增账号角色”下拉承载五类角色。 */
     await page.goto(base + '/#/users');
-    await page.getByRole('heading', { name: '账号与权限', exact: true }).waitFor();
-    const panel = page.locator('#content .panel').filter({
-      has: page.getByRole('heading', { name: '账号与权限', exact: true }),
-    }).first();
-    const text = await panel.innerText();
-    for (const role of ['赛事管理员', '编排与成绩人员', '场地记录员', '成绩查看者', '大屏操作员']) {
-      assert.ok(text.includes(role), `权限说明缺少角色：${role}`);
+    await page.getByRole('heading', { name: '账号管理', exact: true }).waitFor();
+    const text = await page.locator('.page-meta').innerText();
+    const expectedRoles = ['赛事管理员', '编排与成绩人员', '场地记录员', '成绩查看者', '大屏操作员'];
+    for (const role of expectedRoles) {
+      assert.ok(text.includes(role), `页头权限说明缺少角色：${role}`);
     }
-    assert.ok(text.includes('大屏控制台'), '大屏操作员说明应包含大屏控制台');
-    assert.ok(text.includes('预览') && text.includes('推送') && text.includes('配对'), '大屏操作员说明应包含预览/推送/配对');
-    assert.ok(/其他业务页只读/.test(text), '大屏操作员说明应标明其他业务页只读');
+    assert.ok(text.includes('普通账号只能访问被分配的赛事'), '页头应说明普通账号的赛事范围');
+    const roleFilterOptions = await page.getByLabel('按角色筛选', { exact: true })
+      .evaluate((select) => [...select.options].map((option) => option.textContent.trim()));
+    for (const role of expectedRoles) {
+      assert.ok(roleFilterOptions.includes(role), `角色筛选缺少：${role}`);
+    }
     const roleOptions = await page.locator('#create-account-form select').first()
       .evaluate((select) => [...select.options].map((option) => option.textContent.trim()));
-    for (const role of ['赛事管理员', '编排与成绩人员', '场地记录员', '成绩查看者', '大屏操作员']) {
+    for (const role of expectedRoles) {
       assert.ok(roleOptions.includes(role), `账号角色下拉缺少：${role}`);
     }
   });
@@ -256,14 +260,20 @@ try {
       '未开赛组不应显示待确认警告');
   });
   await check('REQ-017 有组别但无学校时显示暂无学校/暂无成绩与报名入口', async () => {
-    await schoolTotalsPage.getByRole('button', { name: '乙组', exact: true }).click();
+    /* 1.5.0 起学校总分页的大组别切换改为“大组别”下拉（web/js/views/school.js:36），不再是按钮。
+       默认 bootstrap 组名为“甲组：央属高校 / 乙组：市属高校 / 丙组：高职高专”，按前缀匹配。 */
+    const yiGroup = cStructure.groups.find((group) => group.name.startsWith('乙组'));
+    assert.ok(yiGroup, `夹具应包含乙组：${JSON.stringify(cStructure.groups.map((group) => group.name))}`);
+    const groupSelect = schoolTotalsPage.getByLabel('大组别', { exact: true });
+    await groupSelect.selectOption(String(yiGroup.id));
+    await schoolTotalsPage.waitForFunction((id) => location.hash.includes(`group=${id}`), yiGroup.id);
     /* 各组别独立汇总也会出现“暂无学校/暂无成绩”，这里只锁总分榜的空态行。 */
     await schoolTotalsPage.locator('.page-state-text', { hasText: '暂无学校/暂无成绩' }).waitFor();
     const registerLink = schoolTotalsPage.getByRole('link', { name: '去学校报名', exact: true });
     assert.ok((await registerLink.getAttribute('href')).includes('tab=registration'), '空组应给出报名入口');
-    assert.equal(await schoolTotalsPage.getByRole('button', { name: '乙组', exact: true }).count(), 1, '组别切换保留');
+    assert.equal(await groupSelect.inputValue(), String(yiGroup.id), '组别切换保留');
     assert.ok(await schoolTotalsPage.getByRole('button', { name: /导出.*CSV/ }).count() >= 1, '导出按钮保留');
-    assert.equal(await schoolTotalsPage.getByRole('button', { name: '打印本组学校总分表', exact: true }).count(), 1);
+    assert.equal(await schoolTotalsPage.getByRole('button', { name: '打印总分表', exact: true }).count(), 1);
   });
 
   /* ---------- REQ-016 向导一键添加常用四项 ---------- */

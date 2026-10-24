@@ -79,6 +79,8 @@ class FakeElement extends FakeNode {
   }
   get className() { return [...this._classes].join(' '); }
   set className(value) { this._classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
+  matches(selector) { return selector.split(',').some(s=>matchesSelector(this,s.trim())); }
+  hasAttribute(key) { return this.getAttribute(key)!==null; }
   querySelector(selector) { return this._find((node) => matchesSelector(node, selector)); }
   querySelectorAll(selector) { return this._collect((node) => matchesSelector(node, selector)); }
   _find(predicate) { for (const child of this.childNodes) { if (child instanceof FakeElement) { if (predicate(child)) return child; const nested = child._find(predicate); if (nested) return nested; } } return null; }
@@ -243,7 +245,7 @@ test('报名名单页签直接渲染学校列表，默认只显示当前组别',
   assert.ok(!texts(el).includes('当前项目名单'));
 });
 
-test('选择学校后正文渲染该校详情（含原三个页签），仍留在工作台', async () => {
+test('选择学校后正文渲染该校详情（统一编辑与整批核对），仍留在工作台', async () => {
   const el = new FakeElement('div');
   document.body.append(el);
   const params = { event: '5', group: '6', tab: 'registration', school: '11' };
@@ -252,8 +254,8 @@ test('选择学校后正文渲染该校详情（含原三个页签），仍留�
   assert.ok(requested.includes('/api/schools/11/registration-workspace'),
     `嵌入时必须用学校自己的报名工作台接口，实际请求：${JSON.stringify(requested)}`);
   const text = texts(el);
-  for (const label of ['人员名单', '项目报名', '核对与提交']) {
-    assert.ok(text.includes(label), `缺少原内部页签：${label}；正文：${text.slice(0, 200)}`);
+  for (const label of ['统一编辑', '整批核对', '学校人员', '本校全部项目']) {
+    assert.ok(text.includes(label), `缺少统一编辑分区：${label}；正文：${text.slice(0, 200)}`);
   }
 });
 

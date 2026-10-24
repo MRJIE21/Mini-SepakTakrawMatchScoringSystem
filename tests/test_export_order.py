@@ -1,5 +1,6 @@
 """成绩类导出正序/倒序的真实 HTTP 隔离测试。"""
 from __future__ import annotations
+from helpers.reviewed_result import reviewed_result
 
 import csv
 import io
@@ -84,11 +85,11 @@ class ExportOrderTest(unittest.TestCase):
             self.ok('POST', f'/api/categories/{self.team_cat}/placements',
                     {'participation_id': pid, 'rank_no': index, 'confirm': True})
         for part, value in zip(self.fx['indiv_parts'], (20, 18, 16)):
-            self.ok('POST', '/api/scoring/individual', {
+            reviewed_result(self, 'POST', '/api/scoring/individual', {
                 'submission_uid': str(uuid.uuid4()), 'participation_id': part, 'base_version': 0,
                 'result_status': 'normal', 'result_value': value, 'error_count': 0,
                 'violation_count': 0, 'device': '排序测试', 'event_identity': dict(self.event_identity),
-            })
+            }, expected=200)
         self.ok('POST', f'/api/categories/{self.indiv_cat}/individual-rankings/confirm', {})
         self.group_id = self.fx['groups']['甲']['id']
         self.pool_ids = ','.join(str(p['id']) for p in self.pools)

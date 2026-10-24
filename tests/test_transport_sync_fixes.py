@@ -224,7 +224,7 @@ class TransportSyncFixesTest(unittest.TestCase):
         status, body, _ = self.request('POST', '/api/scoring/submit', {}, event=True, protocol=None)
         self.assertEqual((status, body['code']), (426, 'client_upgrade_required'))
         status, _, _ = self.request('POST', '/api/scoring/submit', {}, event=True)
-        self.assertEqual(status, 400)
+        self.assertEqual(status, 426)
 
     def test_busy_event_returns_503_while_user_update_and_login_do_not_wait(self):
         lock = db.connect(db.event_db_path(2), existing=True)

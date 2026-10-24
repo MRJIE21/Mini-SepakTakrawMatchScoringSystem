@@ -8,7 +8,7 @@ import { mountIndividualDraw } from '../individualDraw.js';
    - 提交失败时编辑框保持打开、输入完整保留，不再靠 return false 约定（Q05）；
    - 不读取三人赛编排方案，个人赛没有方案也能录成绩、看名次、导出（§7.3）。 */
 import { api, newUid, getApiEventContext, captureRequestContext, recordRequestContext, validateReceipt } from '../api.js';
-import { registerView, state, loadStructure } from '../main.js';
+import { registerView, state, loadStructure, go } from '../main.js';
 import { localStore, deviceName } from '../store.js';
 import { buildIndividualPayload } from '../submit.js';
 import {
@@ -18,7 +18,7 @@ import {
 
 const canWrite = () => ['admin', 'organizer', 'recorder'].includes(state.user.role);
 const isOfficial = (result) => result?.confirmed && result.result_status !== 'pending';
-const canEdit = (row) => canWrite() && (state.user.role !== 'recorder'
+const canEdit = (row) => !row.candidate_id && canWrite() && (state.user.role !== 'recorder'
   || (!row.result && (!row.recorder_id || row.recorder_id === state.user.id)));
 const STATUS = [
   ['normal', '正常完成'],
@@ -32,6 +32,7 @@ const SYNC = {
   none: ['未录入', ''],
   server: ['服务器已确认', 'ok'],
   pending: ['服务器已保存，成绩待确认', 'warn'],
+  received: ['候选已接收，待独立复核', 'warn'],
 };
 
 async function render({ el, params, signal, requestContext = captureRequestContext(), isCurrent = () => true }) {
@@ -158,12 +159,13 @@ async function render({ el, params, signal, requestContext = captureRequestConte
         render: (r) => {
           const display = (x) => `${x.result_value ?? '—'} ${x.result_text || ''}`.trim();
           if (r.result) return display(r.result);
-          return h('span.muted', '未录入');
+          return h('span.muted', r.candidate_id?'尚无正式成绩':'未录入');
         },
       },
       {
         label: '结果状态',
         render: (r) => {
+          if(r.result_disputed||r.result?.result_disputed)return statusBadge('最后正式结果 · 争议处理中','warn');
           const label = (st) => (STATUS.find((s) => s[0] === st) || [st, st])[1];
           const st = r.result ? r.result.result_status : 'pending';
           return statusBadge(label(st), st === 'normal' ? 'ok' : st === 'pending' ? 'warn' : 'danger');
@@ -181,7 +183,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       {
         label: '同步状态',
         render: (r) => {
-          const key = r.result ? (isOfficial(r.result) ? 'server' : 'pending') : 'none';
+          const key = r.candidate_id ? 'received' : r.result ? (isOfficial(r.result) ? 'server' : 'pending') : 'none';
           const [text, kind] = SYNC[key];
           return statusBadge(text, kind);
         },
@@ -189,6 +191,7 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       {
         label: '操作',
         render: (r) => r.status !== 'active' ? h('span.muted', '已退出')
+          : r.candidate_id ? h('button.btn.small',{onclick:()=>go('resultReview',{candidate:r.candidate_id,category:cat.id})},'查看待复核候选')
           : r.draw_status === 'stale' && !r.result ? h('span.muted', '须先重新核对出场顺序')
           : h('div.row', !r.result ? transferButton('individual',r.id) : null, (canEdit(r)
           ? h('button.btn.small', { onclick: task(() => openEditor(r, cat, load, rows)) },
@@ -247,7 +250,7 @@ export async function openEditor(row, cat, reload, rows) {
   if (savedInput?.payload) {
     let confirmed = false;
     try {
-      const receipt = await api.get(`/api/receipts/${encodeURIComponent(savedInput.uid)}`, { context: savedInput.request_context || requestContext });
+      const receipt = await api.get(`${savedInput.payload?.payload_schema===3?'/api/candidate-receipts/':'/api/receipts/'}${encodeURIComponent(savedInput.uid)}`, { context: savedInput.request_context || requestContext });
       if (receipt.found) {
         await validateReceipt(receipt, savedInput.payload, 'individual', row.id);
         confirmed = await localStore.finalize(savedInput, receipt.receipt);
@@ -263,7 +266,7 @@ export async function openEditor(row, cat, reload, rows) {
       sections: [{ body: h('p', '请重试原请求核实提交结果，成功后读取后台最新成绩。') }],
       actions: [{ label: '重试提交', primary: true, run: async ({ close }) => {
         try {
-          const response = await api.post('/api/scoring/individual', savedInput.payload, { context: savedInput.request_context || requestContext,
+          const response = await api.post(savedInput.payload?.payload_schema===3?'/api/result-candidates':'/api/scoring/individual', savedInput.payload, { context: savedInput.request_context || requestContext,
             validate: (res) => validateReceipt(res, savedInput.payload, 'individual', row.id) });
           if (!await localStore.finalize(savedInput, response.receipt)) throw new Error('成绩已保存，本机收据未能保存，请重试核实');
         } catch (error) {
@@ -274,10 +277,11 @@ export async function openEditor(row, cat, reload, rows) {
       } }] });
   }
   if (!row.result) {
-    try { await api.post('/api/recording/individual/' + row.id + '/claim'); }
+    try { Object.assign(row,await api.post('/api/recording/individual/' + row.id + '/claim')); }
     catch (error) { if (!error.offline || row.recorder_id !== state.user.id) throw error; }
   }
   let draft = null;
+  const impact=row.result ? await api.get(`/api/result-candidates/impact?subject_kind=individual&subject_id=${row.id}`,{context:requestContext}) : null;
   const source = result;
   let submitted = false;
   const value = numberInput(source.result_value ?? '', { step: '1', min: '0', placeholder: '请输入有效次数' });
@@ -309,6 +313,8 @@ export async function openEditor(row, cat, reload, rows) {
   const currentRequest = () => ({
       key, kind: 'individual', participation_id: row.id, device: deviceName(),
       category_id: cat.id, event_identity: identity,
+      protocol_schema:3,claim_epoch:row.claim_epoch??0,
+      ...(impact?{impact_hash:impact.impact_hash,impact_actions:[]}:{}),
       base_version: result.version || 0, uid: newUid('ind'), status: 'submitting',
       request_context: requestContext,
       title: `${row.display}`,
@@ -337,12 +343,12 @@ export async function openEditor(row, cat, reload, rows) {
     syncLine.textContent = syncText();
     let response;
     try {
-      response = await api.post('/api/scoring/individual', payload, { context: request.request_context,
+      response = await api.post(payload.payload_schema===3?'/api/result-candidates':'/api/scoring/individual', payload, { context: request.request_context,
         validate: (res) => validateReceipt(res, payload, 'individual', row.id) });
     } catch (e) {
       draft.status = 'failed';
       const wasUnknown = !!draft.submission_unknown;
-      draft.submission_unknown = wasUnknown || !!e.outcome_unknown;
+      draft.submission_unknown = wasUnknown || !!e.outcome_unknown || [404,426].includes(e.status);
       if (!draft.submission_unknown && e.code !== 'account_changed' && e.status >= 400 && e.status < 500) {
         if (await localStore.remove(key, draft)) draft = null;
       } else await localStore.put(draft);
@@ -393,14 +399,14 @@ export async function openEditor(row, cat, reload, rows) {
           h('div.form-grid', field('裁判说明', note, { name: 'note' })),
           row.result ? h('div',
             field('正式更正原因', reason, { name: 'reason', required: true }),
-            h('div.warn-box.mt', '提交更正后，本项目全部名次将退回待确认，暂不计入学校积分；请重新确认项目名次。')) : null,
+            h('div.warn-box.mt', '更正待审期间保留最后正式结果；独立复核批准后，受影响项目名次退回待确认，再重新核对名次与学校积分。')) : null,
           h('div.small.muted.mt', '本页只提交原始成绩。项目名次在全部结果完整、并列处理完成后统一确认。'),
           syncLine),
       },
     ],
     actions: [
       {
-        label: '核对并提交', primary: true, busyLabel: '正在提交…',
+        label: '核对并提交待复核', primary: true, busyLabel: '正在提交…',
         run: async ({ close }) => { await submit(); close(); await reload(); },
       },
       ...(!row.result ? [{
@@ -410,7 +416,7 @@ export async function openEditor(row, cat, reload, rows) {
           const latest = await reload();
           const at = latest.findIndex((r) => r.id === row.id);
           const ordered = [...latest.slice(at + 1), ...latest.slice(0, at)];
-          const next = ordered.find((r) => canWrite() && !r.result);
+          const next = ordered.find((r) => canEdit(r) && !r.result && !r.candidate_id);
           closeAndOpenNext(next, cat, reload, latest, dlg);
         },
       }] : []),

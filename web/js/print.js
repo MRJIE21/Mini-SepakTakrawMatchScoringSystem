@@ -122,7 +122,8 @@ async function run() {
     return;
   }
   const html = await response.text();
-  /* 用服务端渲染的完整成绩单替换当前页面，地址栏保持为可刷新的 /print.html?...。 */
+  /* 用服务端渲染的完整成绩单替换当前页面，地址栏保持为可刷新的 /print.html?...。
+     打印/另存为 PDF 入口由服务端打印模板自带的工具栏提供（button onclick="window.print()"）。 */
   document.open();
   document.write(html);
   document.close();

@@ -3,7 +3,7 @@ import { api, download, openPrint } from '../api.js';
 import { registerView, state, loadStructure } from '../main.js';
 import {
   h, table, toast, modal, formDialog, clear, task, loadingState, errorState, emptyState,
-  categoryLabel, exportOrderControl,
+  categoryLabel, exportOrderControl, pageHeader, statusBadge, selectInput, scrollableTable,
 } from '../ui.js';
 
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
@@ -32,34 +32,35 @@ async function render({ el, params }) {
   const group = structure.groups.find((g) => g.id === groupId) || structure.groups[0];
   let exportOrder = 'asc';
 
-  el.append(h('div.panel',
-    h('div.panel-head',
-      h('h2', '学校团体总分'),
-      h('div.row.tight',
-        ...structure.groups.map((g) => h('button.btn', {
-          class: g.id === group.id ? 'btn-primary' : '',
-          onclick: () => { location.hash = `#/school?group=${g.id}`; },
-        }, g.name.split('：')[0])),
-        /* 导出范围写在按钮旁，避免“写着当前组别却导出整届”（§13.4） */
-        canWrite() ? exportOrderControl((value) => { exportOrder = value; }) : null,
-        canWrite() ? h('button.btn', {
-          title: `只导出 ${group.name} 的学校总分`,
-          onclick: task(() => download('/api/exports/school-totals.csv', {
-            group_id: group.id, order: exportOrder })),
-        }, `导出 ${group.name.split('：')[0]} CSV`) : null,
-        canWrite() ? h('button.btn', {
-          title: `只导出 ${group.name} 的学校总分（Excel）`,
-          onclick: task(() => download('/api/exports/school-totals.xlsx', {
-            group_id: group.id, order: exportOrder })),
-        }, `导出 ${group.name.split('：')[0]} XLSX`) : null,
-        canWrite() ? h('button.btn', {
-          onclick: task(() => openPrint('school-notice', {
-            group_id: group.id, order: exportOrder, event: state.eventId })),
-        }, '打印本组学校总分表') : null,
-      )),
-    h('div.small.muted', `${group.name} · 单项前八名积分 9、7、6、5、4、3、2、1，集体项目（三人赛）双倍计入；`
-      + '总分相同依次比较第一名数量、第二名数量……仍相同则录入现场确认结果。未确认名次不计入正式积分。'),
-  ));
+  const groupSelect = selectInput(structure.groups.map((g) => [g.id, g.name]), group.id,
+    { 'aria-label': '大组别', onchange: (e) => { location.hash = `#/school?group=${e.target.value}`; } });
+  el.append(pageHeader({
+    crumbs: [{ label: '学校总分' }],
+    title: '学校团体总分',
+    badges: [statusBadge(group.name, 'info')],
+    meta: [
+      h('span', '单项前八名积分 9、7、6、5、4、3、2、1，三人赛双倍计入；总分相同依次比较各名次数量，仍相同则录入现场确认顺序。未确认名次不计入正式积分。'),
+      !canWrite() ? h('span', '只读账号如需报表，请联系成绩人员导出或打印。') : null,
+    ].filter(Boolean),
+    actions: [
+      h('label.context-field.page-project', h('span', '大组别'), groupSelect),
+      canWrite() ? exportOrderControl((value) => { exportOrder = value; }) : null,
+      canWrite() ? h('button.btn', {
+        title: `只导出 ${group.name} 的学校总分`,
+        onclick: task(() => download('/api/exports/school-totals.csv', {
+          group_id: group.id, order: exportOrder })),
+      }, '导出 CSV') : null,
+      canWrite() ? h('button.btn', {
+        title: `只导出 ${group.name} 的学校总分（Excel）`,
+        onclick: task(() => download('/api/exports/school-totals.xlsx', {
+          group_id: group.id, order: exportOrder })),
+      }, '导出 XLSX') : null,
+      canWrite() ? h('button.btn', {
+        onclick: task(() => openPrint('school-notice', {
+          group_id: group.id, order: exportOrder, event: state.eventId })),
+      }, '打印总分表') : null,
+    ].filter(Boolean),
+  }));
 
   const panelBody = h('div');
   const totalsTitle = h('h3', `${group.name} 总分榜`);
@@ -88,7 +89,7 @@ async function render({ el, params }) {
             : item.started === false
               ? h('div.small.muted', '未开赛/无成绩')
               : h('div.small', item.rows.slice(0, 8)
-                .map((r) => `${r.rank ?? '待确认'}. ${r.name}（${r.total}）`).join('　'))));
+                .map((r) => `${r.rank_provisional ? '—（待确认）' : r.rank ?? '待确认'}. ${r.name}（${r.total}）`).join('　'))));
       }
     } catch (e) {
       clear(panelBody);
@@ -116,14 +117,14 @@ function drawTotals(data, group, reload) {
     /* REQ-008：完全未开赛的组别不产生伪名次；页面与导出/公告使用同一 started 口径。 */
     body.append(h('div.info-box.mb', '本组别尚未开赛/无成绩，名次不计入。'));
   }
-  body.append(h('div.table-scroll', table([
+  body.append(scrollableTable(h('div.table-scroll', table([
     {
       label: '名次',
       render: (r) => {
         if (!started) return h('span.badge.badge-info', '未开赛/无成绩');
-        return r.status === 'tie_pending'
-          ? h('span.badge.badge-warn', '待确认')
-          : h('b', { class: r.rank === 1 ? 'rank-1' : '' }, r.rank);
+        if (r.status === 'tie_pending') return h('span.badge.badge-warn', '待确认');
+        if (r.rank_provisional) return h('span.badge.badge-warn', '—（待确认）');
+        return h('b', { class: r.rank === 1 ? 'rank-1' : '' }, r.rank);
       },
     },
     { label: '学校', key: 'name' },
@@ -143,16 +144,16 @@ function drawTotals(data, group, reload) {
       render: (r) => h('button.btn.small', { onclick: () => showDetail(r) },
         `分项目明细（${r.details.length}）`),
     },
-  ], data.rows)));
+  ], data.rows)), { hint: '横向滑动查看完整数据' }));
   /* 未确认名次不加入正式总分：说明缺项，不伪装为统计完成（§13.3）；未开赛组不显示该警告。 */
   const pendingCount = data.rows.reduce((n, r) => n + (r.pending ? r.pending.length : 0), 0);
   if (started && pendingCount) {
     body.append(h('div.warn-box.mt',
-      `还有 ${pendingCount} 项名次未确认，未计入上面的正式总分。`));
+      `还有 ${pendingCount} 项名次未确认，未计入上面的正式总分；名次列以“—（待确认）”表示暂排。`));
   }
   for (const item of data.unresolved) {
     body.append(h('div.row.mt',
-      h('div.warn-box', { style: 'flex:1' },
+      h('div.warn-box.flex-1',
         `总分与名次数量相同：${item.schools.map((s) => s.name).join('、')}，需录入现场确认结果`),
       canWrite() ? h('button.btn.btn-primary', {
         onclick: () => openTiebreak(group, item, reload),
@@ -187,7 +188,7 @@ function openTiebreak(group, item, reload) {
         dataset: { field: `order_${school.school_id}` },
       });
       inputs.set(school.school_id, input);
-      return h('div.row.tight.mt', h('span', { style: 'min-width:200px' }, school.name), input);
+      return h('div.row.tight.mt', h('span.tiebreak-name', school.name), input);
     }));
   formDialog({
     title: '录入现场确认结果',

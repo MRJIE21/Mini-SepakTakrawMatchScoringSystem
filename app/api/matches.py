@@ -214,6 +214,10 @@ def dashboard(ctx):
                 results_complete = enrolled > 0 and individual["confirmed"] == enrolled
                 required_placements = individual["eligible"] or 0
             complete = enrolled > 0 and results_complete and (placed["n"] or 0) >= required_placements
+            pending_review=db.q1(ctx.conn,"""SELECT COUNT(*) AS n FROM result_candidates rc
+                JOIN candidate_heads h ON h.candidate_id=rc.id WHERE rc.category_id=? AND h.status='submitted'""",(c['id'],))['n']
+            disputes=db.q1(ctx.conn,"SELECT COUNT(*) AS n FROM result_disputes WHERE category_id=? AND status='open'",(c['id'],))['n']
+            complete=complete and not pending_review and not disputes
             plan = db.q1(ctx.conn,
                          """SELECT id, status, version FROM plans WHERE category_id = ?
                              ORDER BY id DESC LIMIT 1""", (c["id"],))
@@ -226,6 +230,7 @@ def dashboard(ctx):
             cat_items.append({
                 "id": c["id"], "name": c["name"], "gender": c["gender"], "kind": c["kind"],
                 "participants": enrolled,
+                "candidates_pending":pending_review,"disputes_open":disputes,
                 "matches_total": stats["total"] or 0,
                 "matches_finished": stats["finished"] or 0,
                 "matches_void": stats["void"] or 0,
@@ -413,6 +418,8 @@ def _delete_match(ctx):
     match = get_or_404(ctx.conn, "matches", match_id, "场次")
     if match['status'] == 'finished' and match['result_version'] > 0:
         raise conflict('该场次已有确认成绩，请通过正式更正流程处理', code='has_result')
+    if db.q1(ctx.conn,"SELECT id FROM result_candidates WHERE subject_kind='match' AND subject_id=? LIMIT 1",(match_id,)):
+        raise conflict('该场次已有候选原件，请通过复核或正式处置流程处理',code='match_started')
     if ctx.body.get('category_id') and ctx.body['category_id'] != match['category_id']:
         raise bad_request('比赛不属于所选项目')
     if db.q1(ctx.conn, 'SELECT k FROM settings WHERE k=?', (f'recording:match:{match_id}',)) or \
@@ -459,6 +466,9 @@ def clear_stage_matches(ctx):
     deleted = 0
     with db.tx(ctx.conn):
         for row in rows:
+            if db.q1(ctx.conn,"SELECT id FROM result_candidates WHERE subject_kind='match' AND subject_id=? LIMIT 1",(row['id'],)):
+                blocked.append(row['id'])
+                continue
             if advancement.downstream_matches(ctx.conn, row["id"]) or db.q1(ctx.conn,
                     "SELECT k FROM settings WHERE k=?", (f"recording:match:{row['id']}",)) \
                     or db.q1(ctx.conn, 'SELECT id FROM score_events WHERE match_id=? LIMIT 1', (row['id'],)):

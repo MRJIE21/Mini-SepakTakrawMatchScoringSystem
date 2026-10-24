@@ -45,6 +45,10 @@ def claim(ctx, kind, sid, transfer=False):
 
 
 def _claim(ctx, kind, sid, transfer=False):
+    from . import result_candidates, result_impacts
+    result_impacts.guard_subject(ctx.conn, kind, sid)
+    if result_candidates.active(ctx.conn, kind, sid):
+        raise conflict('已有待复核候选，不能重新领取或转交', code='candidate_active')
     if kind not in ('match', 'individual'):
         raise bad_request('记录类型无效')
     if kind == 'match':
@@ -82,9 +86,11 @@ def _claim(ctx, kind, sid, transfer=False):
         return {'message': '已领取', **owner_info(ctx.conn, kind, sid)}
     db.run(ctx.conn, 'INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)',
            (f'recording:{kind}:{sid}', json.dumps({'user_id': uid})))
+    result_candidates.record_claim(ctx.conn, kind, sid, uid, old)
     security.audit(ctx.conn, ctx.user, 'transfer_recording' if transfer else 'claim_recording', kind, sid,
                    {'previous': old, 'user_id': uid, 'reason': ctx.body.get('reason', '')})
-    return {'message': '已转交' if transfer else '已领取', **owner_info(ctx.conn, kind, sid)}
+    return {'message': '已转交' if transfer else '已领取',
+            'claim_epoch':result_candidates.epoch_info(ctx.conn,kind,sid)['epoch'], **owner_info(ctx.conn, kind, sid)}
 
 
 def require_owner(ctx, kind, sid):
@@ -114,6 +120,15 @@ def authorize(ctx, scope):
             raise forbidden('赛事结构只能由管理员维护')
         if method != 'GET' and re.fullmatch(r'/api/categories/\d+', path): raise forbidden('项目设置只能由管理员维护')
         return
+    if role == 'recorder' and (
+            method == 'GET' and (path in ('/api/result-capabilities', '/api/result-candidates')
+                or re.fullmatch(r'/api/result-candidates/[a-f0-9]{32}', path)
+                or re.fullmatch(r'/api/(?:candidate|review)-receipts/[\w.-]+', path))
+            or method == 'POST' and (path == '/api/result-candidates'
+                or re.fullmatch(r'/api/result-candidates/[a-f0-9]{32}/withdraw', path))):
+        return
+    if method == 'GET' and path == '/api/result-capabilities':
+        return
     if role == 'display_operator':
         if method == 'GET' and path in ('/api/display/console', '/api/display/preview'):
             return
@@ -123,7 +138,7 @@ def authorize(ctx, scope):
         # 其余只读页面走下方 viewer 白名单；组 2/3 的写操作仍被拒绝。
     if path in ('/api/me', '/api/me/password', '/api/me/logout-all', '/api/logout', '/api/events'): return
     if method != 'GET':
-        if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual', '/api/display/live') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
+        if role == 'recorder' and (path in ('/api/scoring/submit', '/api/scoring/individual', '/api/display/live', '/api/display/live/start') or re.fullmatch(r'/api/recording/(match|individual)/\d+/claim', path)):
             return
         raise forbidden('当前角色没有该操作权限')
     shared = [r'/api/events/\d+/structure', r'/api/events/\d+/team-rules', r'/api/events/\d+/venues', r'/api/matches', r'/api/matches/\d+', r'/api/receipts/[\w.-]+', r'/api/categories/\d+/team-rules', r'/api/categories/\d+/individual-draw']
@@ -142,8 +157,15 @@ def filter_result(ctx, result):
     if not isinstance(result, dict): return result
     role = ctx.user['role']
     if result.get('category', {}).get('kind') == 'individual' and 'participations' in result:
+        from . import result_candidates
+        disputed=bool(db.q1(ctx.conn,"SELECT 1 FROM result_disputes WHERE category_id=? AND status='open'",(result['category']['id'],)))
         for part in result['participations']:
             part.update(owner_info(ctx.conn, 'individual', part['id']))
+            part['claim_epoch'] = result_candidates.epoch_info(ctx.conn,'individual',part['id'])['epoch']
+            pending = result_candidates.active(ctx.conn,'individual',part['id'])
+            part['candidate_id'] = pending['id'] if pending else None
+            part['review_status'] = 'submitted' if pending else 'none'
+            part['result_disputed'] = disputed
     if role == 'admin': return result
     if ctx.path == '/api/events':
         scopes = event_ids(db.get_conn(), ctx.user)
@@ -152,6 +174,9 @@ def filter_result(ctx, result):
         if 'submissions' in result: result['submissions'] = [s for s in result['submissions'] if s['user_id'] == ctx.user['id']]
         if result.get('submission') and result['submission']['user_id'] != ctx.user['id']: return {'found': False}
     if role in ('viewer', 'display_operator'):
+        for item in result.get('matches', []) + result.get('participations', []) + ([result['match']] if result.get('match') else []):
+            item.pop('candidate_id',None)
+            item.pop('claim_epoch',None)
         if 'placements' in result: result['placements'] = [p for p in result['placements'] if p['status'] == 'confirmed']
         if result.get('plan'):
             plan = result['plan']

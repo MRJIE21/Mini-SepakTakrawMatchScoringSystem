@@ -1,7 +1,7 @@
 /* 大屏控制台：单屏、8 个手动槽位、布局切换、推送与配对。 */
 import { api } from '../api.js';
 import { registerView, state } from '../main.js';
-import { h, clear, toast, statusBadge, fmtDateTime } from '../ui.js';
+import { h, clear, toast, statusBadge, fmtDateTime, pageHeader } from '../ui.js';
 
 const LAYOUTS = [1, 2, 3, 4, 8];
 const MODE_NAMES = { score: '比分', announce: '公告', standby: '待机' };
@@ -19,6 +19,9 @@ async function render({ el }) {
   let pollError = null;
   let pushButton = null;
   let pushHint = null;
+  let versionBadge = null;
+  let dirtyBadge = null;
+  let deviceBadge = null;
   await load();
   screenTimer = setInterval(refreshScreenStatus, 5000);
   window.addEventListener('beforeunload', () => clearInterval(screenTimer));
@@ -99,10 +102,19 @@ async function render({ el }) {
 
   function refreshDevicePanel() {
     const old = box.querySelector('.display-device-panel');
+    updateDeviceBadge();
     if (!old) return;
     const active = ctx.screens.some((item) => !item.revoked_at);
     if (!active && old.querySelector('input')) return;
     old.replaceWith(devicePanel());
+  }
+
+  function updateDeviceBadge() {
+    if (!deviceBadge) return;
+    const paired = ctx.screens.filter((item) => !item.revoked_at);
+    const online = paired.filter((item) => item.online).length;
+    deviceBadge.textContent = paired.length ? `设备 ${online}/${paired.length} 在线` : '尚未配对';
+    deviceBadge.className = `badge ${paired.length ? (online ? 'badge-ok' : 'badge-warn') : 'badge-warn'}`;
   }
 
   function matchById(id) { return ctx.matches.find((item) => Number(item.id) === Number(id)) || null; }
@@ -123,8 +135,18 @@ async function render({ el }) {
     const { preserveScroll = true } = options;
     const scrollY = window.scrollY;
     clear(box);
-    box.append(
-      h('div.panel-head', h('h2', '大屏控制台'), h('div.row.tight',
+    const paired = ctx.screens.filter((item) => !item.revoked_at);
+    const online = paired.filter((item) => item.online).length;
+    versionBadge = statusBadge(`已推送 v${ctx.config?.revision || 0}`, 'ok');
+    dirtyBadge = statusBadge(ctx.dirty ? '有未推送修改' : '与已推送一致', ctx.dirty ? 'warn' : '');
+    deviceBadge = statusBadge(paired.length ? `设备 ${online}/${paired.length} 在线` : '尚未配对',
+      paired.length ? (online ? 'ok' : 'warn') : 'warn');
+    box.append(pageHeader({
+      crumbs: [{ label: '大屏' }],
+      title: '大屏控制台',
+      badges: [versionBadge, dirtyBadge, deviceBadge],
+      meta: [h('span', '单屏 · 8 个手动窗口 · 编辑后点“推送”才上屏；大屏不显示标题栏、页脚、主客队标签与队员名。')],
+      actions: [
         h('button.btn', {
           onclick: () => {
             const revision = Number(ctx.config?.revision || 0);
@@ -133,18 +155,15 @@ async function render({ el }) {
               '_blank', 'noopener');
           },
         }, '预览当前大屏'),
-        h('button.btn', { onclick: load }, '刷新'),
-        h('span.small.muted', `已推送 v${ctx.config?.revision || 0}`))),
-      h('div.small.muted', '单屏 · 8 个手动窗口 · 编辑后点“推送”才上屏。大屏不显示标题栏、页脚、主客队标签与队员名。'),
-      h('div.row.tight.mt', h('span.small.muted', '已推送版本：'), h('b', `v${ctx.config?.revision || 0}`),
-        h('span.small.muted', ctx.dirty ? ' · 有未推送修改' : ' · 与已推送一致')),
-    );
+        h('button.btn', { onclick: load }, '刷新配置'),
+      ],
+    }));
     const workspace = h('div.display-admin-workspace');
-    const controls = h('div.display-admin-controls');
-    controls.append(devicePanel(), layoutPanel(), modePanel());
-    const main = h('div.display-admin-main');
-    main.append(slotsPanel(), pushPanel());
-    workspace.append(controls, main);
+    const controls = h('div.display-admin-controls'); controls.append(layoutPanel(), modePanel());
+    const main = h('div.display-admin-main'); main.append(slotsPanel());
+    const center = h('div.display-admin-center'); center.append(controls, main);
+    const side = h('div.display-admin-side'); side.append(devicePanel(), pushPanel());
+    workspace.append(center, side);
     box.append(workspace);
     // 重绘后同步原地校验状态（刷新间隔/窗口数/重复场次），避免按钮与错误提示滞后。
     syncPushState();
@@ -376,7 +395,9 @@ async function render({ el }) {
       onclick: push,
     }, ctx.busy ? '推送中…' : '推送到大屏');
     pushHint = h('span.small.muted', pushHintText(check));
-    row.append(h('div.row.tight', pushButton, pushHint));
+    row.append(h('div.panel-head', h('h3', '推送到大屏'),
+      h('span.small.muted', `已推送 v${ctx.config?.revision || 0}`)),
+      h('div.row.tight', pushButton, pushHint));
     if (ctx.pushMessage) {
       row.append(h('div.small.mt',
         { class: ctx.pushMessage.kind === 'error' ? 'field-error' : '' },
@@ -429,8 +450,11 @@ async function render({ el }) {
   function updateStatus() {
     if (!ctx.config) return;
     const published = ctx.config.revision || 0;
-    const line = box.querySelector('.panel-head .small');
-    if (line) line.textContent = `已推送 v${published}${ctx.dirty ? ' · 有未推送修改' : ''}`;
+    if (versionBadge) versionBadge.textContent = `已推送 v${published}`;
+    if (dirtyBadge) {
+      dirtyBadge.textContent = ctx.dirty ? '有未推送修改' : '与已推送一致';
+      dirtyBadge.className = `badge${ctx.dirty ? ' badge-warn' : ''}`;
+    }
   }
 }
 

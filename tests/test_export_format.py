@@ -1,5 +1,6 @@
 """成绩导出口径/格式与 XLSX 的真实 HTTP 隔离测试。"""
 from __future__ import annotations
+from helpers.reviewed_result import reviewed_result
 
 import csv
 import io
@@ -67,12 +68,12 @@ class ExportFormatTest(unittest.TestCase):
         return [list(row) for row in sheet.iter_rows(values_only=True)]
 
     def submit_individual(self, participation_id, value=None, status='normal', errors=0, violations=0):
-        return self.ok('POST', '/api/scoring/individual', {
+        return reviewed_result(self, 'POST', '/api/scoring/individual', {
             'submission_uid': str(uuid.uuid4()), 'participation_id': participation_id,
             'base_version': 0, 'result_status': status, 'result_value': value,
             'error_count': errors, 'violation_count': violations,
             'device': '导出格式测试', 'event_identity': dict(self.event_identity),
-        })
+        }, expected=200)
 
     # ------------------------------------------------------------ REQ-001/002/004
     def test_pending_semantics_notice_and_numeric_format(self):
@@ -175,13 +176,13 @@ class ExportFormatTest(unittest.TestCase):
         for status, label in (('home_forfeit', '主队弃权'), ('away_forfeit', '客队弃权'),
                               ('unfinished', '未完成'), ('cancelled', '已取消')):
             match_id, detail = new_match(f'{label}场')
-            self.ok('POST', '/api/scoring/submit', {
+            reviewed_result(self, 'POST', '/api/scoring/submit', {
                 'submission_uid': str(uuid.uuid4()), 'match_id': match_id, 'base_version': 0,
                 'result_status': status, 'sets': [], 'events': [], 'device': '脚注测试',
                 'plan_version': detail['plan_version'],
                 'home_participation': detail['home']['participation_id'],
                 'away_participation': detail['away']['participation_id'],
-                'event_identity': dict(self.event_identity)})
+                'event_identity': dict(self.event_identity)}, expected=200)
             sheet = self.text(f'/api/exports/record-sheet.html?match_id={match_id}')
             if status in ('unfinished', 'cancelled'):
                 self.assertIn('本场已取消/未完成，原局分作废；结果以系统记录为准。', sheet)

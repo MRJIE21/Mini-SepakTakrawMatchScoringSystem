@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 /* 导出格式真实浏览器验证：按钮文案、XLSX 下载入口、记录表填充与只读角色边界。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -95,7 +96,7 @@ try {
   const detail = await api('GET', `/api/matches/${match.match_id}`);
   const sets = [{ set_no: 1, home_points: 15, away_points: 8, winner_side: 'home' },
     { set_no: 2, home_points: 15, away_points: 10, winner_side: 'home' }];
-  await api('POST', '/api/scoring/submit', {
+  await reviewedResult({base,token,identity},'POST','/api/scoring/submit', {
     submission_uid: `export-ui-${match.match_id}`, match_id: match.match_id, base_version: 0,
     result_status: 'normal', sets, events: eventsFor(sets), device: 'UI 测试',
     plan_version: detail.match.plan_version,
@@ -114,7 +115,7 @@ try {
     individualParts.push(part.participation_id);
   }
   for (const [index, part] of individualParts.entries()) {
-    await api('POST', '/api/scoring/individual', {
+    await reviewedResult({base,token,identity},'POST','/api/scoring/individual', {
       submission_uid: `export-ui-ind-${index}`, participation_id: part, base_version: 0,
       result_status: 'normal', result_value: 20 - index, error_count: 0, violation_count: 0,
       event_identity: identity,
@@ -132,13 +133,15 @@ try {
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => { throw new Error(error.message); });
 
-  await page.goto(`${base}/#/admin?category=${cats['male:team']}`);
+  /* 1.5.0 起“更正与导出”拆成页签：导出与打印在 tab=exports，按钮按报表行区分（XLSX/CSV/名次表）。 */
+  await page.goto(`${base}/#/admin?tab=exports&category=${cats['male:team']}`);
   await page.getByRole('heading', { name: /更正与导出/ }).waitFor();
-  await page.getByRole('button', { name: '本项目成绩 XLSX', exact: true }).waitFor();
+  const projectExportRow = page.getByRole('row').filter({ has: page.getByRole('cell', { name: '项目成绩', exact: true }) });
+  await projectExportRow.getByRole('button', { name: 'XLSX', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: /15 分制/ }).count(), 0, '记录表按钮不再写死 15 分制');
-  assert.equal(await page.getByRole('button', { name: '打印记录表', exact: true }).count(), 1);
+  assert.equal(await page.getByRole('button', { name: '记录表', exact: true }).count(), 1);
   const xlsxDownloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: '本项目成绩 XLSX', exact: true }).click();
+  await projectExportRow.getByRole('button', { name: 'XLSX', exact: true }).click();
   const xlsxDownload = await xlsxDownloadPromise;
   assert.ok(xlsxDownload.suggestedFilename().endsWith('.xlsx'), xlsxDownload.suggestedFilename());
   const xlsxPath = await xlsxDownload.path();
@@ -146,10 +149,12 @@ try {
   checks.push('更正与导出页按钮文案与 XLSX 下载');
 
   await page.goto(`${base}/#/results?category=${cats['male:individual']}`);
-  await page.getByRole('button', { name: '导出本项目成绩 XLSX', exact: true }).waitFor();
-  assert.equal(await page.getByRole('button', { name: '导出本项目成绩 CSV', exact: true }).count(), 1);
+  /* 成绩页导出入口文案随 1.5.0 改版：独立页为“导出 XLSX/CSV”，工作台内嵌为“导出本项目 XLSX/CSV”，用正则兼容。 */
+  const resultsXlsx = page.getByRole('button', { name: /^导出(本项目)? XLSX$/ });
+  await resultsXlsx.waitFor();
+  assert.equal(await page.getByRole('button', { name: /^导出(本项目)? CSV$/ }).count(), 1);
   const resultDownloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: '导出本项目成绩 XLSX', exact: true }).click();
+  await resultsXlsx.click();
   assert.ok((await resultDownloadPromise).suggestedFilename().endsWith('.xlsx'));
   checks.push('成绩页 XLSX 入口');
 

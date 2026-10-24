@@ -1,6 +1,7 @@
 """赛事、大组别、项目、学校、运动员、队伍、参赛名单、场地。"""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -15,6 +16,7 @@ from .common import (GENDER_NAMES, KIND_NAMES, category_context, get_or_404,
 
 ADMIN = ("admin",)
 ORG = ("admin", "organizer")
+logger = logging.getLogger("stss.catalog")
 
 
 # ------------------------------------------------------------------ 队伍成员
@@ -178,6 +180,11 @@ def expect_rev(conn, body: dict, table: str, row_id: int, label: str) -> None:
 def team_profile_gaps(conn, team_id: int, captain_id: int | None) -> list[str]:
     """资料待补充项：实时计算，不落库（§6.6、§15.4）。"""
     members = team_members(conn, team_id)
+    return team_profile_gaps_from_members(members, captain_id)
+
+
+def team_profile_gaps_from_members(members, captain_id) -> list[str]:
+    """Shared rules for single-team and request-local bulk reads."""
     gaps = []
     if not members:
         gaps.append("尚未选择队员")
@@ -240,7 +247,13 @@ def _event_stats(conn, event_id: int) -> dict:
             if cached is not None and cached[0] > time.monotonic():
                 return dict(cached[1])
     event_path = db.event_db_path(event_id)
-    data_conn = db.connect(event_path) if event_path.exists() else conn
+    if not event_path.exists():
+        # 赛事库缺失时不能伪装成 0 计数并写缓存：记录告警并让调用方看到数据源异常标记，
+        # 下次读取仍会重试，而不是在 TTL 内持续返回“看起来正常”的旧值。
+        logger.warning("赛事数据库缺失，统计计数不可用：%s", event_path)
+        return {"categories": 0, "schools": 0, "finished_matches": 0,
+                "data_error": "event_database_missing"}
+    data_conn = db.connect(event_path)
     try:
         counts = db.q1(data_conn,
                        """SELECT (SELECT COUNT(*) FROM categories c JOIN groups g ON g.id = c.group_id
@@ -252,8 +265,7 @@ def _event_stats(conn, event_id: int) -> dict:
                                    WHERE g.event_id = ? AND m.status = 'finished') AS finished_matches
                        """, (event_id, event_id, event_id))
     finally:
-        if data_conn is not conn:
-            data_conn.close()
+        data_conn.close()
     stats = dict(counts)
     if ttl > 0:
         with _EVENT_STATS_LOCK:
@@ -580,6 +592,8 @@ def create_group(ctx):
         "event_id": event_id, "code": code,
         "name": ctx.body.get("name") or f"{code}组",
         "seq": int(ctx.body.get("seq") or 0)})
+    # 结构写入不依赖 HTTP 层的按头失效：即使调用方/代理未带事件头也要让计数缓存失效。
+    _invalidate_event_of(ctx.conn, event_id=event_id)
     return {"group_id": group_id}
 
 
@@ -600,6 +614,7 @@ def update_group(ctx):
         fields["seq"] = int(ctx.body["seq"])
     if fields:
         db.update(ctx.conn, "groups", group_id, fields)
+        _invalidate_event_of(ctx.conn, group_id=group_id)
     return {"message": "组别已更新"}
 
 

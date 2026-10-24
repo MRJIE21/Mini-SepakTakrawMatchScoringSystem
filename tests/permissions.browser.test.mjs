@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
@@ -29,10 +30,11 @@ print(json.dumps({'port': server.server_port}), flush=True)
 server.serve_forever()
 `;
 const child = spawn(process.env.STSS_PYTHON || 'python',
-  ['-u', '-c', serverCode], {
+  ['-B', '-u', '-c', serverCode], {
     cwd: root,
     env: { ...process.env, STSS_DATA_DIR: dataDir, STSS_DB: path.join(dataDir, 'registry.db'),
-      STSS_EVENTS_DIR: path.join(dataDir, 'events'), STSS_ADMIN_PASSWORD: 'BrowserTest123', PYTHONUTF8: '1' },
+      STSS_EVENTS_DIR: path.join(dataDir, 'events'), STSS_ADMIN_PASSWORD: 'BrowserTest123', PYTHONUTF8: '1',
+      PYTHONDONTWRITEBYTECODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
 let serverErrors = '';
@@ -83,6 +85,7 @@ try {
   const team = group.categories.find((c) => c.kind === 'team' && c.gender === 'male');
   const individual = group.categories.find((c) => c.kind === 'individual' && c.gender === 'male');
   const adminToken=token;
+  await prepareReviewedFixture({base,token:adminToken,identity});
   const accounts={};
   for (const [name,role] of [['rec1','recorder'],['rec2','recorder'],['organizer','organizer'],['viewer','viewer']]) {
     const user=await api('POST','/api/users',{username:name,display_name:name,role,password:'Permission123',event_ids:[identity.event_id]});
@@ -105,6 +108,8 @@ try {
   await fixture.confirm();
   const match=(await api('GET','/api/matches?category_id='+team.id)).matches[0];
   const deny=async(method,url,body,status=403,auth=token,headerIdentity=identity)=>{
+    if(method==='POST'&&(/\/api\/scoring\/(submit|individual)$/.test(url)||/\/api\/matches\/\d+\/(correction|cancel)$/.test(url)))
+      return reviewedResult({base,token:auth,identity:headerIdentity},method,url,body,status);
     const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json','X-Client-Protocol':'2',Authorization:'Bearer '+auth,
       'X-Event-ID':String(headerIdentity.event_id),'X-Event-UUID':headerIdentity.event_uuid},body:body?JSON.stringify(body):undefined});
     const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));return data;
@@ -132,11 +137,11 @@ try {
   await api('POST','/api/recording/match/'+match.id+'/transfer',{user_id:accounts.rec2.user_id,reason:'轮班交接'});
   await deny('POST','/api/scoring/submit',payload,403,accounts.rec1.token);
   token=accounts.rec2.token;
-  await api('POST','/api/scoring/submit',payload);
-  assert.equal((await api('POST','/api/scoring/submit',payload)).duplicate,true);
+  await reviewedResult({base,token,identity},'POST','/api/scoring/submit',payload);
+  assert.equal((await reviewedResult({base,token,identity},'POST','/api/scoring/submit',payload)).duplicate,true);
   await deny('POST','/api/scoring/submit',{...payload,submission_uid:'forbidden-edit',base_version:1});
   token=accounts.organizer.token;
-  await api('POST','/api/matches/'+match.id+'/correction',{reason:'裁判复核',result_status:'home_forfeit',sets:[],events:[]});
+  await reviewedResult({base,token,identity},'POST','/api/matches/'+match.id+'/correction',{reason:'裁判复核',result_status:'home_forfeit',sets:[],events:[]});
   const result=(await api('GET','/api/matches/'+match.id)).match;
   assert.equal(result.recorder_name,'rec2');assert.equal(result.corrector_name,'organizer');
   token=accounts.rec1.token;
@@ -144,11 +149,11 @@ try {
   const individualPayload={event_identity:identity,submission_uid:'permission-individual',participation_id:person.participation_id,
     base_version:0,result_status:'normal',result_value:20,error_count:0,violation_count:0};
   await deny('POST','/api/scoring/individual',individualPayload,403,accounts.rec2.token);
-  await api('POST','/api/scoring/individual',individualPayload);
-  assert.equal((await api('POST','/api/scoring/individual',individualPayload)).duplicate,true);
+  await reviewedResult({base,token,identity},'POST','/api/scoring/individual',individualPayload);
+  assert.equal((await reviewedResult({base,token,identity},'POST','/api/scoring/individual',individualPayload)).duplicate,true);
   await deny('POST','/api/scoring/individual',{...individualPayload,submission_uid:'individual-change',base_version:1});
   token=accounts.organizer.token;
-  await api('POST','/api/scoring/individual',{...individualPayload,submission_uid:'individual-correction',base_version:1,reason:'复核次数',result_value:21});
+  await reviewedResult({base,token,identity},'POST','/api/scoring/individual',{...individualPayload,submission_uid:'individual-correction',base_version:1,reason:'复核次数',result_value:21});
   const individualResult=(await api('GET','/api/categories/'+individual.id+'/individual-results')).results[0];
   assert.equal(individualResult.recorder_name,'rec1');assert.equal(individualResult.corrector_name,'organizer');
   token=accounts.viewer.token;

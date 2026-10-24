@@ -1,4 +1,5 @@
 /* Real isolated HTTP/SQLite and browser verification for configurable competition rules. */
+import {approveCandidate} from './helpers/reviewed_result.mjs';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
@@ -203,18 +204,24 @@ try {
     await page.getByRole('button', { name: '开始第 1 局记录', exact: true }).click();
     const homePoint = page.getByRole('button', { name: '＋ 主队得 1 分', exact: true });
     await homePoint.click(); await homePoint.click();
-    await page.getByRole('button', { name: '核对无误，提交成绩', exact: true }).waitFor();
+    await page.getByRole('button', { name: '核对无误，提交待复核', exact: true }).waitFor();
     assert.equal(await homePoint.isDisabled(), true);
     await page.getByRole('button', { name: '撤回上一次记分', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.add-btn.home')?.disabled === false);
     assert.equal(await homePoint.isEnabled(), true);
     await homePoint.click();
-    await page.getByRole('button', { name: '核对无误，提交成绩', exact: true }).click();
+    const receivedResponse=page.waitForResponse(response=>response.url().endsWith('/api/result-candidates')&&response.status()===200);
+    await page.getByRole('button', { name: '核对无误，提交待复核', exact: true }).click();
+    const received=await (await receivedResponse).json();
+    const pending=(await api('GET', `/api/matches/${mid}`)).match;
+    assert.equal(pending.status,'ready');assert.equal(pending.result_version,0);assert.equal(pending.sets.length,0);
+    await approveCandidate({base,token,identity},received);
+    await page.reload();
     await page.getByRole('button', { name: '查看成绩', exact: true }).waitFor();
     const finished = (await api('GET', `/api/matches/${mid}`)).match;
     assert.equal(finished.status, 'finished'); assert.equal(finished.sets.length, 1); assert.equal(finished.sets[0].home_points, 2);
     assert.equal((await api('GET', `/api/matches/${firstMatch}`)).match.rules.max_sets, 5);
-    pass('真实记录页按一局2分结束、撤回重开、不可变包提交、原领取场次保持五局规则');
+    pass('真实记录页按一局2分结束、撤回重开、候选不改正式且独立确认后生效、原领取场次保持五局规则');
     await page.goto(`${base}/#/teamRules?event=${identity.event_id}`); await editor().waitFor();
     assert.ok((await editor().innerText()).includes('1局1胜'));
     // A confirmed write followed by a failed read remains blocked until a read-only recovery.
@@ -284,6 +291,7 @@ try {
     assert.ok((await readPage.locator('#setup-rules').innerText()).includes('9局5胜'));
     assert.equal(await readPage.getByRole('button', { name: '保存规则', exact: true }).count(), 0);
     assert.equal(await readPage.locator('#setup-rules .team-rules input, #setup-rules .team-rules select').count(), 0);
+    await readPage.locator('#btn-mobile-nav').click();
     await readPage.getByRole('link', { name: '赛事设置', exact: true }).click();
     await readPage.locator('.setup-readonly-group').first().waitFor();
     assert.equal(await readPage.locator('#setup-rules .rules-readonly').count(), 1);
@@ -299,6 +307,7 @@ try {
       await rolePage.locator('#setup-rules .rules-readonly').waitFor();
       assert.ok((await rolePage.locator('#setup-rules').innerText()).includes('9局5胜'));
       assert.equal(await rolePage.locator('#setup-rules .rules-project-card input, #setup-rules .rules-project-card select, #setup-rules .rules-project-card button').count(), 0);
+      await rolePage.locator('#btn-mobile-nav').click();
       await rolePage.getByRole('link', { name: '赛事设置', exact: true }).click();
       await rolePage.locator('.setup-readonly-group').first().waitFor();
       assert.equal(await rolePage.locator('#setup-rules .rules-readonly').count(), 1);

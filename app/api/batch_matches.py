@@ -84,11 +84,19 @@ class BatchReadConnection:
                             ' ORDER BY a.id'):
             self.corrections[row['entity_id']] = dict(row)
         self.settings = {r['k']: dict(r) for r in self._in(
-            'SELECT k,v FROM settings WHERE k IN', [f'recording:match:{mid}' for mid in mids])}
+            'SELECT k,v FROM settings WHERE k IN', [key for mid in mids for key in (f'recording:match:{mid}',f'display:stream:{mid}')])}
+        self.review_pending={r['subject_id']:dict(r) for r in self._in(
+            """SELECT c.id,c.revision,c.created_by,c.category_id,h.status,c.subject_id FROM result_candidates c
+            JOIN candidate_heads h ON h.candidate_id=c.id WHERE h.subject_kind='match' AND h.status='submitted' AND h.subject_id IN""",mids)}
+        self.recording_epochs={r['subject_id']:dict(r) for r in self._in(
+            "SELECT * FROM recording_epochs WHERE subject_kind='match' AND subject_id IN",mids)}
+        self.disputed={r['category_id'] for r in self._in(
+            "SELECT DISTINCT category_id FROM result_disputes WHERE status='open' AND category_id IN",self.categories)}
         import json
         owner_ids = set()
         for row in self.settings.values():
-            owner_ids.add(json.loads(row['v'])['user_id'])
+            if row['k'].startswith('recording:'):
+                owner_ids.add(json.loads(row['v'])['user_id'])
         self.users = self._map('users', owner_ids)
 
     def _in(self, prefix, ids, suffix=''):
@@ -112,6 +120,14 @@ class BatchReadConnection:
         key = args[0] if args else None
         row = None
         if text.startswith('select'):
+            if 'from result_candidates c join candidate_heads h' in text:
+                row=self.review_pending.get(args[1]) if args and args[0]=='match' else None
+                return _Rows([row] if row else [])
+            if 'from recording_epochs where subject_kind' in text:
+                row=self.recording_epochs.get(args[1]) if args and args[0]=='match' else None
+                return _Rows([row] if row else [])
+            if 'from result_disputes where category_id' in text:
+                return _Rows([{'category_id':key}] if key in self.disputed else [])
             if 'from matches where home_source_match=? or away_source_match=?' in text:
                 return _Rows(self.destinations.get(key, []))
             if 'from participations p' in text and 'where p.id in' in text:

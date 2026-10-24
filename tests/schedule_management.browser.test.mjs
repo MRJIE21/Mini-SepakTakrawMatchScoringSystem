@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 /* Actual server/browser verification for the unified schedule and on-demand editors. */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -134,7 +135,7 @@ try {
         for (let away = 1; away <= 8; away++) events.push({ seq: ++seq, kind: 'score', set_no: set.set_no, side: 'away', home_after: 0, away_after: away });
         for (let home = 1; home <= 15; home++) events.push({ seq: ++seq, kind: 'score', set_no: set.set_no, side: 'home', home_after: home, away_after: 8 });
       }
-      await api('POST', '/api/scoring/submit', { event_identity: identity, submission_uid: randomUUID(), match_id: match.id,
+      await reviewedResult({base,token,identity},'POST','/api/scoring/submit', { event_identity: identity, submission_uid: randomUUID(), match_id: match.id,
         base_version: match.result_version, plan_version: match.plan_version, home_participation: match.home.participation_id,
         away_participation: match.away.participation_id, result_status: 'normal', sets, events });
     };
@@ -211,7 +212,7 @@ try {
     const saved = (await api('GET', `/api/categories/${cat.id}/plan`)).plan;
     assert.equal(saved.stages.flatMap(s => s.matches).filter(m => m.manual_note === '丢响应恢复验证').length, 1);
     pass('真实丢失成功响应，刷新后同UID核实，无重复写入');
-    await page.getByRole('link', { name: '分组', exact: true }).click();
+    await page.getByRole('navigation', { name: '赛程视图' }).getByRole('link', { name: '分组与抽签', exact: true }).click();
     await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: '新增比赛', exact: true }).count(), 0);
     await snapshot('groups');

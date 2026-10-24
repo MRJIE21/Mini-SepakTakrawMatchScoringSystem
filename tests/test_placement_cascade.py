@@ -1,4 +1,5 @@
 """成绩更正后人工项目名次必须退出正式口径，并可一键按小组名次重生成。"""
+from helpers.reviewed_result import reviewed_result
 import json
 import tempfile
 import unittest
@@ -83,13 +84,13 @@ class PlacementCascadeTest(unittest.TestCase):
         a, b = self.fx['schools'][0], self.fx['schools'][1]
         self.assertNotEqual(by_school[f'甲1校']['total'], 0)
         # 改判：客队胜
-        corrected = self.ok('POST', f'/api/matches/{self.match_id}/correction', {
+        corrected = reviewed_result(self, 'POST', f'/api/matches/{self.match_id}/correction', {
             'reason': '现场改判：主队第二局后弃权', 'result_status': 'normal',
             'sets': [{'set_no': 1, 'home_points': 10, 'away_points': 15, 'winner_side': 'away'},
                      {'set_no': 2, 'home_points': 12, 'away_points': 15, 'winner_side': 'away'}],
             'events': self.events_for([{'home_points': 10, 'away_points': 15},
                                        {'home_points': 12, 'away_points': 15}]),
-        })
+        }, expected=200)
         self.assertTrue(corrected['stale_pools'], '更正后小组名次必须退回待确认')
         pending = self.placements()
         self.assertEqual([p['status'] for p in pending], ['pending', 'pending'])

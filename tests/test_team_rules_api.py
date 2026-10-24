@@ -1,3 +1,4 @@
+from helpers.reviewed_result import reviewed_result
 import copy
 import json
 from pathlib import Path
@@ -96,7 +97,9 @@ class TeamRulesApiTest(fixtures.ApiTest):
             self.assertEqual(self.ok('GET', f'/api/categories/{cat}/team-rules')['rules'], desired)
         self.event_headers, self.event_identity = original
         self.assertEqual(self.ok('GET', self.path)['rules'], self.changed_rules())
-        self.request('GET', empty_path, expect=404)  # URL cannot read another event through the selected DB.
+        # URL 中的赛事与所选赛事不一致时必须被拒绝，不能借所选事件库读到另一赛事。
+        mismatch = self.request('GET', empty_path, expect=409)
+        self.assertEqual(mismatch['code'], 'event_identity_mismatch')
 
     def test_legacy_project_write_rejected_without_widening_effect(self):
         before = self.ok('GET', self.path)
@@ -281,23 +284,23 @@ class TeamRulesApiTest(fixtures.ApiTest):
         self.save_rules(self.changed_rules())
         mid = self.new_match()
         incomplete = self.packet(mid, [(15, 0), (15, 0)])
-        self.request('POST', '/api/scoring/submit', incomplete, expect=422)
+        reviewed_result(self, 'POST', '/api/scoring/submit', incomplete, expected=422)
         packet = self.packet(mid, [(17, 16), (15, 0), (17, 14)])
         missing = copy.deepcopy(packet); missing.pop('rules_hash')
-        self.request('POST', '/api/scoring/submit', missing, expect=409)
-        result = self.ok('POST', '/api/scoring/submit', packet)
+        reviewed_result(self, 'POST', '/api/scoring/submit', missing, expected=409)
+        result = reviewed_result(self, 'POST', '/api/scoring/submit', packet, expected=200)
         self.assertEqual(result['match']['winner_side'], 'home')
         self.assertEqual(result['match']['rules_state'], 'frozen')
-        self.assertTrue(self.ok('POST', '/api/scoring/submit', packet)['duplicate'])
+        self.assertTrue(reviewed_result(self, 'POST', '/api/scoring/submit', packet, expected=200)['duplicate'])
         self.save_rules(team_rules.normalize())
         match = self.ok('GET', f'/api/matches/{mid}')['match']
         self.assertEqual(match['rules'], self.changed_rules())
         correction = {'reason': '核对比分', 'rules_hash': match['rules_hash'], 'result_status': 'normal',
                       'sets': packet['sets'], 'events': []}
-        self.ok('POST', f'/api/matches/{mid}/correction', correction)
+        reviewed_result(self, 'POST', f'/api/matches/{mid}/correction', correction, expected=200)
         correction['sets'] = copy.deepcopy(packet['sets']); correction['sets'][0]['away_points'] = 13
-        self.request('POST', f'/api/matches/{mid}/correction', {**correction, 'base_version': 2,
-                     'request_uid': 'invalid-correction', 'event_identity': self.event_identity}, expect=422)
+        reviewed_result(self, 'POST', f'/api/matches/{mid}/correction', {**correction, 'base_version': 2,
+                     'request_uid': 'invalid-correction', 'event_identity': self.event_identity}, expected=422)
         for path in (f'/api/exports/record-sheet.html?match_id={mid}', f'/api/exports/record-sheet.csv?match_id={mid}'):
             status, raw = self.request('GET', path, raw=True)
             self.assertEqual(status, 200)
@@ -308,7 +311,7 @@ class TeamRulesApiTest(fixtures.ApiTest):
         r['deciding'] = {'mode': 'fixed_deuce', 'target_points': 11, 'deuce_points': 13}
         self.save_rules(r)
         mid = self.new_match()
-        result = self.ok('POST', '/api/scoring/submit', self.packet(mid, [(13, 11)]))
+        result = reviewed_result(self, 'POST', '/api/scoring/submit', self.packet(mid, [(13, 11)]), expected=200)
         self.assertEqual(result['match']['winner_side'], 'home')
         conn = db.connect(db.event_db_path(self.fx['event_id']))
         try:
@@ -322,10 +325,10 @@ class TeamRulesApiTest(fixtures.ApiTest):
         packet.pop('rules_hash')
         bad = copy.deepcopy(packet)
         bad['events'].append({'seq': len(bad['events']) + 1, 'kind': 'score', 'set_no': 2, 'side': 'away'})
-        self.request('POST', '/api/scoring/submit', bad, expect=422)
+        reviewed_result(self, 'POST', '/api/scoring/submit', bad, expected=422)
         self.assertEqual(self.ok('GET', f'/api/matches/{mid}')['match']['rules_state'], 'inherited')
-        self.ok('POST', '/api/scoring/submit', packet)
-        self.assertTrue(self.ok('POST', '/api/scoring/submit', packet)['duplicate'])
+        reviewed_result(self, 'POST', '/api/scoring/submit', packet, expected=200)
+        self.assertTrue(reviewed_result(self, 'POST', '/api/scoring/submit', packet, expected=200)['duplicate'])
 
     def test_actual_concurrent_claim_and_change_atomic_order(self):
         for i in range(3):
@@ -355,7 +358,7 @@ class TeamRulesApiTest(fixtures.ApiTest):
             {'kind': 'round_robin', 'name': '循环赛', 'params': {}}]})['plan_id']
         self.fixture_schedule('POST', f'/api/plans/{plan}/generate'); self.fixture_schedule('POST', f'/api/plans/{plan}/lock')
         match = self.match_list(category_id=self.cat)[0]
-        self.ok('POST', '/api/scoring/submit', self.packet(match['id'], [(15, 9)]))
+        reviewed_result(self, 'POST', '/api/scoring/submit', self.packet(match['id'], [(15, 9)]), expected=200)
         pool = self.ok('GET', f'/api/categories/{self.cat}/plan')['plan']['stages'][0]['pools'][0]
         standings = self.ok('GET', f"/api/pools/{pool['id']}/standings")
         winner_row = next(row for row in standings['rows'] if row['wins'])
@@ -372,12 +375,12 @@ class TeamRulesApiTest(fixtures.ApiTest):
             finals = [m for m in ready if m['round_no'] == 200]
             if finals: break
             self.assertTrue(ready)
-            for m in ready: self.ok('POST', '/api/scoring/submit', self.packet(m['id'], [(15, 8)]))
+            for m in ready: reviewed_result(self, 'POST', '/api/scoring/submit', self.packet(m['id'], [(15, 8)]), expected=200)
         self.assertEqual(len(finals), 1)
-        self.ok('POST', '/api/scoring/submit', self.packet(finals[0]['id'], [(9, 15)]))
+        reviewed_result(self, 'POST', '/api/scoring/submit', self.packet(finals[0]['id'], [(9, 15)]), expected=200)
         resets = [m for m in self.match_list(category_id=self.cat) if m['round_no'] == 201]
         self.assertEqual(len(resets), 1); self.assertEqual(resets[0]['status'], 'ready')
-        self.ok('POST', '/api/scoring/submit', self.packet(resets[0]['id'], [(15, 5)]))
+        reviewed_result(self, 'POST', '/api/scoring/submit', self.packet(resets[0]['id'], [(15, 5)]), expected=200)
         result = self.ok('POST', f'/api/categories/{self.cat}/placements/auto', {})
         self.assertEqual(sorted(p['rank_no'] for p in result['placements']), [1, 2])
 
@@ -399,7 +402,7 @@ class TeamRulesApiTest(fixtures.ApiTest):
         self.save_rules(self.changed_rules())
         for result_status in ('cancelled', 'unfinished'):
             mid = self.new_match()
-            result = self.ok('POST', f'/api/matches/{mid}/cancel', {'result_status': result_status, 'reason': '现场确认'})
+            result = reviewed_result(self, 'POST', f'/api/matches/{mid}/cancel', {'result_status': result_status, 'reason': '现场确认'}, expected=200)
             self.assertEqual(result['match']['rules_state'], 'frozen')
             frozen = result['match']['rules_hash']
             self.save_rules(team_rules.normalize())

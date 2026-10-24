@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 /* P2-A REQ-011：打印页稳定 URL、可刷新、权限失败提示与名次分组排序。
    真实浏览器 + 隔离 HTTP/SQLite；不写产品 data，不使用真实赛事数据。 */
 import assert from 'node:assert/strict';
@@ -100,7 +101,7 @@ try {
     indivParts.push(part.participation_id);
   }
   for (const [index, pid] of indivParts.entries()) {
-    await api('POST', '/api/scoring/individual', {
+    await reviewedResult({base,token,identity},'POST','/api/scoring/individual', {
       submission_uid: `p2a-print-ind-${index}`, participation_id: pid, base_version: 0,
       result_status: 'normal', result_value: 20 - index, error_count: 0, violation_count: 0,
       event_identity: identity });
@@ -150,7 +151,8 @@ try {
   await orderSelect.waitFor();
   assert.equal(await orderSelect.inputValue(), 'asc');
   await orderSelect.selectOption('desc');
-  const indivPopup = await openFrom(() => page.getByRole('button', { name: '打印个人赛成绩单', exact: true }).click());
+  /* 1.5.0 成绩页（独立页）打印按钮按项目类型命名：“打印成绩单 / 打印名次表”（web/js/views/results.js:80-96）。 */
+  const indivPopup = await openFrom(() => page.getByRole('button', { name: '打印成绩单', exact: true }).click());
   await waitPrint(indivPopup, '个人赛成绩单');
   const indivUrl = new URL(indivPopup.url());
   assert.notEqual(indivPopup.url(), 'about:blank', '打印页地址不能是 about:blank');
@@ -180,7 +182,7 @@ try {
   /* ---------------------------------------------------------------- 2. 三人赛名次表：desc 待确认分组 */
   await page.goto(`${base}/#/results?category=${teamCat.id}`);
   await page.waitForFunction(() => !document.querySelector('.content .spinner'));
-  const teamPopup = await openFrom(() => page.getByRole('button', { name: '打印三人赛名次表', exact: true }).click());
+  const teamPopup = await openFrom(() => page.getByRole('button', { name: '打印名次表', exact: true }).click());
   await waitPrint(teamPopup, '三人赛项目名次表');
   const teamUrl = new URL(teamPopup.url());
   assert.equal(teamUrl.searchParams.get('type'), 'category-notice');
@@ -203,12 +205,13 @@ try {
   await page.goto(`${base}/#/school?group=${groupA.id}`);
   await page.waitForFunction(() => !document.querySelector('.content .spinner'));
   await page.waitForFunction(() => document.querySelectorAll('.content .table-scroll tbody tr').length > 0);
-  /* 正常组（有已确认名次）页面同口径：名次列按现有规则显示数字。 */
+  /* D01：该组还有 2 项名次未确认，名次列必须用“—（待确认）”占位，不能显示暂排数字。 */
   const normalRanks = await page.evaluate(() => [...document.querySelectorAll('.content .table-scroll tbody tr')]
     .map((tr) => tr.children[0].textContent.trim()));
-  assert.ok(normalRanks.length > 0 && normalRanks.every((value) => /^\d+$/.test(value)),
-    `已开赛组页面应显示数字名次：${JSON.stringify(normalRanks)}`);
-  const schoolPopup = await openFrom(() => page.getByRole('button', { name: '打印本组学校总分表', exact: true }).click());
+  assert.ok(normalRanks.length > 0 && normalRanks.every((value) => value === '—（待确认）'),
+    `已开赛但有未确认名次时页面应显示占位：${JSON.stringify(normalRanks)}`);
+  assert.ok((await page.locator('.content').innerText()).includes('名次列以“—（待确认）”表示暂排'));
+  const schoolPopup = await openFrom(() => page.getByRole('button', { name: '打印总分表', exact: true }).click());
   await waitPrint(schoolPopup, '学校团体总分表');
   const schoolUrl = new URL(schoolPopup.url());
   assert.equal(schoolUrl.searchParams.get('type'), 'school-notice');
@@ -217,6 +220,7 @@ try {
   const schoolText = await schoolPopup.locator('body').innerText();
   assert.ok(schoolText.includes('团体总分'), schoolText);
   assert.ok(schoolText.includes('打印1校'), schoolText);
+  assert.ok(schoolText.includes('—（待确认）'), schoolText);
   await schoolPopup.close();
 
   await page.goto(`${base}/#/school?group=${groupB.id}`);
@@ -228,7 +232,7 @@ try {
   const notStarted = await page.locator('.content').innerText();
   assert.ok(notStarted.includes('未开赛/无成绩'), notStarted);
   assert.ok(!notStarted.includes('项名次未确认'), '未开赛组不得显示待确认警告');
-  const notStartedPopup = await openFrom(() => page.getByRole('button', { name: '打印本组学校总分表', exact: true }).click());
+  const notStartedPopup = await openFrom(() => page.getByRole('button', { name: '打印总分表', exact: true }).click());
   await waitPrint(notStartedPopup, '学校团体总分表');
   const notStartedText = await notStartedPopup.locator('body').innerText();
   assert.ok(notStartedText.includes('本组别尚未开赛/无成绩，名次不计入'), notStartedText);
@@ -243,7 +247,7 @@ try {
   const registerLink = page.getByRole('link', { name: '去学校报名', exact: true });
   assert.equal(await registerLink.count(), 1);
   assert.ok((await registerLink.getAttribute('href')).includes('tab=registration'));
-  assert.equal(await page.getByRole('button', { name: '打印本组学校总分表', exact: true }).count(), 1);
+  assert.equal(await page.getByRole('button', { name: '打印总分表', exact: true }).count(), 1);
   assert.equal(await page.getByRole('button', { name: /XLSX$/ }).count(), 1);
   pass('学校总分：打印 URL 稳定；未开赛组显示“未开赛/无成绩”且公告同口径；空组显示空态行与报名入口并保留导出/打印');
 

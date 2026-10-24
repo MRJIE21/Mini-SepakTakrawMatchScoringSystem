@@ -263,6 +263,8 @@ def _guard_retract(conn, stage):
     rows = db.q(conn, 'SELECT * FROM matches WHERE stage_id=?', (stage['id'],))
     own_ids = {m['id'] for m in rows}
     for match in rows:
+        if db.q1(conn,"SELECT id FROM result_candidates WHERE subject_kind='match' AND subject_id=? LIMIT 1",(match['id'],)):
+            raise conflict('该阶段已有候选原件，请通过复核或正式处置流程处理',code='stage_started')
         if match['result_version'] or match['status'] == 'finished' or \
                 db.q1(conn, 'SELECT id FROM score_events WHERE match_id=? LIMIT 1', (match['id'],)) or \
                 db.q1(conn, 'SELECT id FROM submissions WHERE match_id=? LIMIT 1', (match['id'],)) or \

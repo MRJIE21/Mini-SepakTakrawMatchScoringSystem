@@ -1,6 +1,7 @@
 import { workspaceTabs } from '../permissions.js';
 /* 以比赛项目为中心的工作台：统一上下文、二级导航、概况待办与报名闭环。 */
 import { api, captureRequestContext } from '../api.js';
+import { localStore } from '../store.js';
 import { registerView, state, loadStructure, reloadShell, go, replaceViewParams } from '../main.js';
 import { matchingCategory, workspaceLink, workspaceTab, groupWorkspaceLink, workspaceSchoolLink, resolveSchoolContext } from '../workspaceContext.js';
 import {
@@ -8,8 +9,8 @@ import {
 } from '../ui.js';
 
 const TAB_LABELS = {
-  overview: '概况', registration: '报名', groups: '分组', schedule: '赛程',
-  matches: '比赛', entry: '比赛', results: '成绩',
+  overview: '概况', registration: '报名', schedule: '赛程',
+  matches: '比赛', entry: '成绩录入', results: '成绩',
 };
 
 function contextKey(eventId, categoryId, tab) {
@@ -32,8 +33,12 @@ function lastCategoryKey(eventId) {
 
 function openTab(category, tab, replace = false, options = {}) {
   const allowed = workspaceTabs(state.user.role, category.kind);
-  const next = allowed.includes(tab) ? tab : allowed[0];
-  const hash = workspaceLink(category, next, options);
+  /* 兼容后端 primary_action 与旧入口：groups/tasks 收敛到赛程/概况，review 回到全局复核。 */
+  if (tab === 'review') { go('resultReview', { category: category.id }); return; }
+  const normalized = tab === 'groups' ? 'schedule' : tab === 'tasks' ? 'overview' : tab;
+  const nextOptions = tab === 'groups' ? { ...options, view: 'groups' } : options;
+  const next = allowed.includes(normalized) ? normalized : allowed[0];
+  const hash = workspaceLink(category, next, nextOptions);
   if (replace) history.replaceState(null, '', hash); else location.hash = hash;
 }
 
@@ -57,7 +62,7 @@ async function render({ el, params, refresh, signal, requestContext = captureReq
   let remembered = null;
   try { remembered = localStorage.getItem(lastCategoryKey(event.id)); } catch {}
   const canRegister = workspaceTabs(state.user.role, 'team').includes('registration');
-  const requestedTab = workspaceTab(params) || (canRegister ? 'registration' : null);
+  const requestedTab = workspaceTab(params) || (canRegister ? 'overview' : null);
   const registration = requestedTab === 'registration' && canRegister;
   let schoolData = null;
   if (registration && params.school) {
@@ -75,14 +80,25 @@ async function render({ el, params, refresh, signal, requestContext = captureReq
   }
   if (!resolved.category) {
     if (registration) return renderGroupRegistration(el, event, resolved.group, structure.groups, params, context, schoolData);
-    renderInvalid(el, '当前组别还没有比赛项目，请先配置项目。', event); return;
+    el.append(emptyState({ text: '当前组别还没有比赛项目',
+      hint: `${resolved.group.name}：${canRegister ? '可先维护学校和人员报名，配置比赛项目后进入计分任务。' : '请由管理员配置比赛项目。'}`,
+      action: h('div.row',
+        canRegister ? h('a.btn.btn-primary', { href: groupWorkspaceLink({ ...resolved.group, event_id: event.id }, 'registration') }, '维护学校报名') : null,
+        state.user.role === 'admin' ? h('a.btn', { href: '#/setup?step=structure' }, '配置比赛项目') : null),
+    })); return;
   }
   const category = choices.find(item => item.id === resolved.category.id);
+  /* 旧工作台“成绩复核”页签已收敛到侧栏成绩复核；旧链接跳转到全局复核并按项目预选。 */
+  if (requestedTab === 'review') {
+    go('resultReview', { category: category.id });
+    return;
+  }
   try { localStorage.setItem(lastCategoryKey(event.id), String(category.id)); } catch {}
   const allowedTabs = workspaceTabs(state.user.role, category.kind);
   const tab = allowedTabs.includes(requestedTab) ? requestedTab : allowedTabs[0];
+  const groupView = tab === 'schedule' && (params.tab === 'groups' || params.view === 'groups') ? 'groups' : null;
   replaceViewParams({ event: event.id, group: category.group_id, category: category.id, tab,
-    view: null, school: tab === 'registration' ? params.school : null });
+    view: groupView, school: tab === 'registration' ? params.school : null });
   const groups = canRegister && tab === 'registration' ? structure.groups : structure.groups.filter(item => item.categories.length);
   const groupSelect = selectInput(groups.map(item => [item.id, item.name]), category.group_id);
   const categorySelect = selectInput(groups.find(item => item.id === category.group_id).categories.map(item => [item.id, categoryLabel(item)]), category.id);
@@ -96,12 +112,32 @@ async function render({ el, params, refresh, signal, requestContext = captureReq
     else location.hash = groupWorkspaceLink({ event_id: event.id, id: group.id }, 'registration');
   };
   categorySelect.onchange = () => { const next = choices.find(item => item.id === Number(categorySelect.value)); restore(); if (next) openTab(next, tab); };
-  el.append(h('div.ctx-bar', h('div.ctx-path', h('div.small.muted', event.name), h('h2', `${category.group_name} · ${categoryLabel(category)}`)),
+  el.append(h('div.ctx-bar',
+    h('div.ctx-path',
+      h('nav.ctx-crumbs', { 'aria-label': '当前位置' },
+        h('span', event.name),
+        h('span.ctx-crumb-sep', { 'aria-hidden': 'true' }, '›'),
+        h('span.current', '项目工作台')),
+      h('div.ctx-title',
+        h('h2', `${category.group_name} · ${categoryLabel(category)}`),
+        h('div.ctx-status',
+          statusBadge(category.kind === 'team' ? '三人赛' : '个人赛', 'info'),
+          (state.user.role === 'viewer' || state.user.role === 'display_operator')
+            ? statusBadge('只读', '') : null,
+          category.registration_locked_reason
+            ? statusBadge('报名与种子已冻结', 'warn') : null))),
     h('div.workspace-switchers', h('label.context-field', h('span', '大组别'), groupSelect), h('span.context-arrow', '›'), h('label.context-field', h('span', '比赛项目'), categorySelect))));
-  el.append(h('nav.ctx-tabs', { 'aria-label': '项目工作台导航', 'data-count': allowedTabs.length }, ...allowedTabs.map(key => h('a', {
+  const tabs = h('nav.ctx-tabs', { 'aria-label': '项目工作台导航', 'data-count': allowedTabs.length }, ...allowedTabs.map(key => h('a', {
     href: workspaceLink(category, key, key === 'registration' && params.school ? { school: params.school } : {}),
     class: key === tab ? 'active' : '', 'aria-current': key === tab ? 'page' : null,
-  }, TAB_LABELS[key]))));
+  }, TAB_LABELS[key])));
+  el.append(tabs);
+  /* 页签多于可视宽度时把当前页签滚到中间，手机与窄窗口下不用先找自己在哪一页。 */
+  requestAnimationFrame(() => {
+    const active = tabs.querySelector('a.active');
+    if (!tabs.isConnected || !active || tabs.scrollWidth <= tabs.clientWidth + 4) return;
+    tabs.scrollLeft = Math.max(0, active.offsetLeft - (tabs.clientWidth - active.offsetWidth) / 2);
+  });
   const content = h('div.workspace-content'); el.append(content);
   const saved = readPageState(event.id, category.id, tab);
   await renderTab(content, category, tab, saved, { ...context, schoolData }, params);
@@ -121,7 +157,7 @@ function renderInvalid(el, message, event = null) {
 async function renderTab(el, category, tab, saved, context = {}, params = {}) {
   if (tab === 'overview') return renderOverview(el, category);
   if (tab === 'registration') return renderRegistration(el, category, saved, params, context);
-  if (tab === 'groups' || tab === 'schedule') return renderSchedule(el, category, saved, context, params, tab);
+  if (tab === 'schedule') return renderSchedule(el, category, saved, context, params, tab);
   const mapping = { matches: 'scoring', entry: 'individual', results: 'results' };
   const view = state.views[mapping[tab]];
   if (!view) throw new Error('对应业务页面尚未载入');
@@ -137,18 +173,82 @@ async function renderSchedule(el, category, saved, context, params, tab) {
   const view = state.views.schedule;
   return view.render({ el, params: {
     category: category.id, embedded: 'workspace', from: 'workspace', draw: params.draw, stage: params.stage,
-    view: tab === 'groups' ? 'groups' : 'fixtures',
+    view: (params.view === 'groups' || params.tab === 'groups') ? 'groups' : 'fixtures',
     sort: params.sort, venue: params.venue,
     status: params.status ?? saved.status ?? '',
   }, state, refresh: context.refresh, signal: context.signal, requestContext: context.requestContext, isCurrent: context.isCurrent });
 }
 
+async function renderTasks(el,category,context={}) {
+  let generation=0,snapshot=null,filter='all';
+  const notice=h('div',{'aria-live':'polite'}),body=h('div');
+  el.append(h('section.panel',h('div.panel-head',h('h2','计分任务'),h('button.btn',{onclick:load},'刷新任务')),
+    h('p.small.muted','按当前项目定位记录、独立复核和名次核对。服务器候选与本机草稿分别计数。')),notice,body);
+  async function load() {
+    const seq=++generation;clear(notice);notice.append(loadingState(snapshot?'更新中，保留上次快照…':'正在读取项目任务…'));
+    try {
+      const [data,queue,local]=await Promise.all([api.get(`/api/categories/${category.id}/workspace`,{context:context.requestContext,signal:context.signal}),
+        api.get(`/api/result-candidates?category_id=${category.id}`,{context:context.requestContext,signal:context.signal}),localStore.all()]);
+      if(seq!==generation||context.signal?.aborted||context.isCurrent&&!context.isCurrent()||!el.isConnected)return;
+      const identity=context.requestContext?.identity;
+      const drafts=local.filter(d=>['match','individual'].includes(d.kind)&&!d.receipt&&!d.terminal&&!d.review_archive
+        && d.category_id===category.id&&d.event_identity?.event_uuid===identity?.event_uuid&&d.event_identity?.deployment_id===identity?.deployment_id);
+      snapshot={data,queue,drafts,at:new Date().toISOString()};draw();
+    }catch(e){if(e.cancelled||seq!==generation||!el.isConnected)return;
+      clear(notice);notice.append(errorState(e,load));if(snapshot)notice.append(h('p.small',`保留 ${fmtDateTime(snapshot.at)} 的过期快照。`));}
+  }
+  function draw() {
+    clear(notice);clear(body);const {data,queue,drafts,at}=snapshot,c=data.counts;
+    notice.append(h('p.small.muted',`读取于 ${fmtDateTime(at)} · ${category.kind==='team'?'场次为单位':'有效报名人次为单位'}`));
+    const enter=category.kind==='team'?'matches':'entry';
+    const metric=(n,label,tab)=>h('button.workspace-metric',{onclick:()=>openTab(category,tab)},h('b',String(n)),h('span',label));
+    body.append(h('section.panel',h('div.workspace-metrics',metric(category.kind==='team'?c.matches_scoreable:c.individual_results_missing,category.kind==='team'?'可进入记录（场）':'尚无正式结果（人次）',enter),
+      metric(c.candidates_pending,'待独立复核（份）','review'),metric(category.kind==='team'?c.matches_finished:c.individual_results_confirmed,'正式结果'+(category.kind==='team'?'（场）':'（人次）'),'results'),
+      metric(c.placements_pending,'名次待确认（项）','results'))));
+    if(!c.enrolled)body.append(h('section.panel',h('div.warn-box','尚无有效报名，不表示成绩已完成。'),h('button.btn',{onclick:()=>openTab(category,'registration')},'整理报名名单')));
+    if(c.disputes_open)body.append(h('section.panel',h('h3','需要先处理'),h('div.warn-box',`${c.disputes_open} 项成绩争议未解决。最后正式结果保留，新推进受保护。`),
+      h('button.btn',{onclick:()=>go('admin',{category:category.id})},'核对正式结果与更正')));
+    for(const item of data.blockers)body.append(h('section.panel',h('div.warn-box',item.message),h('button.btn',{onclick:()=>openTab(category,item.tab)},'定位处理')));
+    const upcoming=data.upcoming_matches||[];
+    const matches=upcoming.filter(m=>filter==='all'?true:filter==='unclaimed'?!m.recorder_id:m.recorder_id===state.user.id);
+    const counts={all:upcoming.length,unclaimed:upcoming.filter(m=>!m.recorder_id).length,mine:upcoming.filter(m=>m.recorder_id===state.user.id).length};
+    body.append(h('section.panel',
+      h('div.panel-head',h('h3','记录与复核'),h('div.row',
+        h('button.btn.btn-primary',{onclick:()=>openTab(category,enter)},category.kind==='team'?'查找并记录场次':'录入个人赛结果'),
+        h('button.btn',{onclick:()=>openTab(category,'review')},`核对候选（${queue.total}份）`))),
+      h('div.ctx-filters',{role:'group','aria-label':'按领取状态筛选待记录场次'},
+        ...[['all','全部'],['unclaimed','未领取'],['mine','我已领取']].map(([key,text])=>h('button.filter-chip',{
+          class:filter===key?'active':'','aria-pressed':filter===key?'true':'false',
+          onclick:()=>{filter=key;draw();}},`${text}（${counts[key]}）`))),
+      matches.length?h('div.workspace-match-list',...matches.map(m=>h('div.workspace-match',
+        h('div.workspace-match-main',
+          h('div.small.muted',`${m.stage_name||''} · ${m.round_label} · 第 ${m.seq||m.id} 场`),
+          h('div.workspace-match-teams',h('strong',m.home.label),h('span.small.muted','vs'),h('strong',m.away.label)),
+          h('div.small.muted',`${m.venue_name||'场地待安排'} · ${m.scheduled_at?fmtDateTime(m.scheduled_at):'时间待安排'} · ${m.recorder_name?`记录员：${m.recorder_name}`:'未领取'}`)),
+        h('div.workspace-match-action',
+          statusBadge(m.recorder_id?'已领取':'未领取',m.recorder_id?'info':''),
+          h('button.btn.btn-primary',{onclick:()=>go('scoring',{match:m.id,category:category.id})},m.recorder_id===state.user.id?'继续记录':m.recorder_id?'查看任务':'进入记录')))))
+        :h('div.empty-inline','当前筛选下没有待记录场次；比赛双方确定后会出现在这里。')));
+    body.append(h('section.panel',h('h3',`本设备未提交原件（${drafts.length}份）`),h('p.small','仅本账号、本赛事、本设备记录；不与服务器待审份数相加。'),
+      h('button.btn',{onclick:()=>go('review')},'待核实提交与导出原件')));
+    const exceptions=[...data.tasks,...data.reminders];
+    if(exceptions.length)body.append(h('section.panel',h('h3',`其他待办与提醒（${exceptions.length}条）`),...exceptions.map(item=>h('div.workspace-task',
+      h('div',h('b',item.message),item.detail?h('p.small.muted',item.detail):null),h('button.btn',{onclick:()=>openTab(category,item.action?.tab||item.tab||'results')},item.action?.label||'查看')))));
+  }
+  await load();
+}
+
+const overviewGenerations=new WeakMap();
+
 async function renderOverview(el, category) {
-  clear(el);
-  el.append(h('div.panel', loadingState('正在计算项目状态…')));
+  const generation=(overviewGenerations.get(el)||0)+1;overviewGenerations.set(el,generation);
+  const hadContent=el.hasChildNodes();
+  if(!hadContent)el.append(h('div.panel', loadingState('正在计算项目状态…')));
   try {
     const data = await api.get(`/api/categories/${category.id}/workspace`);
+    if(overviewGenerations.get(el)!==generation||!el.isConnected)return;
     clear(el);
+    el.append(h('p.small.muted',`读取于 ${fmtDateTime(new Date().toISOString())}`));
     const c = data.counts;
     const runAction = ({ tab, label, ...options }) => openTab(category, tab, false, options);
     const metric = (value, label, action) => h('button.workspace-metric', {
@@ -177,7 +277,7 @@ async function renderOverview(el, category) {
 
     const work = category.kind === 'team' ? renderUpcoming(category, data) : h('section.panel',
       h('div.panel-head', h('h3', '个人赛成绩'), statusBadge(`${c.individual_results} / ${c.enrolled} 位已录入`, 'info')),
-      h('p', c.individual_results_missing ? `还有 ${c.individual_results_missing} 位运动员没有后台保存的成绩。`
+      h('p', !c.enrolled ? '尚无有效报名，不表示成绩已完成。' : c.individual_results_missing ? `还有 ${c.individual_results_missing} 位运动员没有正式确认的成绩。`
         : c.individual_results_unconfirmed ? `${c.individual_results_unconfirmed} 位运动员的成绩已保存到后台，待核对确认。`
           : '已报名运动员的成绩已全部录入，可核对名次与学校积分。'),
       h('div.row', h('button.btn.btn-primary', { onclick: () => openTab(category, 'entry') }, '进入成绩录入'),
@@ -196,7 +296,9 @@ async function renderOverview(el, category) {
     }
     el.append(h('div.workspace-overview-grid', h('div.workspace-main', work), todos));
   } catch (error) {
-    clear(el); el.append(h('div.panel', errorState(error, () => renderOverview(el, category))));
+    if(overviewGenerations.get(el)!==generation||error.cancelled||!el.isConnected)return;
+    if(!hadContent)clear(el);
+    el.append(h('div.panel',h('p.small',hadContent?'读取失败，保留上次过期快照。':''),errorState(error, () => renderOverview(el, category))));
   }
 }
 
@@ -256,9 +358,15 @@ async function renderGroupRegistration(el, event, group, groups, params, context
   select.setAttribute('aria-label', '大组别');
   select.onchange = () => { const next = Number(select.value); select.value = String(group.id);
     location.hash = groupWorkspaceLink({ event_id: event.id, id: next }, 'registration'); };
-  el.append(h('div.ctx-bar', h('div.ctx-path', h('div.small.muted', event.name), h('h2', `${group.name} · 报名名单`)),
+  el.append(h('div.ctx-bar',
+    h('div.ctx-path',
+      h('nav.ctx-crumbs', { 'aria-label': '当前位置' },
+        h('span', event.name), h('span.ctx-crumb-sep', { 'aria-hidden': 'true' }, '›'), h('span.current', '项目工作台')),
+      h('div.ctx-title',
+        h('h2', `${group.name} · 报名名单`),
+        h('div.ctx-status', statusBadge('尚未开设项目', 'warn')))),
     h('div.workspace-switchers', h('label.context-field', h('span', '大组别'), select), h('span.small.muted', '尚未开设项目，可先维护学校与人员'))));
-  el.append(h('nav.ctx-tabs', { 'aria-label': '项目工作台导航' }, h('a.active', { href: groupWorkspaceLink({ event_id: event.id, id: group.id }, 'registration') }, '报名名单')));
+  el.append(h('nav.ctx-tabs', { 'aria-label': '项目工作台导航' }, h('a.active', { href: groupWorkspaceLink({ event_id: event.id, id: group.id }, 'registration'), 'aria-current': 'page' }, '报名名单')));
   const content = h('div.workspace-content'); el.append(content);
   await renderRegistration(content, null, {}, { ...params, event: event.id, group: group.id }, { ...context, schoolData });
 }

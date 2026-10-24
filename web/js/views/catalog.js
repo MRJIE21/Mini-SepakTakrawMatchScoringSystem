@@ -8,7 +8,6 @@
    - 危险操作收进“更多”菜单，列表以浏览为主（§6.1、Q13）；
    - 所有保存都走统一编辑器：失败保留输入并定位错误，成功后只局部刷新（Q05、Q08）。 */
 import { api } from '../api.js';
-import { openEnrollmentImport } from '../enrollmentImport.js';
 import { athletePicker } from '../athletePicker.js';
 import { registerView, state, loadStructure, go } from '../main.js';
 import {
@@ -413,7 +412,7 @@ function openAthleteEditor({ school, group, athlete, onSaved }) {
 /* checkbox 需要暴露内部 input 给“沿用性别”逻辑读取 */
 function checkboxLike(label) {
   const input = h('input', { type: 'checkbox' });
-  const wrap = h('label.row.tight', { style: 'align-items:center' }, input, h('span', label));
+  const wrap = h('label.row.tight', null, input, h('span', label));
   wrap.input = input;
   return wrap;
 }
@@ -467,7 +466,7 @@ async function openTeamEditor({ group, school, category, team, onSaved }) {
       const box = h('input', { type: 'checkbox', checked: entry.checked, 'aria-label': `选择 ${a.name}` });
       /* 本队报名号码：预填常用号码，修改不回写运动员档案（§6.2） */
       const jersey = textInput(entry.jersey, {
-        style: 'width:78px', placeholder: '号码', 'aria-label': `${a.name} 本队号码`,
+        class: 'jersey-input', placeholder: '号码', 'aria-label': `${a.name} 本队号码`,
         oninput: (e) => { entry.jersey = e.target.value; },
       });
       box.onchange = () => {
@@ -504,7 +503,7 @@ async function openTeamEditor({ group, school, category, team, onSaved }) {
         checked: captainId === a.id, 'aria-label': `队长 ${a.name}`,
       });
       radio.onchange = () => { captainId = Number(radio.value); drawCaptain(); };
-      captainBox.append(h('label.row.tight', { style: 'align-items:center' }, radio, h('span', a.name)));
+      captainBox.append(h('label.row.tight', null, radio, h('span', a.name)));
     }
     if (captainId === null) {
       captainBox.append(h('div.warn-box.mt', '尚未指定队长。可以先保存，开赛前补齐。'));
@@ -708,9 +707,6 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
       canWrite() ? h('button.btn.btn-primary', { disabled: !!cat.registration_locked_reason,
         onclick: () => openEnrollEditor(cat, reload) },
         cat.kind === 'team' ? '添加参赛学校' : '添加参赛运动员') : null,
-      canWrite() ? h('button.btn', { disabled: !!cat.registration_locked_reason,
-        onclick: () => openEnrollmentImport(cat, reload) },
-        '批量导入报名') : null,
     ),
     list,
     h('div.small.muted.mt', cat.registration_locked_reason
@@ -1049,7 +1045,7 @@ function createTeamEnrollmentForm({ cat, school }) {
         type: 'checkbox', checked: chosen.has(row.key), 'aria-label': `选择 ${row.name}`,
       });
       const jersey = textInput(jerseyOf(row), {
-        style: 'width:78px', placeholder: '号码', 'aria-label': `${row.name} 本队号码`,
+        class: 'jersey-input', placeholder: '号码', 'aria-label': `${row.name} 本队号码`,
       });
       box.onchange = () => {
         if (box.checked) {
@@ -1083,7 +1079,7 @@ function createTeamEnrollmentForm({ cat, school }) {
   function buildNewAthleteRow() {
     const name = textInput('', { placeholder: '姓名' });
     const gender = selectInput([[cat.gender, GENDER[cat.gender]]], cat.gender);
-    const jersey = textInput('', { placeholder: '号码', style: 'width:82px' });
+    const jersey = textInput('', { placeholder: '号码', class: 'jersey-input' });
     const note = textInput('', { placeholder: '班级、学号等区分信息' });
     const confirmed = h('input', { type: 'checkbox' });
     const review = h('div.same-name-review.hidden');
@@ -1094,7 +1090,7 @@ function createTeamEnrollmentForm({ cat, school }) {
       for (const p of same) review.append(h('div.same-name-person', `${p.name} · ${GENDER[p.gender] || '性别未填'} · ${p.note || '备注未填'}`));
       if (same.length) review.append(h('label.row.tight', confirmed, '已核对全校同名人员，确认新增的是另一人'));
     };
-    const add = h('button.btn.small', { style: 'align-self:flex-end' }, '加入名单');
+    const add = h('button.btn.small.self-end', null, '加入名单');
     add.onclick = () => {
       const value = name.value.trim();
       if (!value) { toast('请填写姓名', 'error'); name.focus(); return; }
@@ -1127,7 +1123,7 @@ function createTeamEnrollmentForm({ cat, school }) {
         'aria-label': `队长 ${row.name}`,
       });
       radio.onchange = () => { captainKey = row.key; drawCaptain(); };
-      captainBox.append(h('label.row.tight', { style: 'align-items:center' }, radio,
+      captainBox.append(h('label.row.tight', null, radio,
         h('span', row.name)));
     }
     if (captainKey === null) {

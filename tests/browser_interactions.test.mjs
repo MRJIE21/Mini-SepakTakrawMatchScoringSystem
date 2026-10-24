@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 /* 运行需已有 Playwright、Python 与 Edge；所有赛事均写入独立临时库。
    可用 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定本机工具。 */
 import assert from 'node:assert/strict';
@@ -89,7 +90,13 @@ try {
   page.setDefaultTimeout(10000);
   const pageErrors = [];
   page.on('pageerror', e => pageErrors.push(e.message));
-  const drafts = () => page.evaluate(async () => (await (await import('/js/store.js')).localStore.all()).filter(d => !d.storage_conflict));
+  const drafts = () => page.evaluate(async () => (await (await import('/js/store.js')).localStore.all()).filter(d => !d.storage_conflict && !d.terminal));
+  const approvePending = async (kind,sid) => {
+    const queue=await api('GET','/api/result-candidates?status=all');
+    const candidate=queue.candidates.find(c=>c.subject_kind===kind&&c.subject_id===sid&&c.status==='submitted');
+    assert.ok(candidate,`Expected a real received candidate for ${kind}:${sid}`);
+    return approveCandidate({base,token,identity},candidate.id);
+  };
   const waitSaved = () => page.waitForFunction(() => !document.querySelector('.status-line')?.textContent.includes('正在保存本机记录'));
 
   await page.goto(`${base}/#/individual?category=${individual.id}`);
@@ -160,17 +167,19 @@ try {
 
   await page.locator('select').last().selectOption('home_forfeit');
   await waitSaved();
-  await page.route('**/api/scoring/submit', route => route.abort('failed'));
-  await page.getByRole('button', { name: '核对无误，提交成绩', exact: true }).click();
-  await page.getByRole('button', { name: '重试提交', exact: true }).waitFor();
+  await page.route('**/api/result-candidates', route => route.abort('failed'));
+  await page.getByRole('button', { name: '核对无误，提交待复核', exact: true }).click();
+  await page.getByRole('button', { name: '重试原包提交', exact: true }).waitFor();
   await waitSaved();
   await page.reload();
-  await page.getByRole('button', { name: '重试提交', exact: true }).waitFor();
+  await page.getByRole('button', { name: '重试原包提交', exact: true }).waitFor();
   await waitSaved();
-  assert.equal(await page.getByRole('button', { name: '重试提交', exact: true }).isEnabled(), true);
-  await page.unroute('**/api/scoring/submit');
-  await page.getByRole('button', { name: '重试提交', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: '重试原包提交', exact: true }).isEnabled(), true);
+  await page.unroute('**/api/result-candidates');
+  await page.getByRole('button', { name: '重试原包提交', exact: true }).click();
   await page.waitForURL('**/#/scoring?category=*');
+  assert.equal((await api('GET', `/api/matches/${matches[0]}`)).match.result_version,0);
+  await approvePending('match',matches[0]);
   assert.equal((await api('GET', `/api/scoring/match/${matches[0]}`)).match.status, 'finished');
   pass('服务器未收到的提交，刷新后可以原样重试');
 
@@ -178,16 +187,19 @@ try {
   await page.getByRole('button', { name: '开始第 1 局记录', exact: true }).waitFor();
   await page.locator('select').last().selectOption('away_forfeit');
   await waitSaved();
-  await page.route('**/api/scoring/submit', async route => { await route.fetch(); await route.abort('failed'); });
-  await page.getByRole('button', { name: '核对无误，提交成绩', exact: true }).click();
-  await page.getByRole('button', { name: '重试提交', exact: true }).waitFor();
+  await page.route('**/api/result-candidates', async route => { await route.fetch(); await route.abort('failed'); });
+  await page.getByRole('button', { name: '核对无误，提交待复核', exact: true }).click();
+  await page.getByRole('button', { name: '重试原包提交', exact: true }).waitFor();
   await waitSaved();
-  await page.unroute('**/api/scoring/submit');
+  await page.unroute('**/api/result-candidates');
+  assert.equal((await api('GET', `/api/matches/${matches[1]}`)).match.result_version,0);
+  await approvePending('match',matches[1]);
   await page.reload();
   await page.getByRole('heading', { name: /已确认结果/ }).waitFor();
   assert.equal((await drafts()).filter(d => d.match_id === matches[1]).length, 0);
   assert.equal((await api('GET', `/api/matches/${matches[1]}/submissions`)).submissions.length, 1);
-  pass('提交成功但响应丢失，刷新自动核实并显示正式结果');
+  assert.ok(await page.evaluate(async mid=>(await(await import('/js/store.js')).localStore.all()).some(d=>d.match_id===mid&&d.terminal&&d.receipt?.receipt_kind==='candidate_received'),matches[1]));
+  pass('响应丢失保留原件，独立确认后刷新核实并显示正式结果');
   await page.evaluate(async ({ matchId, categoryId }) => {
     const { localStore } = await import('/js/store.js');
     const identity = (await import('/js/api.js')).getApiEventContext();
@@ -215,13 +227,13 @@ try {
     (await import('/js/submit.js')).buildMatchPayload(draft);
     await localStore.put(draft);
   }, matches[2]);
-  await page.route('**/api/receipts/*', route => route.abort('failed'));
+  await page.route('**/api/candidate-receipts/*', route => route.abort('failed'));
   await page.reload();
-  await page.getByRole('button', { name: '重试提交', exact: true }).waitFor();
+  await page.getByRole('button', { name: '重试原包提交', exact: true }).waitFor();
   await waitSaved();
-  assert.equal(await page.getByRole('button', { name: '重试提交', exact: true }).isEnabled(), true);
-  await page.unroute('**/api/receipts/*');
-  await page.getByRole('button', { name: '重试提交', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: '重试原包提交', exact: true }).isEnabled(), true);
+  await page.unroute('**/api/candidate-receipts/*');
+  await page.getByRole('button', { name: '重试原包提交', exact: true }).click();
   await page.waitForURL('**/#/scoring?category=*');
   pass('恢复提交中草稿且查询失败时仍能安全重试');
 
@@ -262,7 +274,7 @@ try {
   await page.getByRole('heading', { name: /成绩与名次（2 人）/ }).waitFor();
   pass('现场入口与项目报名名单不显示未同步的本机计数');
 
-  for (const pid of people) await api('POST', '/api/scoring/individual', {
+  for (const pid of people) await reviewedResult({base,token,identity},'POST','/api/scoring/individual', {
     submission_uid: `browser-${pid}`, participation_id: pid, event_identity: identity,
     base_version: 0, result_status: 'normal', result_value: 20, error_count: 1, violation_count: 0,
   });
@@ -284,11 +296,13 @@ try {
   await page.getByRole('row').filter({ hasText: '选手1' }).getByRole('button', { name: '修改正式成绩', exact: true }).click();
   dialog = page.getByRole('dialog').first();
   await dialog.locator('[data-field=result_value]').fill('30');
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await dialog.getByText('请填写正式更正原因', { exact: true }).first().waitFor();
   await dialog.locator('[data-field=reason]').fill('裁判复核');
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+  assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r=>r.participation_id===people[0]).result_value,20);
+  await approvePending('individual',people[0]);
   assert.ok((await api('GET', `/api/categories/${individual.id}/placements`)).placements.every(p => p.status === 'pending'));
   await api('POST', '/api/users', { username: 'browser_recorder', password: 'Recorder123', role: 'recorder', display_name: '记录员', event_ids: [identity.event_id] });
   const recorderToken = (await api('POST', '/api/login', { username: 'browser_recorder', password: 'Recorder123' })).token;
@@ -328,12 +342,16 @@ try {
       return localStore.begin(...args);
     };
   });
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await page.waitForFunction(() => !!window.releasePut);
   assert.equal(await dialog.locator('[data-field=result_value]').isDisabled(), true);
   await page.evaluate(() => window.releasePut());
   await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
-  pass('提交包写入较慢时冻结输入，避免自动保存与提交相互覆盖');
+  assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r=>r.participation_id===people[1]).result_value,20);
+  await approvePending('individual',people[1]);
+  await page.reload();
+  await page.getByRole('row').filter({hasText:'选手2'}).waitFor();
+  pass('提交包写入较慢时冻结输入，独立确认前不覆盖正式值');
   assert.ok(await page.evaluate(async () => (await (await import('/js/store.js')).localStore.all())
     .some(d => d.storage_conflict && d.uid === 'stale-individual-cache' && d.result_value === 777)), 'old ordinary input remains in a recovery branch');
   // Backend confirmation wins after an individual response is lost, without hiding its retry packet.
@@ -341,10 +359,12 @@ try {
   dialog = page.getByRole('dialog').first();
   await dialog.locator('[data-field=result_value]').fill('56');
   await dialog.locator('[data-field=reason]').fill('响应丢失验证');
-  await page.route('**/api/scoring/individual', async route => { await route.fetch(); await route.abort('failed'); });
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await page.route('**/api/result-candidates', async route => { await route.fetch(); await route.abort('failed'); });
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await dialog.locator('.form-errors:not(.hidden)').waitFor();
-  await page.unroute('**/api/scoring/individual');
+  await page.unroute('**/api/result-candidates');
+  assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r=>r.participation_id===people[1]).result_value,55);
+  await approvePending('individual',people[1]);
   await page.reload();
   let row2 = page.getByRole('row').filter({ hasText: '选手2' });
   assert.equal(await resultText(row2), '56');
@@ -361,19 +381,19 @@ try {
   dialog = page.getByRole('dialog').first();
   await dialog.locator('[data-field=result_value]').fill('57');
   await dialog.locator('[data-field=reason]').fill('请求未达验证');
-  await page.route('**/api/scoring/individual', route => route.abort('failed'));
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await page.route('**/api/result-candidates', route => route.abort('failed'));
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await dialog.locator('.form-errors:not(.hidden)').waitFor();
   const originalPacket = (await drafts()).find(d => d.kind === 'individual' && d.participation_id === people[1]).payload;
-  assert.equal(originalPacket.result_value, 57);
-  await page.unroute('**/api/scoring/individual');
+  assert.equal(originalPacket.payload.result_value, 57);
+  await page.unroute('**/api/result-candidates');
   await page.reload();
   row2 = page.getByRole('row').filter({ hasText: '选手2' });
   assert.equal(await resultText(row2), '56');
   await row2.getByRole('button', { name: '修改正式成绩', exact: true }).click();
   await page.getByRole('dialog', { name: '上次提交结果待核实', exact: true }).waitFor();
   assert.equal((await drafts()).find(d => d.kind === 'individual' && d.participation_id === people[1]).payload.submission_uid, originalPacket.submission_uid);
-  const retryConfirmed = page.waitForResponse(response => response.url().endsWith('/api/scoring/individual')
+  const retryConfirmed = page.waitForResponse(response => response.url().endsWith('/api/result-candidates')
     && response.request().method() === 'POST'
     && response.request().postDataJSON()?.submission_uid === originalPacket.submission_uid);
   await page.getByRole('dialog', { name: '上次提交结果待核实', exact: true }).getByRole('button', { name: '重试提交', exact: true }).click();
@@ -381,24 +401,29 @@ try {
   assert.equal(retryResponse.status(), 200);
   assert.equal((await retryResponse.json()).receipt.uid, originalPacket.submission_uid);
   await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
-  await page.waitForFunction(async pid => !(await (await import('/js/store.js')).localStore.all()).some(d => d.kind === 'individual' && d.participation_id === pid), people[1]);
+  await page.waitForFunction(async pid => !(await (await import('/js/store.js')).localStore.all()).some(d => !d.terminal&&!d.storage_conflict&&d.kind === 'individual' && d.participation_id === pid), people[1]);
+  assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r=>r.participation_id===people[1]).result_value,56);
+  await approvePending('individual',people[1]);
+  await page.reload();
   assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r => r.participation_id === people[1]).result_value, 57);
-  assert.equal((await api('GET', `/api/submissions/${originalPacket.submission_uid}`)).found, true);
+  assert.equal((await api('GET', `/api/candidate-receipts/${originalPacket.submission_uid}`)).found, true);
   pass('未到达后台的个人成绩不显示，私有原提交包可原样重试');
   // A definite validation rejection keeps editable input without an extra draft workflow.
   await page.getByRole('row').filter({ hasText: '选手2' }).getByRole('button', { name: '修改正式成绩', exact: true }).click();
   dialog = page.getByRole('dialog').first();
   await dialog.locator('[data-field=result_value]').fill('58.5');
   await dialog.locator('[data-field=reason]').fill('校验重试');
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await dialog.locator('.form-errors:not(.hidden)').waitFor();
   assert.equal(await dialog.locator('[data-field=result_value]').isDisabled(), false);
   assert.equal(await dialog.locator('[data-field=result_value]').inputValue(), '58.5');
   assert.equal((await drafts()).filter(d => d.kind === 'individual' && d.participation_id === people[1]).length, 0);
   assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r => r.participation_id === people[1]).result_value, 57);
   await dialog.locator('[data-field=result_value]').fill('58');
-  await dialog.getByRole('button', { name: '核对并提交', exact: true }).click();
+  await dialog.getByRole('button', { name: '核对并提交待复核', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+  assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r => r.participation_id === people[1]).result_value,57);
+  await approvePending('individual',people[1]);
   assert.equal((await api('GET', `/api/categories/${individual.id}/individual-results`)).results.find(r => r.participation_id === people[1]).result_value, 58);
   pass('后台校验拒绝后输入保持可编辑，修改后直接提交成功');
   await page.route('**/api/me', route => route.fulfill({ status: 503, contentType: 'application/json',

@@ -4,6 +4,7 @@
 正常有积分组；页面接口、CSV、XLSX 与打印公告必须共用 group_started 同一口径。
 另验证项目成绩单 desc 只反转已确认名次、待确认名次固定分组追加。
 """
+from helpers.reviewed_result import reviewed_result
 import csv
 import io
 import re
@@ -74,12 +75,12 @@ class P2AResultsTest(unittest.TestCase):
         return html_cells(self.raw_text(path))
 
     def submit_individual(self, participation_id, value):
-        return self.ok('POST', '/api/scoring/individual', {
+        return reviewed_result(self, 'POST', '/api/scoring/individual', {
             'submission_uid': str(uuid.uuid4()), 'participation_id': participation_id,
             'base_version': 0, 'result_status': 'normal', 'result_value': value,
             'error_count': 0, 'violation_count': 0, 'device': 'P2-A 口径测试',
             'event_identity': dict(self.event_identity),
-        })
+        }, expected=200)
 
     # ------------------------------------------------------------ REQ-008 未开赛
     def test_not_started_group_has_no_rank_and_exports_agree(self):
@@ -117,8 +118,8 @@ class P2AResultsTest(unittest.TestCase):
         self.assertNotIn('尚有', notice)
         self.assertEqual(notice.count('<tr><td>—</td>'), 3, notice)
 
-    # ------------------------------------------------------------ REQ-008 已开赛全 0
-    def test_started_group_with_zero_scores_still_ranked(self):
+    # ------------------------------------------------------------ D01 已开赛全 0 + 名次未确认
+    def test_started_group_with_pending_placements_uses_rank_placeholder(self):
         self.fx = self.build_event(team_count=3, individual_count=0)
         self.build_plan(self.fx)
         gid = self.fx['groups']['甲']['id']
@@ -126,18 +127,23 @@ class P2AResultsTest(unittest.TestCase):
         self.assertFalse(self.group_totals(gid)['started'])
         match = next(m for m in self.match_list(category_id=self.fx['team_cat'])
                      if m['status'] == 'ready')
-        # 领取记录任务即“已开赛”证据（没有任何成绩数据）。
+        # 领取记录任务即“已开赛”证据（没有任何成绩数据）；此时 3 项名次均未确认。
         self.ok('POST', f"/api/recording/match/{match['id']}/claim", {})
         data = self.group_totals(gid)
         self.assertTrue(data['started'])
+        # 内部暂排仍保留 1/2/3 供排序与排查，但对外展示必须标为待确认（D01）。
         self.assertEqual([row['rank'] for row in data['rows']], [1, 2, 3])
+        self.assertTrue(all(row['rank_provisional'] for row in data['rows']), data['rows'])
         self.assertTrue(all(row['status'] == 'ok' for row in data['rows']))
         self.assertTrue(all(row['total'] == 0 for row in data['rows']))
         rows = self.csv_rows(f'/api/exports/school-totals.csv?group_id={gid}')
-        self.assertEqual([row[0] for row in rows[1:]], ['1', '2', '3'])
+        self.assertEqual([row[0] for row in rows[1:]], ['—（待确认）'] * 3)
+        xrows = self.xlsx_rows(f'/api/exports/school-totals.xlsx?group_id={gid}')
+        self.assertEqual([str(row[0]) for row in xrows[1:]], ['—（待确认）'] * 3)
         notice = self.raw_text(f'/api/exports/school-notice.html?group_id={gid}')
         self.assertIn('尚有 3 项名次未确认', notice)
         self.assertNotIn('本组别尚未开赛/无成绩', notice)
+        self.assertEqual(notice.count('<td>—（待确认）</td>'), 3, notice)
 
     # ------------------------------------------------------------ REQ-008 正常组
     def test_normal_group_rank_and_exports_agree(self):

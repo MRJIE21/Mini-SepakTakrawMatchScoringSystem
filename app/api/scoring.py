@@ -1,7 +1,7 @@
 """现场记录提交：三人赛完整成绩包、个人赛最终结果、提交查询与正式更正。
 
 对应设计大纲 4.2、6、12.2、12.3。
-默认提交成功即确认；服务器接收成功前前端不得清除本地记录。
+提交只接收不可变候选，独立复核后才写正式结果；旧写入口仅回放已存回执。
 """
 from __future__ import annotations
 
@@ -19,6 +19,37 @@ from .common import (MATCH_STATUS_NAMES, category_context, get_or_404,
 
 REC = ("admin", "organizer", "recorder")
 ORG = ("admin", "organizer")
+
+
+def _legacy_result_receipt(ctx):
+    """No new writes, even for admins and even with the newest protocol header."""
+    body=ctx.body or {}
+    uid=body.get('submission_uid') or idempotency.extract_uid(body)
+    old=db.q1(ctx.conn,'SELECT * FROM submissions WHERE uid=?',(str(uid or ''),))
+    if old:
+        if old['user_id']!=ctx.user['id'] or old['payload_hash']!=validation.payload_hash(body):
+            raise conflict('旧请求标识与账号或原内容不一致',code='uid_conflict')
+        expected_kind='individual' if ctx.path.endswith('/individual') else 'match'
+        if old['kind']!=expected_kind:raise conflict('旧回执对象不一致',code='uid_conflict')
+        if expected_kind=='match' and old['match_id']!=body.get('match_id'):
+            raise conflict('旧回执场次不一致',code='uid_conflict')
+        if expected_kind=='individual':
+            item=db.q1(ctx.conn,'SELECT participation_id FROM individual_results WHERE id=?',(old['individual_result_id'],))
+            if not item or item['participation_id']!=body.get('participation_id'):
+                raise conflict('旧回执个人对象不一致',code='uid_conflict')
+        return {'duplicate':True,'receipt':submission_receipt(ctx.conn,old),'message':'原提交已接收；本次未重复写入'}
+    saved=db.q1(ctx.conn,'SELECT * FROM request_log WHERE uid=?',(str(uid or ''),))
+    if saved:
+        if saved['user_id']!=ctx.user['id'] or saved['payload_hash']!=idempotency.content_hash(body):
+            raise conflict('旧请求与原账号或内容不一致',code='uid_conflict')
+        result=_loads(saved['result_json'])
+        if result.get('receipt'):
+            # Strict original scope includes the old route and subject identity.
+            scope=json.loads(saved['scope'] or '{}')
+            if scope.get('path')!=ctx.path or scope.get('subject_id')!=int(ctx.params.get('match_id') or 0):
+                raise conflict('旧回执操作不一致',code='uid_conflict')
+            return {'replayed':True,'receipt':result['receipt'],'message':'原决定已生效；本次未重复写入'}
+    raise ApiError(426,'client_upgrade_required','此入口不再直接确认成绩。请保留原包，升级后提交独立复核；本次未写入')
 
 
 @route("POST", r"/api/recording/(?P<kind>match|individual)/(?P<subject_id>\d+)/claim", roles=REC)
@@ -64,6 +95,10 @@ def match_package(ctx):
 @route("POST", r"/api/scoring/submit", roles=REC)
 @atomic_result
 def submit_match(ctx):
+    return _legacy_result_receipt(ctx)
+
+
+def _commit_team_submission(ctx):
     """三人赛完整成绩包提交（幂等 + 版本冲突检测 + 过程结果一致性校验）。"""
     payload = ctx.body or {}
     uid = str(payload.get("submission_uid") or "").strip()
@@ -350,9 +385,7 @@ def _loads(text: str) -> dict:
 @route("POST", r"/api/scoring/individual", roles=REC)
 @atomic_result
 def submit_individual(ctx):
-    """个人赛最终成绩提交：只记录结果与确认名次，不记录过程。"""
-    with db.tx(ctx.conn):
-        return _submit_individual(ctx)
+    return _legacy_result_receipt(ctx)
 
 
 def _submit_individual(ctx):
@@ -417,7 +450,7 @@ def _submit_individual(ctx):
     correcting = bool(existing)
     reason = str(payload.get("reason") or "").strip()
     if correcting:
-        if ctx.user["role"] not in ORG:
+        if ctx.user["role"] not in ORG and not getattr(ctx, '_review_materialization', False):
             raise forbidden("已有确认成绩，正式更正需要编排与成绩人员或管理员操作")
         if not reason:
             raise bad_request("请填写正式更正原因", code="correction_reason_required",
@@ -490,7 +523,9 @@ def list_individual_results(ctx):
                     WHERE ir.category_id = ? ORDER BY ir.rank_no IS NULL, ir.rank_no, s.name""",
                 (category_id,))
     results = db.rows_to_dicts(rows)
+    disputed=bool(db.q1(ctx.conn,"SELECT 1 FROM result_disputes WHERE category_id=? AND status='open'",(category_id,)))
     for result in results:
+        result['result_disputed']=disputed
         result.update(access.owner_info(ctx.conn, 'individual', result['participation_id']))
         authors = db.q(ctx.conn, '''SELECT u.display_name FROM submissions s
             LEFT JOIN users u ON u.id=s.user_id WHERE s.individual_result_id=? ORDER BY s.id''', (result['id'],))
@@ -511,6 +546,13 @@ def confirm_individual_rankings(ctx):
 def _confirm_individual_rankings(ctx):
     category_id = int(ctx.params["category_id"])
     cat = category_context(ctx.conn, category_id)
+    from .. import result_impacts, result_candidates
+    result_impacts.guard_category(ctx.conn, category_id)
+    pending_candidates=db.q(ctx.conn, '''SELECT c.subject_id FROM result_candidates c JOIN candidate_heads h ON h.candidate_id=c.id
+            WHERE c.category_id=? AND c.subject_kind='individual' AND h.status='submitted' ''', (category_id,))
+    if pending_candidates:
+        raise conflict('仍有成绩待独立复核，不能确认项目名次', code='results_pending',
+                       detail={'participation_ids':[r['subject_id'] for r in pending_candidates]})
     if cat["kind"] != "individual":
         raise bad_request("该项目不是个人赛")
     rows = db.q(ctx.conn,
@@ -523,6 +565,8 @@ def _confirm_individual_rankings(ctx):
                     WHERE p.category_id = ? AND p.status = 'active' ORDER BY p.id""",
                 (category_id,))
     missing = [r["participation_id"] for r in rows if r["id"] is None]
+    if not rows:
+        raise conflict('尚无有效报名，不能确认项目名次', code='results_empty')
     if missing:
         raise conflict("仍有运动员未录入结果，不能确认项目名次", code="results_incomplete",
                        detail={"participation_ids": missing})
@@ -618,7 +662,7 @@ def match_submissions(ctx):
 @route("POST", r"/api/matches/(?P<match_id>\d+)/correction", roles=ORG)
 @atomic_result
 def correct_match(ctx):
-    return _run_result_mutation(ctx, "correction", _correct_match)
+    return _legacy_result_receipt(ctx)
 
 
 def _run_result_mutation(ctx, kind, fn):
@@ -691,7 +735,7 @@ def _correct_match(ctx):
 @route("POST", r"/api/matches/(?P<match_id>\d+)/cancel", roles=ORG)
 @atomic_result
 def cancel_match(ctx):
-    return _run_result_mutation(ctx, "cancel", _cancel_match)
+    return _legacy_result_receipt(ctx)
 
 
 def _cancel_match(ctx):
@@ -725,7 +769,7 @@ def _cancel_match(ctx):
 @route("POST", r"/api/matches/(?P<match_id>\d+)/reset-review", roles=ORG)
 @atomic_result
 def review_reset_match(ctx):
-    return _run_result_mutation(ctx, "reset_review", _review_reset_match)
+    return _legacy_result_receipt(ctx)
 
 
 def _review_reset_match(ctx):

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import db, list_revision
+from app import db, list_revision, result_candidates
 from app.api.common import serialize_match, serialize_matches
 from app.api.scheduling import plan_detail
 from app.errors import ApiError
@@ -19,6 +19,7 @@ class PaginationSafetyTest(unittest.TestCase):
         self.conn = db.connect(':memory:')
         self.conn.executescript((Path(__file__).resolve().parents[1] / 'app/schema.sql').read_text(encoding='utf-8'))
         db._migrate(self.conn)
+        result_candidates.initialize(self.conn)
         c = self.conn
         with db.tx(c):
             self.user = {'id': db.insert(c, 'users', {'username': 'page-audit', 'password_hash': 'x', 'salt': 'x', 'role': 'admin'}), 'role': 'admin'}

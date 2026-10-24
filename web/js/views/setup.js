@@ -402,6 +402,7 @@ function renderCreateEvent(refresh, standalone = false) {
     clear(root);
     root.append(h('ol.wizard-steps', ...labels.map((label, index) => h('li', {
       class: index === step ? 'active' : index < step ? 'done' : '',
+      'aria-current': index === step ? 'step' : null,
     }, h('span', index < step ? '✓' : String(index + 1)), h('b', label)))));
     const content = h('section.wizard-content');
     root.append(content);

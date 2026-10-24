@@ -21,6 +21,7 @@ const DRAFT_STATUS = {
   submitting: ['提交中', 'info'],
   failed: ['提交失败待重试', 'danger'],
   submitted: ['已提交', 'ok'],
+  received: ['已接收，待独立复核', 'warn'],
 };
 
 async function render({ el, params, refresh }) {
@@ -190,13 +191,39 @@ async function renderConsole(matchId, container, params) {
     offline = true;
   }
   let match = pkg.match;
-  if (match.status !== 'finished' && match.can_score === false) {
+  const key = `${identityKey}:match:${matchId}`;
+  let draft = await localStore.get(key);
+  if (draft) draft.request_context = recordRequestContext(draft);
+  let recoveryNotice = '';
+  if (draft && (draft.status === 'submitting' || draft.submission_unknown)) {
+    draft.status = 'failed';
+    draft.submission_unknown = true;
+    recoveryNotice = '上次提交结果尚未核实。可以重试原提交，服务器会避免重复保存。';
+    try {
+      const found = await api.get(`${draft.payload?.payload_schema===3?'/api/candidate-receipts/':'/api/receipts/'}${encodeURIComponent(draft.uid)}`, { context: draft.request_context || requestContext });
+      if (found.found && draft.payload) {
+        const receipt = await validateReceipt(found, draft.payload, 'match', matchId);
+        match = (await api.get(`/api/scoring/match/${matchId}`)).match;
+        if (await localStore.finalize(draft, receipt)) {
+          if(receipt.receipt_kind!=='candidate_received')draft=null;
+          toast(receipt.receipt_kind==='candidate_received'?'已核实候选接收，原件只读保留':'已核实上次正式回执', 'ok');
+        }
+      }
+    } catch { /* Preserve the original packet when its receipt cannot be verified. */ }
+  }
+  if (match.status !== 'finished' && (match.can_score === false || draft?.receipt?.receipt_kind==='candidate_received')) {
+    const candidateId=match.candidate_id||draft?.receipt?.candidate_id;
     return h('div.panel', h('h3', `${match.home.label} vs ${match.away.label}`),
-      h('div.warn-box', match.blocked_reason || '当前场次暂不能记录'),
+      h('div.warn-box', match.blocked_reason || '原件已接收并只读保留。请查看候选处理状态；退回后的修订须建立新候选。'),
+      candidateId ? h('button.btn.btn-primary.mt', { onclick:()=>go('resultReview',{candidate:candidateId,category:match.category_id}) }, match.candidate_id?'查看待复核候选':'查看候选处理状态') : null,
+      draft?.payload ? h('button.btn.mt',{onclick:()=>go('review')},'待核实提交与导出原件') : null,
       ['admin', 'organizer'].includes(state.user.role) ? h('button.btn.mt', {
         onclick: () => go('workspace', { event: state.eventId, category: match.category_id, tab: 'schedule' }),
       }, '核对编排方案') : null);
   }
+  if(draft?.protocol_schema===3&&draft.claim_epoch!==match.claim_epoch&&match.status!=='finished')
+    return h('div.panel',h('div.warn-box','任务归属版本已变化，旧原包只读保留。请核对转交与原回执。'),
+      h('button.btn',{onclick:()=>go('review')},'待核实提交与导出原件'));
   if (match.status === 'ready' && !offline) {
     if (!match.recorder_id || match.recorder_id === state.user.id) {
       const claim = await api.post('/api/recording/match/' + matchId + '/claim');
@@ -210,28 +237,6 @@ async function renderConsole(matchId, container, params) {
       transferButton('match',matchId));
   }
   if (offline && match.status === 'ready' && match.recorder_id !== state.user.id) throw new Error('此场次尚未由本账号领取，请联网领取后再记录');
-  panel.append(h('div.row.mb',h('span.small.muted','记录员：' + (match.recorder_name || '未领取')), match.status === 'ready' ? transferButton('match',matchId) : null));
-  const key = `${identityKey}:match:${matchId}`;
-  let draft = await localStore.get(key);
-  if (draft) draft.request_context = recordRequestContext(draft);
-  let recoveryNotice = '';
-  if (draft && (draft.status === 'submitting' || draft.submission_unknown)) {
-    // 页面退出时的 submitting 不代表现在仍有请求在运行。
-    draft.status = 'failed';
-    draft.submission_unknown = true;
-    recoveryNotice = '上次提交结果尚未核实。可以重试原提交，服务器会避免重复保存。';
-    try {
-      const found = await api.get(`/api/receipts/${encodeURIComponent(draft.uid)}`, { context: draft.request_context || requestContext });
-      if (found.found && draft.payload) {
-        const receipt = await validateReceipt(found, draft.payload, 'match', matchId);
-        match = (await api.get(`/api/scoring/match/${matchId}`)).match;
-        if (await localStore.finalize(draft, receipt)) {
-          draft = null;
-          toast('已核实上次提交成功', 'ok');
-        }
-      }
-    } catch { /* 查询不可用时保留原提交包，仍提供安全重试入口 */ }
-  }
   const lineup = { home: match.home.participation_id, away: match.away.participation_id };
 
   // A cached record can never hide a finished match returned by the backend.
@@ -243,6 +248,8 @@ async function renderConsole(matchId, container, params) {
       key, kind: 'match', match_id: matchId, device: deviceName(),
       /* 记录项目归属，赛后核对页才能按项目过滤本机待提交记录（§12.4） */
       category_id: match.category_id, event_identity: identity,
+      protocol_schema:3, claim_epoch:match.claim_epoch??0,
+      live_base_epoch:match.live_stream_epoch??0,
       plan_version: match.plan_version, base_version: match.base_version,
       lineup, status: 'recording', result_status: 'normal', events: [],
       rules: normalizeRules(match.rules || DEFAULT_RULES), rules_hash: match.rules_hash,
@@ -272,7 +279,7 @@ async function renderConsole(matchId, container, params) {
     || (!!draft.rules_hash && draft.rules_hash !== match.rules_hash);
   const lineupChanged = draft.lineup.home !== lineup.home || draft.lineup.away !== lineup.away;
 
-  const message = h('div.info-box', { style: 'display:none' });
+  const message = h('div.info-box.hidden');
   if (offline) {
     message.style.display = '';
     message.className = 'warn-box';
@@ -303,9 +310,13 @@ async function renderConsole(matchId, container, params) {
     h('span.match-score-separator', ':'),
     h('span.match-score-value.away', { dataset: { role: 'sets-away' } }, '0'));
   const setControl = h('div.set-control');
-  const statusLine = h('div.status-line');
+  const statusLine = h('div.status-line', { 'aria-live': 'polite' });
   const eventList = h('div.event-list');
-  const storageNotice = h('div.warn-box.mt', { role: 'alert', style: 'display:none' });
+  const storageNotice = h('div.warn-box.mt.hidden', { role: 'alert' });
+  /* 抬头与移动端操作条里需要随记录状态刷新的节点，先建好再由 draw() 更新。 */
+  const headerStatus = h('span', { 'aria-live': 'polite' });
+  const dockScore = h('b', '0 : 0');
+  const dockState = h('span.record-dock-state', '本机记录');
   let saving = false;
   let storageFailed = false;
   let lastSavedAt = draft.updated_at || '';
@@ -373,13 +384,20 @@ async function renderConsole(matchId, container, params) {
       eventList.append(h('div', `#${e.seq} 第${e.set_no}局 ${who}`));
     }
     drawReview();
-    storageNotice.style.display = storageFailed ? '' : 'none';
+    storageNotice.classList.toggle('hidden', !storageFailed);
     clear(storageNotice);
     if (storageFailed) storageNotice.append(
       h('b', '本机保存失败，已暂停后续记分。当前页面仍保留最新记录。'),
       h('div.small.mt', '请先重试保存或导出当前记录；直接刷新或关闭可能丢失尚未保存的内容。'),
       h('button.btn.mt', { disabled: saving, onclick: () => persist() }, '重试保存'),
       h('button.btn.mt', { onclick: () => exportCurrentDraft(draft) }, '导出当前记录'));
+    const [headerText, headerKind] = DRAFT_STATUS[draft.status] || [draft.status, ''];
+    clear(headerStatus);
+    headerStatus.append(statusBadge(headerText, headerKind));
+    dockScore.textContent = `${sum.liveScore[0]} : ${sum.liveScore[1]}`;
+    dockState.textContent = storageFailed ? '本机保存失败'
+      : saving ? '正在保存…' : `已保存 ${lastSavedAt ? fmtDateTime(lastSavedAt) : ''}`;
+    dockState.classList.toggle('is-danger', !!storageFailed);
   };
 
   let saveChain = Promise.resolve(), saveCount = 0;
@@ -460,22 +478,35 @@ async function renderConsole(matchId, container, params) {
     await persist();
   };
 
-  panel.append(
-    h('div.panel-head',
-      h('h3', `记录台 · ${match.group_name} / ${categoryLabel(match)} / ${match.round_label}`),
-      h('div.row.tight',
+  const eventName = state.events.find((item) => item.id === state.eventId)?.name || '';
+  const recordHeader = h('header.record-head',
+    h('nav.record-crumbs', { 'aria-label': '当前位置' },
+      h('span', eventName),
+      h('span.record-crumb-sep', { 'aria-hidden': 'true' }, '›'),
+      h('span', categoryLabel(match)),
+      h('span.record-crumb-sep', { 'aria-hidden': 'true' }, '›'),
+      h('span.current', '记录台')),
+    h('div.record-head-row',
+      h('div.record-head-main',
+        h('h1.record-title', `${match.home.label || '主队'} vs ${match.away.label || '客队'}`),
+        h('div.record-badges',
+          headerStatus,
+          statusBadge(rulesSummary(draft.rules || DEFAULT_RULES), 'info'))),
+      h('div.record-actions',
         h('button.btn', { onclick: () => returnToQueue(match, params) }, '返回列表'),
         h('button.btn', { onclick: () => showRecordSheet(matchId) }, '打印记录表'),
-      )),
-    h('div.row.small.muted',
+        match.status === 'ready' ? transferButton('match', matchId) : null)),
+    h('div.record-meta',
+      h('span', `项目：${categoryLabel(match)}`),
+      h('span', `轮次：${match.round_label}（第 ${match.seq} 场）`),
       h('span', `场地：${match.venue_name || '未安排'}`),
-      h('span', `阶段：${match.stage_name || ''}`),
-      h('span', `小组：${match.pool_name || ''}`),
-      h('span', `方案版本：v${match.plan_version}`),
-      h('span', `结果版本：${match.base_version}`),
-    ),
+      h('span', `时间：${match.scheduled_at ? fmtDateTime(match.scheduled_at) : '未安排'}`),
+      h('span', `记录员：${match.recorder_name || '未领取'}`),
+      h('span', `方案版本：v${match.plan_version} · 结果版本：${match.base_version}`)));
+  panel.append(
+    recordHeader,
     message,
-    h('p.small.muted', '当前记录为待提交输入；提交成功前不计入正式成绩、名次或统计。'),
+    h('p.small.muted.record-note', '当前记录为待提交输入；提交成功前不计入正式成绩、名次或统计。'),
     recoveryNotice ? h('div.warn-box.mt', recoveryNotice) : null,
     storageNotice,
   );
@@ -493,7 +524,7 @@ async function renderConsole(matchId, container, params) {
   panel.append(board, setControl, statusLine);
 
   /* 操作与核对 */
-  const review = h('div.panel', { style: 'margin-top:12px' });
+  const review = h('div.panel.mt-sm');
   const drawReview = () => {
     clear(review);
     const sum = summarize(draft.events, draft.rules || DEFAULT_RULES);
@@ -549,17 +580,23 @@ async function renderConsole(matchId, container, params) {
           disabled: saving || storageFailed || draft.status === 'submitting' || !canScore()
             || (match.status !== 'ready' && !draft.submission_unknown) || rulesChanged || sum.errors.length || lineupChanged || !!reason,
           onclick: async () => submitMatch(match, draft, draw, persist, params),
-        }, draft.status === 'failed' ? '重试提交' : '核对无误，提交成绩'),
+        }, draft.status === 'failed' ? '重试原包提交' : '核对无误，提交待复核'),
         h('span.small.muted', draft.status === 'failed'
           ? '提交失败，记录仍保存在本机。核对后可重试。'
-          : '提交成功即确认；提交成功前本机记录不会被清除。'),
+          : '提交成功仅表示已接收待复核；本机原包仍保留，独立确认后才成为正式成绩。'),
       ),
       match.status === 'finished' ? h('div.info-box.mt',
         `该场次已确认（结果版本 ${match.base_version}）。如需更正，请到“更正与导出”页面由编排与成绩人员操作。`) : null,
     );
   };
 
-  panel.append(review, h('div.panel', h('h3', '得分过程'), eventList));
+  const recordDock = h('div.record-dock',
+    h('div.record-dock-score', h('span.small.muted', '本局比分'), dockScore),
+    dockState,
+    h('button.btn.btn-primary', {
+      onclick: () => review.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+    }, '赛后核对'));
+  panel.append(review, h('div.panel', h('h3', '得分过程'), eventList), recordDock);
   setPageLeaveGuard(async () => {
     if (saving || draft.status === 'submitting') return false;
     if (!storageFailed) return true;
@@ -582,7 +619,7 @@ async function submitMatch(match, draft, draw, persist, params) {
   draft.status = 'submitting';
   if (!await persist()) { draft.status = 'failed'; draw(); return; }
   const wasUnknown = !!draft.submission_unknown;
-  const res = await submitWithRetry('/api/scoring/submit', payload, { context: draft.request_context });
+  const res = await submitWithRetry(payload.payload_schema===3?'/api/result-candidates':'/api/scoring/submit', payload, { context: draft.request_context });
   if (res.ok) {
     if (!await localStore.finalize(draft, res.result.receipt)) {
       draft.status = 'failed';
@@ -592,9 +629,9 @@ async function submitMatch(match, draft, draw, persist, params) {
       toast('服务器已接收，本机清理失败；请重试确认', 'error');
       return;
     }
-    draft.status = 'submitted';
+    draft.status = payload.payload_schema===3?'received':'submitted';
     stopDisplaySync();
-    toast(res.result.message || '成绩已提交并确认', 'ok');
+    toast(res.result.message || (payload.payload_schema===3?'已接收，待独立复核':'已核实原提交'), 'ok');
     if (res.result.affected && res.result.affected.length) {
       modal({
         title: '提交成功，但有需要人工处理的后续场次',

@@ -15,6 +15,8 @@ KEY_TABLES = (
     "teams", "participations", "matches", "placements", "school_points",
     "individual_results", "submissions", "audit_logs", "request_log",
     "display_screens", "display_pair_codes", "display_live",
+    "result_candidates", "candidate_heads", "review_decisions", "review_receipts",
+    "official_versions", "review_grants", "recording_epochs", "result_disputes", "review_recusals",
 )
 
 

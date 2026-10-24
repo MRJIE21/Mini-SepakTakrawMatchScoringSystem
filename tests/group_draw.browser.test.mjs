@@ -174,7 +174,14 @@ try {
   await panel.getByText('分组已确认', { exact: true }).waitFor();
   const confirmed = (await api('GET', drawPath)).draw;
   assert.equal(await page.getByRole('button', { name: '建立小组赛阶段', exact: true }).count(), 0);
-  await page.getByRole('link', { name: '进入赛程', exact: true }).click();
+  /* 1.5.0 分组页在确认抽签后有意提供两个“进入赛程”入口：页头动作（schedule.js:96）与
+     确认后的主体行动号召（schedule.js:101），两者都指向同一赛程页签；点击页头入口即可。 */
+  const scheduleLinks = page.getByRole('link', { name: '进入赛程', exact: true });
+  assert.equal(await scheduleLinks.count(), 2, '确认抽签后页头与主体各有一个进入赛程入口');
+  for (const href of await scheduleLinks.evaluateAll(links => links.map(link => link.getAttribute('href')))) {
+    assert.ok(href.includes('tab=schedule'), `进入赛程入口应指向赛程页签：${href}`);
+  }
+  await scheduleLinks.first().click();
   await page.getByRole('button', { name: '建立小组赛阶段', exact: true }).click();
   const preview = page.getByRole('dialog', { name: '核对阶段 · 小组赛', exact: true });
   await preview.getByRole('button', { name: '确认正式赛程', exact: true }).click();
@@ -182,7 +189,7 @@ try {
   const plan = (await api('GET', `/api/categories/${cat.id}/plan`)).plan;
   assert.deepEqual(plan.stages[0].pools.map(p => p.members.map(m => m.participation_id)), confirmed.groups.map(g => g.members.map(m => m.participation_id)));
   assert.equal(plan.stages[0].matches.length, 0, 'draw confirmation does not create fixtures');
-  await page.getByRole('navigation', { name: '项目工作台导航', exact: true }).getByRole('link', { name: '分组', exact: true }).click();
+  await page.getByRole('navigation', { name: '赛程视图' }).getByRole('link', { name: '分组与抽签', exact: true }).click();
   await panel.getByText('分组已确认', { exact: true }).waitFor();
   const popupWait = page.waitForEvent('popup');
   await panel.getByRole('button', { name: '打印分组表', exact: true }).click();

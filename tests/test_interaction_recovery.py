@@ -1,4 +1,5 @@
 """交互缺陷回归：正式更正、全项目排名失效、待确认拦截与抽签闭环。"""
+from helpers.reviewed_result import reviewed_result
 import unittest
 import uuid
 
@@ -31,7 +32,7 @@ class InteractionRecoveryTest(unittest.TestCase):
                 'result_value': score, 'error_count': 1, 'violation_count': 0, 'rank_no': None, **extra}
 
     def submit(self, pid, score, version=0, **extra):
-        return self.req('POST', '/api/scoring/individual', self.payload(pid, score, version, **extra))
+        return reviewed_result(self, 'POST', '/api/scoring/individual', self.payload(pid, score, version, **extra), expected=200)
 
     def confirm(self, body=None, expected=200):
         return self.req('POST', f"/api/categories/{self.cat['individual']['id']}/individual-rankings/confirm",
@@ -45,14 +46,14 @@ class InteractionRecoveryTest(unittest.TestCase):
         recorder = self.login('iteration_recorder')
         self.req('POST', f'/api/recording/individual/{pid}/claim', {}, token=recorder)
         original = self.payload(pid, 20)
-        self.req('POST', '/api/scoring/individual', original, token=recorder)
+        reviewed_result(self, 'POST', '/api/scoring/individual', original, token=recorder, expected=200)
         self.confirm()
-        self.req('POST', '/api/scoring/individual', self.payload(pid, 30, 1, reason='复核'), expected=403, token=recorder)
-        error = self.req('POST', '/api/scoring/individual', self.payload(pid, 30, 1), expected=400)
+        reviewed_result(self, 'POST', '/api/scoring/individual', self.payload(pid, 30, 1, reason='复核'), expected=403, token=recorder)
+        error = reviewed_result(self, 'POST', '/api/scoring/individual', self.payload(pid, 30, 1), expected=400)
         self.assertEqual(error['code'], 'correction_reason_required')
         self.assertEqual(self.placements()[0]['rank_no'], 1)
         # 原请求重试优先走幂等，不能因正式成绩权限新增限制而失败。
-        self.assertTrue(self.req('POST', '/api/scoring/individual', original, token=recorder)['duplicate'])
+        self.assertTrue(reviewed_result(self, 'POST', '/api/scoring/individual', original, token=recorder, expected=200)['duplicate'])
         self.submit(pid, 30, 1, reason='裁判复核')
         conn = db.connect(db.event_db_path(self.event['event_id']))
         try:
@@ -83,13 +84,16 @@ class InteractionRecoveryTest(unittest.TestCase):
         a, b = self.participants()
         self.submit(a, 20)
         self.assertEqual(self.confirm(expected=409)['code'], 'results_incomplete')
-        self.submit(b, None, result_status='pending')
+        received=self.submit(b, None, result_status='pending')
         error = self.confirm(expected=409)
         self.assertEqual(error['code'], 'results_pending')
         self.assertEqual(error['detail']['participation_ids'], [b])
         self.assertEqual(self.placements(), [])
-        self.req('POST', '/api/scoring/individual', self.payload(b, 10, 1), token=self.login('iteration_recorder'), expected=403)
-        self.submit(b, 10, 1, reason='裁判核对完毕')
+        reviewed_result(self, 'POST', '/api/scoring/individual', self.payload(b, 10, 1), token=self.login('iteration_recorder'), expected=403)
+        self.req('POST',f"/api/result-candidates/{received['candidate_id']}/withdraw",{
+            'decision_uid':str(uuid.uuid4()),'action':'withdraw','revision':received['receipt']['revision'],
+            'candidate_hash':received['receipt']['candidate_hash'],'base_version':0,'reason':'补全实际结果'})
+        self.submit(b, 10, 0, reason='裁判核对完毕')
         self.assertEqual(self.confirm()['count'], 2)
 
     def test_tie_orders_are_explicit_complete_and_scoped(self):

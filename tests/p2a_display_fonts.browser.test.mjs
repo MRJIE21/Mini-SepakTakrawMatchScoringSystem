@@ -1,3 +1,4 @@
+import {liveFixture} from './helpers/reviewed_result.mjs';
 /* P2-A REQ-001/002 真实浏览器检查：
    - 8 窗口：状态标签 / 局标签 / 局分小分在 1920×1080 计算字号 ≥16px、1366×768 ≥12px；
      小分 pill 允许换行，但不得溢出 tile、不得与比分重叠；
@@ -177,7 +178,7 @@ const browser = await chromium.launch({
 
 try {
   await publishLayout(8);
-  await api('/api/display/live', {
+  await liveFixture(base, {
     method: 'POST',
     headers: recorderHeaders,
     body: JSON.stringify({
@@ -191,7 +192,7 @@ try {
       draft_uid: 'p2a-fonts-draft', lineup_hash: 'p2a-fonts-lineup',
     }),
   });
-  await api('/api/display/live', {
+  await liveFixture(base, {
     method: 'POST',
     headers: recorderHeaders,
     body: JSON.stringify({

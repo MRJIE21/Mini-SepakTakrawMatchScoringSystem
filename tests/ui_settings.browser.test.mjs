@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 import { installLegacyRosterFixture } from './helpers/legacy_roster_fixture.mjs';
 /* 设置分区、种子编辑与记录队列的真实浏览器回归；只使用独立临时服务。 */
@@ -487,7 +488,7 @@ try {
   for (const [index, match] of matches.entries()) {
     await api('PUT', `/api/matches/${match.id}`, { venue_id: venueIds[index % 2], scheduled_at: `2026-10-11 ${String(9 + index).padStart(2, '0')}:00` });
   }
-  await api('POST', '/api/scoring/submit', { submission_uid: crypto.randomUUID(), match_id: matches[0].id,
+  await reviewedResult({base,token,identity},'POST','/api/scoring/submit', { submission_uid: crypto.randomUUID(), match_id: matches[0].id,
     event_identity: identity, base_version: matches[0].result_version,
     plan_version: matches[0].plan_version, home_participation: matches[0].home.participation_id,
     away_participation: matches[0].away.participation_id, device: '界面布局回归', result_status: 'away_forfeit', sets: [], events: [],

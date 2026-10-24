@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 工作台的真实浏览器流程；服务与数据均为独立临时实例。 */
 import assert from 'node:assert/strict';
@@ -137,7 +138,7 @@ try {
   console.log('PASS: 独立记录菜单移除，工作台比赛页实际进入记录、刷新和返回，高亮仍归属项目工作台');
   await navigation().getByRole('link', { name: '赛程', exact: true }).click();
   await page.getByRole('heading', { name: '比赛赛程', exact: true }).waitFor();
-  await page.getByRole('navigation', { name: '项目工作台导航', exact: true }).getByRole('link', { name: '分组', exact: true }).click();
+  await page.getByRole('navigation', { name: '赛程视图' }).getByRole('link', { name: '分组与抽签', exact: true }).click();
   await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
   assert.equal(await navigation().isVisible(), true);
   await navigation().getByRole('link', { name: '概况', exact: true }).click();
@@ -154,7 +155,7 @@ try {
       for (let away = 1; away <= 9; away++) events.push({ seq: ++seq, kind: 'score', set_no: set.set_no, side: 'away', home_after: 0, away_after: away });
       for (let home = 1; home <= 15; home++) events.push({ seq: ++seq, kind: 'score', set_no: set.set_no, side: 'home', home_after: home, away_after: 9 });
     }
-    await api('POST', '/api/scoring/submit', { submission_uid: crypto.randomUUID(), match_id: match.id,
+    await reviewedResult({base,token,identity},'POST','/api/scoring/submit', { submission_uid: crypto.randomUUID(), match_id: match.id,
       event_identity: identity,
       base_version: match.result_version, plan_version: match.plan_version, home_participation: match.home.participation_id,
       away_participation: match.away.participation_id, device: '工作台测试', result_status: 'normal', sets, events });

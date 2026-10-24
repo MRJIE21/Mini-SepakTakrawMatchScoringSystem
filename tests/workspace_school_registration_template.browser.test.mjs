@@ -69,7 +69,7 @@ try {
   page.on('dialog', dialog => dialog.accept());
   const link = `${base}/#/workspace?${new URLSearchParams({ event: identity.event_id, group, category: team, tab: 'registration', school })}`;
   await page.goto(link);
-  await page.locator('.school-registration-detail-head').waitFor();
+  await page.locator('header.page-head').filter({ has: page.getByRole('link', { name: '报名名单', exact: true }) }).waitFor();
   await page.getByRole('button', { name: '粘贴 / 导入学校报名表' }).click();
   const dialog = page.locator('.modal, .dialog').filter({ hasText: '粘贴 / 导入学校报名表' }).first();
   await dialog.waitFor();

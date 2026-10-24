@@ -8,13 +8,18 @@ export function matchingCategory(categories, current) {
 }
 
 export function workspaceTab(params = {}) {
-  return params.tab === 'schedule' && params.view === 'groups' ? 'groups' : params.tab;
+  if (params.tab === 'preparation') return 'registration';
+  if (params.tab === 'rankings') return 'results';
+  /* 结构树重构兼容：旧 tasks/groups 收敛到概况/赛程，旧 review 由 workspace 跳转全局复核。 */
+  if (params.tab === 'tasks') return 'overview';
+  if (params.tab === 'groups') return 'schedule';
+  return params.tab === 'schedule' && params.view === 'groups' ? 'schedule' : params.tab;
 }
 
 export function workspaceLink(category, tab, options = {}) {
   const params = { event: category.event_id, group: category.group_id, category: category.id, tab, ...options };
   params.tab = workspaceTab(params);
-  if (params.tab === 'groups' || params.tab === 'schedule' && params.view === 'fixtures') delete params.view;
+  if (params.tab !== 'schedule' || params.view === 'fixtures') delete params.view;
   return `#/workspace?${new URLSearchParams(params)}`;
 }
 

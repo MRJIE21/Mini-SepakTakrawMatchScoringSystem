@@ -2,7 +2,7 @@
 import { api, captureRequestContext, getToken } from '../api.js';
 import { registerView, state, loadStructure, reloadShell, go } from '../main.js';
 import { readPendingRequest, writePendingRequest, removePendingRequest, capturePendingRequestScope } from '../pendingRequests.js';
-import { h, clear, field, textInput, selectInput as uiSelectInput, formDialog, confirmAsync, toast, setPageLeaveGuard } from '../ui.js';
+import { h, clear, field, textInput, selectInput as uiSelectInput, formDialog, confirmAsync, toast, setPageLeaveGuard, statusBadge, pageHeader, bindFilterInput } from '../ui.js';
 import { clone, submission, eligibility, occupancy, jerseyOrEmpty, localIssues, errorSummary, reconcile } from '../schoolRegistrationModel.js';
 import { openSchoolImport } from '../schoolRegistrationImport.js';
 import { registrationId } from '../registrationId.js';
@@ -54,7 +54,10 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   const requestKey = `school-registration:${sid}:${latest.group.id}`;
   let base = latest, model = clone(latest), pending = readPendingRequest(requestKey, storageScope), preview = null, busy = false;
   let pendingUnknown = !!pending;
-  let tab = 'projects', storageOK = true, savedResult = null;
+  let tab = 'edit', storageOK = true, savedResult = null;
+  const viewState={project:Number(params.category)||model.categories[0]?.id||null,projectFilter:'all',
+    peopleQuery:'',assignment:'all',expanded:new Set(),projectSearch:{}};
+  let peopleBox=null;
   let deletePhase = 'idle', deleteMessage = '', deleteError = false, schoolDeleted = false;
   const deleteText = h('span');
   const verifyDeleteButton = btn('核对删除结果', verifyDeletion);
@@ -71,6 +74,8 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   const status = h('div.small', { role: 'status' }), errors = h('div.form-errors.hidden', { role: 'alert', tabindex: '-1' });
   const summary = h('div.school-registration-summary'), footerError = h('div.small.field-error', { role: 'alert', hidden: true });
   const action = btn('预览整批变更', () => runPreview(), true, { dataset: { action: 'school-preview' } });
+  const topAction=btn('预览整批变更',()=>runPreview(),true,{'aria-label':'页首预览整批变更'});
+  const changeSummary=h('p.small.school-registration-changes',{'aria-live':'polite'});
   const importButton = btn('粘贴 / 导入学校报名表', () => openSchoolImport({ path, text: model.importText || '', getPayload: currentPayload,
     requestContext, signal, isCurrent: currentPage,
     onText: (text) => { model.importText = text; edit(); },
@@ -83,10 +88,28 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       if (currentPage()) await reload();
     }
   });
-  el.append(h('div.page-head.school-registration-detail-head', h('div', h('h2', model.school.name), h('p.muted', `${model.group.name} · 本届学校报名工作台`)),
-    h('div.school-registration-head-actions', backButton, deleteButton)), deleteButton ? deleteFeedback : null,
-  h('p.small.muted', '页面以后台已保存的报名为准。填写人员和阵容后，预览核对并整批提交，提交成功后生效。'),
-  errors, h('div.toolbar.mb', importButton), h('div.panel', tabs, content), h('div.school-registration-footer',
+  const lockedProjects = (model.categories || []).filter((cat) => cat.roster_locked_reason || cat.locked_reason).length;
+  /* 页头计数必须跟随当前页面状态：draw() 只重绘内容区，这里保留节点由 updateHeaderMeta() 同步。 */
+  const headerMeta = h('span');
+  el.append(pageHeader({
+    crumbs: [
+      { label: '项目工作台' },
+      { label: '报名名单', href: listLink() },
+      { label: model.school.name },
+    ],
+    title: model.school.name,
+    badges: [
+      statusBadge(model.group.name, 'info'),
+      lockedProjects ? statusBadge(`${lockedProjects} 个项目已锁定`, 'warn') : null,
+    ].filter(Boolean),
+    meta: [
+      headerMeta,
+      h('span', '以后台已保存的报名为准，预览核对后整批提交'),
+    ],
+    actions: [backButton, deleteButton].filter(Boolean),
+  }), deleteButton ? deleteFeedback : null,
+  errors, h('div.toolbar.mb', importButton, topAction), changeSummary, h('div.panel', tabs, content),
+  h('div.school-registration-footer',
     h('div', summary, footerError), h('div.toolbar', status, discard, action)));
 
   function currentPayload() { return submission(base, model); }
@@ -213,6 +236,14 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     errors.textContent = '';
     errors.append(h('div.form-errors-title', summaryText.message));
     if (summaryText.details.length) errors.append(h('div', summaryText.details.join('；')));
+    const person=model.people.find(p=>!p.name.trim()||(occupancy(model).get(p.key)||[]).some(c=>p.gender&&c.gender!==p.gender));
+    const category=model.categories.find(c=>{
+      const p=model.projects.find(p=>p.category_id===c.id);
+      return p.choice==='participate'&&(c.kind==='individual'&&!p.athlete_key
+        ||p.seed_no!==null&&p.seed_no!==''&&p.seed_no!==undefined&&(!Number.isInteger(Number(p.seed_no))||Number(p.seed_no)<=0));
+    });
+    if(person)errors.append(btn('定位需要核对的人员',()=>focusPerson(person.key)));
+    else if(category)errors.append(btn('定位需要核对的项目',()=>focusProject(category.id)));
     errors.classList.remove('hidden');
     footerError.textContent = summaryText.text;
     footerError.hidden = false;
@@ -251,8 +282,11 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       gaps += keys.filter((key) => !latest.people.find((a) => a.key === key)?.gender).length;
     }
     summary.textContent = savedResult ? '报名提交成功，等待读取后台最新统计' : `后台已保存：${n} 项报名 · ${no} 项不参加 · ${unresolved} 项尚未决定 · ${gaps} 处资料待补`;
+    const changes=currentPayload(),added=changes.people.filter(p=>p.key.startsWith('new:')).length;
+    changeSummary.textContent=`本校全部项目 · 已保存人员 ${latest.people.length} 位 · 本次新增 ${added} 位 / 资料调整 ${changes.people.length-added} 位 / 项目调整 ${changes.projects.length} 项${hasUnaddedPeople()?' · 还有未添加的人员输入':''}`;
     action.textContent = busy ? '处理中…' : pending ? '核实并重试原提交' : preview ? '确认整批提交' : '预览整批变更';
     action.disabled = busy || deletionLocked() || !!savedResult || (!pending && !changed());
+    topAction.textContent=action.textContent;topAction.disabled=action.disabled;topAction.setAttribute('aria-label',`页首${action.textContent}`);
     discard.disabled = busy || deletionLocked() || !!pending || !!savedResult;
     importButton.disabled = busy || deletionLocked() || !!pending || !!savedResult;
     tabs.querySelectorAll('button').forEach((b) => { b.disabled = busy || deletionLocked(); });
@@ -283,21 +317,77 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     control.addEventListener('input', () => { onChange(control.value); edit(); });
     return control;
   }
+  function updateHeaderMeta() {
+    headerMeta.textContent = `${model.people?.length || 0} 位人员 · ${model.projects?.length || 0} 个项目`;
+  }
   function draw() {
     if (!currentPage()) return;
+    updateHeaderMeta();
     clear(tabs); clear(content);
-    for (const [key, label] of [['people', '人员名单'], ['projects', '项目报名'], ['review', '核对与提交']]) tabs.append(
+    for (const [key, label] of [['edit', '统一编辑'], ['review', '整批核对']]) tabs.append(
       btn(label, () => { tab = key; draw(); }, tab === key, { role: 'tab', 'aria-selected': String(tab === key) }));
+    /* 未提交的新增人员只保存在本页；刷新/关闭页面会丢失，必须显式提醒，
+       避免用户误以为“新建的人物消失”。 */
+    if (!savedResult && changed() && !pending) content.append(h('div.warn-box.school-registration-unsaved',
+      '当前有未提交的修改（含新增人员）；刷新或关闭页面会丢弃这些修改，请先“预览整批变更”并确认提交。'));
     if (savedResult) content.append(h('div.notice', '学校报名已保存，请读取后台最新名单。', btn('读取最新正式名单', async () => {
       if (busy || deletionLocked() || !currentPage()) return;
       busy = true; updateFooter();
       try { await reload(); } catch (error) { showError(error); }
       finally { busy = false; draw(); }
     }, false, { dataset: { action: 'school-reload' } })));
-    else if (tab === 'people') drawPeople();
-    else if (tab === 'projects') drawProjects();
+    else if (tab !== 'review') drawUnified();
     else drawReview();
     updateFooter();
+  }
+  function focusPerson(key, { force = false } = {}) {
+    /* 新增人员后强制聚焦：清空“查找人员/分配状态”筛选并展开定位，
+       否则新人员会被当前筛选隐藏，看起来像“新建后消失”。 */
+    tab='edit';viewState.peopleQuery='';viewState.assignment='all';viewState.expanded.add(key);draw();
+    const node=[...content.querySelectorAll('[data-person]')].find(n=>n.dataset.person===key);
+    const previousFocus=document.activeElement;
+    requestAnimationFrame(()=>{
+      if(!currentPage()||!node?.isConnected)return;
+      if(!force && document.activeElement!==previousFocus)return;
+      node.open=true;node.scrollIntoView({block:'center'});node.querySelector('input,select')?.focus({preventScroll:true});
+    });
+  }
+  function focusProject(id) {
+    tab='edit';viewState.project=id;viewState.projectFilter='all';draw();
+    const node=content.querySelector(`[data-category="${id}"]`),previousFocus=document.activeElement;
+    requestAnimationFrame(()=>{
+      if(!currentPage()||!node?.isConnected||document.activeElement!==previousFocus)return;
+      node.scrollIntoView({block:'start'});node.querySelector('select,input')?.focus({preventScroll:true});
+    });
+  }
+  function drawUnified() {
+    const filter=uiSelectInput([['all','全部项目'],['participate','参加报名'],['unresolved','尚未决定'],['not_participating','不参加'],['withdrawn','已退出']],viewState.projectFilter,
+      {'aria-label':'筛选项目状态'});
+    filter.onchange=()=>{viewState.projectFilter=filter.value;draw();};
+    const catalog=h('div.school-registration-catalog',{'aria-label':'本校项目目录'});
+    const visible=model.categories.filter(c=>viewState.projectFilter==='all'||model.projects.find(p=>p.category_id===c.id).choice===viewState.projectFilter);
+    for(const cat of visible) {
+      const p=model.projects.find(p=>p.category_id===cat.id),count=cat.kind==='team'?p.members.length:Number(!!p.athlete_key);
+      catalog.append(btn(`${cat.name} · ${choices.find(c=>c.value===p.choice)?.label} · ${count}${cat.kind==='team'?'/6人':'/1人'}${cat.locked_reason||cat.roster_locked_reason?' · 已锁定':''}`,
+        ()=>focusProject(cat.id),cat.id===viewState.project,{'aria-pressed':String(cat.id===viewState.project)}));
+    }
+    if(!visible.length)catalog.append(h('p.small.muted','没有符合状态的项目。'),btn('显示全部项目',()=>{viewState.projectFilter='all';draw();}));
+    const project=h('section.school-registration-active-project'),people=h('section.school-registration-people');
+    const searchInput=textInput(viewState.peopleQuery,{type:'search',placeholder:'姓名或区分信息','aria-label':'搜索学校人员'});
+    const assigned=uiSelectInput([['all','全部人员'],['assigned','已分配'],['unassigned','未分配']],viewState.assignment,{'aria-label':'人员分配状态'});
+    peopleBox=h('div');
+    let search=null;
+    /* 密码管理器可能把已保存用户名自动填进搜索框，使“查找人员/分配状态”意外过滤，
+       新增人员看起来像没出现；状态化输入框会让自动填充不生效并被纠正。 */
+    const filterPeople=()=>{viewState.peopleQuery=search?search.value():searchInput.value;viewState.assignment=assigned.value;clear(peopleBox);drawPeople(peopleBox);updateFooter();};
+    search=bindFilterInput(searchInput,filterPeople);
+    assigned.onchange=filterPeople;
+    people.append(h('h3','学校人员'),h('div.form-grid',field('查找人员',searchInput),field('分配状态',assigned)),peopleBox);
+    content.append(h('div.panel-head',h('h3','本校全部项目'),field('项目状态',filter)),catalog,
+      h('div.school-registration-unified',project,people));
+    if(!model.categories.length)project.append(h('p.notice','本组别尚无项目，可单独整理人员并整批保存。'));
+    else drawProjects(project);
+    drawPeople(peopleBox);
   }
   function addPersonForm(cat = null) {
     const project = cat && model.projects.find((p) => p.category_id === cat.id);
@@ -310,22 +400,28 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     const gender = selectInput(genders, buffer.gender ?? cat?.gender ?? '');
     const jersey = textInput(buffer.jersey_no || '', { placeholder: '常用号码', 'aria-label': '新增人员常用号码' });
     const note = textInput(buffer.note || '', { placeholder: '班级、学号等区分信息', 'aria-label': '新增人员区分信息' });
-    const verified = h('input', { type: 'checkbox' });
+    const verified = h('input', { type: 'checkbox',checked:!!buffer.confirm_distinct_person });
+    let reviewSignature=buffer.reviewSignature;
     const check = h('div.same-name-review.hidden');
     const names = () => model.people.filter((p) => p.name.trim().toLowerCase() === name.value.trim().toLowerCase());
     const persistInput = () => {
-      model.newPersonForms[slot] = { name: name.value, gender: gender.value, jersey_no: jersey.value, note: note.value };
+      model.newPersonForms[slot] = { name: name.value, gender: gender.value, jersey_no: jersey.value, note: note.value,
+        confirm_distinct_person:verified.checked,reviewSignature };
       edit();
     };
     const showSameNames = () => {
-      verified.checked = false; clear(check);
-      const same = names(); check.classList.toggle('hidden', !same.length);
+      clear(check);
+      const same = names(),signature=JSON.stringify([name.value.trim().toLowerCase(),note.value.trim().toLowerCase(),same.map(p=>[p.key,p.note])]);
+      if(signature!==reviewSignature)verified.checked=false;
+      reviewSignature=signature;
+      if(model.newPersonForms?.[slot])Object.assign(model.newPersonForms[slot],{reviewSignature,confirm_distinct_person:verified.checked});
+      check.classList.toggle('hidden', !same.length);
       same.forEach((p) => check.append(h('div.same-name-person', personLabel(p),
         h('span.small.muted', (occupancy(model).get(p.key) || []).map((c) => c.name).join('、') || '尚未分配项目'))));
       if (same.length) check.append(h('label.row.tight', verified, '已核对全校同名人员，确认新增的是另一人'));
     };
     name.oninput = () => { persistInput(); showSameNames(); };
-    note.oninput = persistInput; jersey.oninput = persistInput; gender.onchange = persistInput;
+    note.oninput = ()=>{persistInput();showSameNames();}; jersey.oninput = persistInput; gender.onchange = persistInput;verified.onchange=persistInput;
     showSameNames();
     const add = btn(cat ? (joinProject ? '添加人员并加入本项目' : '添加到学校人员名单') : '添加人员', () => {
       const same = names(), personName = name.value.trim(), personNote = note.value.trim();
@@ -343,6 +439,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
         same_name_candidates: base.people.filter((p) => p.name.trim().toLowerCase() === personName.toLowerCase()).map((p) => ({ id: p.id, rev: p.rev })).sort((a, b) => a.id - b.id),
         confirm_distinct_person: !!same.length && verified.checked };
       model.people.push(person);
+      if(!cat)viewState.expanded.add(person.key);
       refreshPersonReview(base, model, person);
       delete model.newPersonForms[slot];
       if (joinProject && !eligibility(person, cat, model)) {
@@ -350,7 +447,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
         if (cat.kind === 'individual') p.athlete_key = person.key;
         else if (p.members.length < 6) p.members.push({ athlete_key: person.key, jersey_no: jerseyOrEmpty(person.jersey_no) });
       }
-      errors.classList.add('hidden'); edit(); draw();
+      errors.classList.add('hidden'); edit(); focusPerson(person.key, { force: true });
     }, true);
     return h('div.school-registration-add', cat && !joinProject ? h('p.small.muted', cat.roster_locked_reason
       ? '当前项目阵容已冻结。新增人员只加入学校人员名单。'
@@ -362,14 +459,25 @@ async function render({ el, params, requestContext = captureRequestContext(), si
         delete model.newPersonForms[slot]; errors.classList.add('hidden'); edit(); draw();
       })));
   }
-  function drawPeople() {
-    content.append(h('h3', '全校人员名单'), h('p.small.muted', '人员使用稳定档案 ID。同名人员分别保留，项目号码在项目报名中填写。'));
-    for (const p of model.people) {
-      const review = h('div.same-name-review');
+  function drawPeople(target=content) {
+    target.append(h('p.small.muted', '人员使用稳定档案 ID。同名分别保留；常用号码与项目号码分开。'));
+    const occupied=occupancy(model),query=viewState.peopleQuery.trim().toLowerCase();
+    const people=model.people.filter(p=>personLabel(p).toLowerCase().includes(query)
+      &&(viewState.assignment==='all'||viewState.assignment==='assigned'&&occupied.has(p.key)||viewState.assignment==='unassigned'&&!occupied.has(p.key)));
+    target.append(h('p.small.muted',`显示 ${people.length} / 全校 ${model.people.length} 位人员`));
+    if(!people.length){
+      target.append(h('p.small','当前没有符合筛选的人员，仍可新增人员。'));
+      if(viewState.peopleQuery.trim()||viewState.assignment!=='all'){
+        target.append(h('div.row.tight.mt',btn('清除筛选显示全部人员',()=>{viewState.peopleQuery='';viewState.assignment='all';draw();})));
+      }
+    }
+    for (const p of people) {
+      const review = h('div.same-name-review', {hidden:true});
       const updateReview = () => {
         if (!p.key.startsWith('new:')) return;
         const peers = refreshPersonReview(base, model, p);
         clear(review);
+        review.hidden = !peers.length && !p.same_name_candidates.length;
         if (!peers.length && !p.same_name_candidates.length) return;
         const confirm = h('input', { type: 'checkbox', checked: p.confirm_distinct_person,
           onchange: () => { p.confirm_distinct_person = confirm.checked; edit(); } });
@@ -382,24 +490,26 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       const assigned = (occupancy(model).get(p.key) || []).map((c) => c.name).join('、');
       const genderConflicts = (occupancy(model).get(p.key) || [])
         .filter((c) => p.gender && c.gender && p.gender !== c.gender);
-      content.append(h('div.school-registration-person', { dataset: { person: p.key } },
+      const details=h('details.school-registration-person', {dataset:{person:p.key},open:viewState.expanded.has(p.key)},
+        h('summary',h('b',p.name||'姓名待填写'),h('div.small.muted',assigned||'尚未分配项目')),
         field('姓名', input(p.name, (v) => { p.name = v; updateReview(); })), field('性别', gender),
         field('常用号码', input(p.jersey_no, (v) => { p.jersey_no = v; })),
         field('区分信息', input(p.note, (v) => { p.note = v; updateReview(); })), review,
-        h('div.small.muted', assigned || '尚未分配项目'),
+        h('div.row',...(occupied.get(p.key)||[]).map(cat=>btn(`定位${cat.name}`,()=>focusProject(cat.id)))),
         genderConflicts.length ? h('div.field-error', `性别与已报名项目不符：${genderConflicts.map((c) => c.name).join('、')}`) : null,
         p.key.startsWith('new:') ? btn('移除新增人员', () => {
           try { removeNewPerson(model, p.key); } catch (error) { showError(error); return; }
           edit(); draw();
-        }) : h('span.small.muted', `档案 #${p.id}`)));
+        }) : h('span.small.muted', `档案 #${p.id}`));
+      details.ontoggle=()=>{if(details.open)viewState.expanded.add(p.key);else viewState.expanded.delete(p.key);};
+      target.append(details);
     }
-    content.append(h('details.mt', { open: hasPersonInput(model.newPersonForms?.people) }, h('summary', '＋ 新增人员'), addPersonForm()));
+    target.append(h('details.mt', { open: hasPersonInput(model.newPersonForms?.people) }, h('summary', '＋ 新增人员'), addPersonForm()));
   }
-  function drawProjects() {
+  function drawProjects(target=content) {
     const grid = h('div.school-registration-projects');
-    content.append(h('p.small.muted', '跨项目调整：先在原项目移除人员或退出，再分配到目标项目，最后统一预览提交。'), grid);
-    if (!model.categories.length) content.append(h('p.notice', '本组别尚未开设项目，可先在“人员名单”整理人员，配置项目后再报名。'));
-    for (const cat of model.categories) {
+    target.append(h('p.small.muted', '当前项目编辑。跨项目调整先明确移出原项目，再加入目标项目，最后整批提交。'), grid);
+    for (const cat of model.categories.filter(c=>c.id===viewState.project)) {
       const p = model.projects.find((p) => p.category_id === cat.id);
       const original = base.projects.find((x) => x.category_id === cat.id);
       const availableChoices = original?.choice === 'unresolved' ? choices : choices.filter((x) => x.value !== 'unresolved');
@@ -428,23 +538,32 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       const picker = selectInput([{ value: '', label: cat.roster_locked_reason ? '阵容已冻结' : eligible.length ? '选择可报名人员' : '没有可报名人员，可就地新增' },
         ...eligible.map((a) => ({ value: a.key, label: personLabel(a) }))], '');
       picker.setAttribute('aria-label', `${cat.name}选人`);
-      const search = textInput('', { placeholder: '按姓名或区分信息筛选', 'aria-label': `${cat.name}人员搜索` });
-      search.oninput = () => {
-        const q = search.value.trim().toLowerCase();
+      const searchInput = textInput(viewState.projectSearch[cat.id]||'', { placeholder: '按姓名或区分信息筛选', 'aria-label': `${cat.name}人员搜索` });
+      let search = null;
+      const filterPicker = () => {
+        const value = search ? search.value() : searchInput.value;
+        viewState.projectSearch[cat.id]=value;
+        const q = value.trim().toLowerCase();
         clear(picker);
-        picker.append(h('option', { value: '' }, '选择可报名人员'));
-        eligible.filter((a) => personLabel(a).toLowerCase().includes(q)).forEach((a) => picker.append(h('option', { value: a.key }, personLabel(a))));
+        const found=eligible.filter((a) => personLabel(a).toLowerCase().includes(q));
+        picker.append(h('option', { value: '' }, found.length?'选择可报名人员':'无匹配可报名人员'));
+        found.forEach((a) => picker.append(h('option', { value: a.key }, personLabel(a))));
       };
-      picker.onchange = () => {
+      filterPicker();
+      search = bindFilterInput(searchInput, filterPicker);
+      picker.onchange = async () => {
         if (!picker.value) return;
         if (cat.kind === 'team') {
           if (p.members.length >= 6) { showError(new Error('三人赛每队最多 6 人')); return; }
           const a = model.people.find((a) => a.key === picker.value);
           p.members.push({ athlete_key: a.key, jersey_no: jerseyOrEmpty(a.jersey_no) });
-        } else p.athlete_key = picker.value;
+        } else {
+          if(p.athlete_key&&!await confirmAsync('更换参赛运动员','将以本次明确选择替换当前运动员；新增学校人员本身不会替换。','更换')){picker.value='';return;}
+          p.athlete_key = picker.value;
+        }
         edit(); draw();
       };
-      roster.append(field('搜索可报名人员', search), field(cat.kind === 'team' ? `参赛队员（${p.members.length}/6）` : '参赛运动员（每校 1 人）', picker));
+      roster.append(field('搜索可报名人员', searchInput), field(cat.kind === 'team' ? `参赛队员（${p.members.length}/6）` : '参赛运动员（每校 1 人）', picker));
       const keys = cat.kind === 'team' ? p.members.map((m) => m.athlete_key) : [p.athlete_key].filter(Boolean);
       for (const key of keys) {
         const a = model.people.find((a) => a.key === key);
@@ -455,7 +574,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
           const m = p.members.find((m) => m.athlete_key === key);
           row.append(field('本项目号码', input(m.jersey_no, (v) => { m.jersey_no = v; }, { inputmode: 'numeric', 'aria-label': `${a.name}本项目号码` })));
         }
-        row.append(btn('移除', () => {
+        row.append(btn('编辑人员资料',()=>focusPerson(key)),btn('移除', () => {
           p.members = p.members.filter((m) => m.athlete_key !== key);
           if (p.captain_key === key) p.captain_key = '';
           if (p.athlete_key === key) p.athlete_key = '';
@@ -480,7 +599,11 @@ async function render({ el, params, requestContext = captureRequestContext(), si
   function drawReview() {
     content.append(h('h3', '核对整批变更'));
     const payload = submission(base, model);
-    content.append(h('p.small.muted', `待保存 ${payload.people.length} 位人员资料、${payload.projects.length} 个项目调整。未修改的项目保持原状。`));
+    const added=payload.people.filter(p=>p.key.startsWith('new:')).length;
+    content.append(h('p.small.muted', `本次新增 ${added} 位人员、调整已有资料 ${payload.people.length-added} 位、项目调整 ${payload.projects.length} 项。保存范围为本校全部项目。`));
+    const unchanged=base.projects.filter(p=>!payload.projects.some(x=>x.category_id===p.category_id));
+    if(unchanged.length)content.append(h('details',h('summary',`查看未变化结果（${unchanged.length}个项目）`),...unchanged.map(p=>h('p.small',
+      `${base.categories.find(c=>c.id===p.category_id)?.name}：${choices.find(c=>c.value===p.choice)?.label}`))));
     if (!preview) { content.append(h('p', pending ? '原提交结果待核实。请点击“核实并重试原提交”。核实前不能更改原提交内容。' : '点击“预览整批变更”，核对资格、名额和变更明细。')); return; }
     content.append(h('ul', ...preview.changes.map((x) => h('li', x))));
     if (preview.people_review.length) content.append(h('h4', '本次保存的人员资料'),
@@ -501,14 +624,19 @@ async function render({ el, params, requestContext = captureRequestContext(), si
     resolveSchoolContext(structure, params, formal);
     latest = formal;
     base = latest; model = clone(latest); preview = null; pending = null; pendingUnknown = false; savedResult = null;
-    tab = 'projects';
+    tab = 'edit';
+    /* 重新读取后台名单后回到“全部人员”，刚保存的人员不会因旧筛选而不可见。 */
+    viewState.peopleQuery = '';
+    viewState.assignment = 'all';
     removePendingRequest(requestKey, storageScope); status.textContent = '已读取正式报名'; clearErrorNote(); draw();
   }
   async function runPreview() {
     if (busy || deletionLocked() || !currentPage()) return;
     if (pending || preview) { await commit(); return; }
     if (hasUnaddedPeople()) {
-      tab = hasPersonInput(model.newPersonForms?.people) ? 'people' : 'projects'; draw();
+      tab = 'edit';
+      const slot=Object.keys(model.newPersonForms||{}).find(k=>k!=='people'&&hasPersonInput(model.newPersonForms[k],model.categories.find(c=>String(c.id)===k)?.gender||''));
+      if(slot)viewState.project=Number(slot);draw();
       showError(new Error('请先添加新增人员，或清空尚未添加的输入，再预览提交。')); return;
     }
     if (model.importText?.trim()) { showError(new Error('还有尚未合入的表格，请打开导入窗口核对并合入，或清空表格输入。')); return; }
@@ -517,7 +645,7 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       const peers = refreshPersonReview(base, model, p);
       if ((peers.length || p.same_name_candidates.length) && (!p.confirm_distinct_person || !p.note.trim()
           || peers.some(other => other.note.trim().toLowerCase() === p.note.trim().toLowerCase()))) {
-        tab = 'people'; draw(); showError(new Error(`请重新核对「${p.name}」的同名人员并填写不同的区分信息`)); return;
+        focusPerson(p.key); showError(new Error(`请重新核对「${p.name}」的同名人员并填写不同的区分信息`)); return;
       }
     }
     if (issues.length) { showError(new Error(issues.join('；'))); return; }
@@ -548,14 +676,28 @@ async function render({ el, params, requestContext = captureRequestContext(), si
       toast('学校报名已整批保存');
     } catch (error) {
       handleError(error);
-      // HTTP validation rejection guarantees no writes; network/5xx may have committed.
-      if (!retryingUnknown && error.code !== 'account_changed' && error.status >= 400 && error.status < 500) {
-        pending = null; preview = null;
+      /* 释放待核实包的判定：
+         · 服务端带产品错误码且声明 outcome=not_committed（registration_stale、
+           invalid_field 等）→ 确定性拒绝，继续保留只会永久锁死页面（报障根因）；
+         · 首次提交遇到普通 4xx → 沿用原行为立即释放；
+         · 恢复旧包后遇到“无产品错误码的 4xx”（可能来自代理/网关）或网络/5xx →
+           保留原包，允许用完全相同的内容再次核实重试（幂等回放可确认首次是否已提交）；
+         · account_changed 例外：必须保留原包给原账号核实。 */
+      const productReject = error.code !== 'account_changed' && error.code !== 'error';
+      const rejected = error.code !== 'account_changed' && (
+        (error.not_committed && (productReject || !retryingUnknown))
+        || (!retryingUnknown && error.status >= 400 && error.status < 500)
+      );
+      if (rejected) {
+        pending = null; pendingUnknown = false; preview = null;
+        tab = 'edit';                   // 回到可编辑视图：用户需要修正后重新预览
+        retainRequest();                 // pending 为空时同时清理本机待核实包并刷新状态文案
+      } else {
+        // Keep uncertainty outside the immutable wire packet. Recovered packets
+        // always start uncertain, even if an earlier page ended mid-response.
+        pendingUnknown = !!pending && (retryingUnknown || !!error.outcome_unknown);
+        retainRequest();
       }
-      // Keep uncertainty outside the immutable wire packet. Recovered packets
-      // always start uncertain, even if an earlier page ended mid-response.
-      pendingUnknown = !!pending && (retryingUnknown || !!error.outcome_unknown);
-      retainRequest();
     } finally { busy = false; }
     if (!currentPage()) return;
     if (savedResult) {
@@ -587,25 +729,39 @@ async function renderDirectory({ el, groupId = null, categoryId = null, profile 
   const list = h('div.school-registration-list', { role: 'list', 'aria-label': '学校报名列表' });
   const link = school => workspaceSchoolLink({ eventId, groupId: school.group_id,
     categoryId: resolved.category?.id, schoolId: school.id, profile: filtered ? profile : null });
-  for (const school of visible) list.append(h('div.school-registration-item', { role: 'listitem' },
-    btn([
-      h('div.school-registration-school-info',
-        h('div.school-registration-school-name', school.name),
-        h('div.school-registration-school-meta', { id: `school-registration-meta-${school.id}` },
-          h('span.badge.badge-info', school.group_name || resolved.group.name), h('span', `${school.athlete_count} 位人员`),
-          filtered ? h('span.badge.badge-warn', '资料待补充') : null)),
-      h('span.school-registration-school-arrow', { 'aria-hidden': 'true' }, '›'),
-    ], () => { if (alive()) location.hash = link(school); }, false,
-    { class: 'school-registration-school', 'aria-label': school.name, 'aria-describedby': `school-registration-meta-${school.id}` })));
-  if (!visible.length) list.append(h('p.muted.school-registration-empty', filtered
-    ? '当前项目没有资料待补充的学校。' : '该组别尚无学校，可以新增学校后整理报名。'));
+  const countText = h('p.small.muted', { role: 'status', 'aria-live': 'polite' }, `共 ${visible.length} 所学校`);
+  const searchInput = textInput('', { type: 'search', placeholder: '搜索学校名称或简称', 'aria-label': '搜索学校' });
+  let search = null;
+  const paint = () => {
+    const keyword = (search ? search.value() : searchInput.value).trim().toLowerCase();
+    const shown = keyword
+      ? visible.filter(school => `${school.name} ${school.short_name || ''}`.toLowerCase().includes(keyword))
+      : visible;
+    clear(list);
+    for (const school of shown) list.append(h('div.school-registration-item', { role: 'listitem' },
+      btn([
+        h('div.school-registration-school-info',
+          h('div.school-registration-school-name', school.name),
+          h('div.school-registration-school-meta', { id: `school-registration-meta-${school.id}` },
+            h('span.badge.badge-info', school.group_name || resolved.group.name), h('span', `${school.athlete_count} 位人员`),
+            filtered ? h('span.badge.badge-warn', '资料待补充') : null)),
+        h('span.school-registration-school-arrow', { 'aria-hidden': 'true' }, '›'),
+      ], () => { if (alive()) location.hash = link(school); }, false,
+      { class: 'school-registration-school', 'aria-label': school.name, 'aria-describedby': `school-registration-meta-${school.id}` })));
+    if (!shown.length) list.append(h('p.muted.school-registration-empty', keyword ? '没有匹配的学校，可清除搜索后重试。' : filtered
+      ? '当前项目没有资料待补充的学校。' : '该组别尚无学校，可以新增学校后整理报名。'));
+    countText.textContent = keyword ? `匹配 ${shown.length} / 共 ${visible.length} 所学校` : `共 ${visible.length} 所学校`;
+  };
+  search = bindFilterInput(searchInput, paint);
+  paint();
   el.append(h('section.panel.school-registration-directory',
     h('div.school-registration-list-head', h('div', h('h3', '学校名单'),
       h('p.small.muted', '选择学校，统一整理本组别的人员与全部项目报名。')),
       btn('新增学校', () => { if (alive()) newSchool(structure, resolved, { client, eventId, alive }); }, true)),
+    h('div.school-registration-directory-tools', searchInput, countText),
     filtered ? h('div.notice.school-registration-filter', h('span', '仅显示当前项目资料待补充的学校'),
       h('a.btn', { href: workspaceSchoolLink({ eventId, groupId, categoryId }) }, '查看全部学校')) : null,
-    h('p.small.muted', { role: 'status', 'aria-live': 'polite' }, `共 ${visible.length} 所学校`), list));
+    list));
 }
 
 function newSchool(structure, resolved, { client, eventId, alive }) {

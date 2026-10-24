@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 /* 成绩导出正/倒序的真实浏览器验证：下拉、传参、重置与只读边界。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -93,7 +94,7 @@ try {
   const detail = await api('GET', `/api/matches/${match.match_id}`);
   const sets = [{ set_no: 1, home_points: 15, away_points: 8, winner_side: 'home' },
     { set_no: 2, home_points: 15, away_points: 10, winner_side: 'home' }];
-  await api('POST', '/api/scoring/submit', {
+  await reviewedResult({base,token,identity},'POST','/api/scoring/submit', {
     submission_uid: `export-order-${match.match_id}`, match_id: match.match_id, base_version: 0,
     result_status: 'normal', sets, events: eventsFor(sets), device: 'UI 测试',
     plan_version: detail.match.plan_version,
@@ -111,7 +112,7 @@ try {
     individualParts.push(part.participation_id);
   }
   for (const [index, part] of individualParts.entries()) {
-    await api('POST', '/api/scoring/individual', {
+    await reviewedResult({base,token,identity},'POST','/api/scoring/individual', {
       submission_uid: `export-order-ind-${index}`, participation_id: part, base_version: 0,
       result_status: 'normal', result_value: 20 - index, error_count: 0, violation_count: 0,
       event_identity: identity,
@@ -141,11 +142,12 @@ try {
   await orderSelect.waitFor();
   assert.equal(await orderSelect.inputValue(), 'asc', '默认应为正序');
   await orderSelect.selectOption('desc');
-  const csvUrl = await requestWith(() => page.getByRole('button', { name: '导出本项目成绩 CSV', exact: true }).click());
+  /* 1.5.0 成绩页（独立页）导出按钮文案为“导出 CSV / 导出 XLSX”（web/js/views/results.js:57-79）。 */
+  const csvUrl = await requestWith(() => page.getByRole('button', { name: '导出 CSV', exact: true }).click());
   assert.equal(csvUrl.searchParams.get('order'), 'desc', `CSV 应带 order=desc：${csvUrl}`);
   /* REQ-011：打印改为稳定静态地址 /print.html?...，由打印页自己带令牌请求（主页面不再直接发导出请求）。 */
   const noticePopupWait = page.waitForEvent('popup');
-  await page.getByRole('button', { name: '打印个人赛成绩单', exact: true }).click();
+  await page.getByRole('button', { name: '打印成绩单', exact: true }).click();
   const noticePopup = await noticePopupWait;
   await noticePopup.getByRole('heading', { name: '个人赛成绩单', exact: true }).waitFor();
   const noticeUrl = new URL(noticePopup.url());
@@ -155,7 +157,14 @@ try {
   assert.equal(noticeUrl.searchParams.get('order'), 'desc', `打印页应带 order=desc：${noticeUrl}`);
   assert.ok(!noticeUrl.search.toLowerCase().includes('token'), `打印 URL 不得包含令牌：${noticeUrl}`);
   await noticePopup.close();
-  for (const extra of context.pages()) if (extra !== page) await extra.close();
+  /* 1.5.0 导出改为“前端带 Authorization 取回 blob 后本地下载”，Edge headless 触发下载后会额外
+     打开 edge://downloads-hub/ 内部页；对浏览器内部页调用 page.close() 会挂起（实测 >4 分钟）。
+     打印弹窗已显式关闭，这里仅清理 http(s) 残留页并跳过 edge:// 内部页，避免拖死整套回归。 */
+  for (const extra of context.pages()) {
+    if (extra === page) continue;
+    if (extra.url().startsWith('edge://')) continue;
+    await extra.close().catch(() => {});
+  }
   checks.push('成绩页默认正序、切倒序后 CSV 与打印页传 order=desc（打印页为稳定 /print.html 地址）');
 
   await page.goto(`${base}/#/results?category=${cats['male:team']}`);
@@ -163,15 +172,19 @@ try {
   assert.equal(await orderSelect.inputValue(), 'asc', '切换项目后应恢复正序');
   checks.push('切换项目后恢复默认正序');
 
-  await page.goto(`${base}/#/admin?category=${cats['male:team']}`);
+  /* 1.5.0 起管理页按页签组织，导出与打印位于 #/admin?tab=exports；导出表按“报表行”渲染，
+     项目成绩行的按钮为 XLSX/CSV，赛程行按钮为“整届 CSV/本项目 CSV”（web/js/views/admin.js:84-116、221-291）。 */
+  await page.goto(`${base}/#/admin?tab=exports&category=${cats['male:team']}`);
   await page.getByRole('heading', { name: /更正与导出/ }).waitFor();
   const adminOrder = page.locator('select[aria-label="导出排序"]');
   await adminOrder.waitFor();
   assert.equal(await adminOrder.inputValue(), 'asc');
   await adminOrder.selectOption('desc');
-  const xlsxUrl = await requestWith(() => page.getByRole('button', { name: '本项目成绩 XLSX', exact: true }).click());
+  const projectReportRow = page.getByRole('row').filter({ hasText: '项目成绩' });
+  const xlsxUrl = await requestWith(() => projectReportRow.getByRole('button', { name: 'XLSX', exact: true }).click());
   assert.equal(xlsxUrl.searchParams.get('order'), 'desc', `XLSX 应带 order=desc：${xlsxUrl}`);
-  const scheduleUrl = await requestWith(() => page.getByRole('button', { name: '全部赛程 CSV（整届）', exact: true }).click());
+  const scheduleReportRow = page.getByRole('row').filter({ hasText: '赛程' });
+  const scheduleUrl = await requestWith(() => scheduleReportRow.getByRole('button', { name: '整届 CSV', exact: true }).click());
   assert.equal(scheduleUrl.searchParams.get('order'), null, '赛程导出不应带 order');
   checks.push('更正与导出页下拉、XLSX 传参、赛程不带 order');
 

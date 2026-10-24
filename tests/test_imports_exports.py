@@ -1,5 +1,6 @@
 """1.1 迭代验收：真实 HTTP 导入事务、赛事身份、幂等与打印成绩完整性。"""
 from __future__ import annotations
+from helpers.reviewed_result import reviewed_result
 from helpers.historical_schedule import fixture_schedule
 
 import csv
@@ -58,7 +59,7 @@ class ImportExportsTest(unittest.TestCase):
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method)
         req.add_header("Content-Type", "application/json")
-        req.add_header("X-Client-Protocol", "2")
+        req.add_header("X-Client-Protocol", "3")
         chosen = self.token if token is None else token
         if chosen:
             req.add_header("Authorization", f"Bearer {chosen}")
@@ -244,11 +245,11 @@ class ImportExportsTest(unittest.TestCase):
         self.assertIn("未录入", notice)
         self.assertIn("待确认 2 人", notice)
         for part, value in zip(parts, (0, 5)):
-            self.req("POST", "/api/scoring/individual", {
+            reviewed_result(self, "POST", "/api/scoring/individual", {
                 "category_id": cat_id, "participation_id": part["id"], "result_value": value,
                 "error_count": 0, "violation_count": 0, "result_status": "normal", "base_version": 0,
                 "submission_uid": str(uuid.uuid4()), "event_identity": dict(self.event),
-            })
+            }, expected=200)
         self.req("POST", f"/api/categories/{cat_id}/individual-rankings/confirm", {})
         csv_text = self.req("GET", f"/api/exports/results.csv?category_id={cat_id}", raw=True)
         data = list(csv.DictReader(io.StringIO(csv_text)))

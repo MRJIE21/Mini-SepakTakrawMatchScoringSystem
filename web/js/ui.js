@@ -124,13 +124,17 @@ export function scrollableTable(container, { hint = '横向滚动查看完整数
   return wrap;
 }
 
+let fieldLabelSequence=0;
 export function field(label, control, opts = {}) {
   /* name 会写成控件的 data-field，供 formDialog 按字段定位错误（§9.1） */
   if (opts.name && control instanceof Element && !control.dataset.field) {
     control.dataset.field = opts.name;
   }
+  const labelId=`field-label-${++fieldLabelSequence}`;
+  if(control instanceof Element && control.matches('input,select,textarea')
+      && !control.hasAttribute('aria-label') && !control.hasAttribute('aria-labelledby')) control.setAttribute('aria-labelledby',labelId);
   const wrap = h('label.field',
-    h('span', label, opts.required ? h('span.req', { 'aria-hidden': 'true' }, ' *') : null),
+    h('span', {id:labelId}, label, opts.required ? h('span.req', { 'aria-hidden': 'true' }, ' *') : null),
     control);
   if (opts.hint) wrap.append(h('span.field-hint', opts.hint));
   /* 错误提示挂在字段容器内，紧邻控件（§9.1） */
@@ -156,7 +160,125 @@ export function setFieldError(fieldWrap, message) {
 }
 
 export function textInput(value, attrs = {}) {
-  return h('input', { type: 'text', value: value ?? '', ...attrs });
+  /* 默认关闭浏览器自动填充：页面同时存在密码框时，密码管理器可能把已保存的
+     用户名自动填进任意文本/搜索框，造成列表被意外筛选（“新建后看不到”）。
+     调用方仍可用 attrs.autocomplete 显式覆盖（如 new-password / current-password）。 */
+  return h('input', { type: 'text', value: value ?? '', autocomplete: 'off', ...attrs });
+}
+
+/* 浏览器密码管理器/自动填充可能在页面渲染后把已保存的用户名、密码写进输入框，
+   而用户并没有操作（Chrome/Edge 的凭据自动填充通常不触发 input 事件）。搜索框被
+   填入用户名时列表会被意外过滤（看起来像“新建的账号没更新/消失”）；新建账号表单
+   被填入旧凭据时点击创建会得到重复用户名错误。
+   这里持续清理“没有用户编辑痕迹”的非空值；一旦出现真实的点击、按键、粘贴或输入法
+   开始，就不再干预，正常筛选与输入不受影响。注意不能把 focus 当作编辑痕迹：自动
+   填充可能在页面加载后给输入框聚焦，若据此停止清理，值会留在框里并在点击时生效。 */
+export function clearUnintendedAutofill(inputs, onChange = null) {
+  const list = (Array.isArray(inputs) ? inputs : [inputs]).filter(Boolean);
+  if (!list.length) return () => {};
+  let userActed = false;
+  const mark = () => { userActed = true; };
+  const events = ['pointerdown', 'keydown', 'paste', 'compositionstart'];
+  const bound = [];
+  for (const input of list) {
+    const handler = () => mark();
+    for (const name of events) {
+      input.addEventListener(name, handler, { passive: true });
+      bound.push([input, name, handler]);
+    }
+    /* 真实输入（键盘、输入法、自动化注入文本）会触发 input；自动填充通常不触发，
+       或被标记为 insertReplacementText。前者视为用户在编辑，停止清理以保留输入。 */
+    const onInput = (event) => { if (!isAutofillInputEvent(event)) mark(); };
+    const onBeforeInput = (event) => { if (isAutofillInputEvent(event)) event.preventDefault(); };
+    input.addEventListener('input', onInput);
+    input.addEventListener('beforeinput', onBeforeInput);
+    bound.push([input, 'input', onInput], [input, 'beforeinput', onBeforeInput]);
+  }
+  const check = () => {
+    if (userActed) return;
+    const live = list.filter((input) => input.isConnected);
+    if (!live.length) { clearInterval(pollTimer); return; }
+    let changed = false;
+    for (const input of live) {
+      if (input.value) { input.value = ''; changed = true; }
+    }
+    if (changed && typeof onChange === 'function') onChange();
+  };
+  let timers = [];
+  // 自动填充既可能在渲染后立即发生，也可能晚于首屏计时，因此保留一个轻量轮询。
+  const pollTimer = setInterval(check, 500);
+  const schedule = () => {
+    timers.forEach((timer) => clearTimeout(timer));
+    timers = [0, 150, 400, 900, 1600, 2600, 4000, 6000].map((delay) => setTimeout(check, delay));
+  };
+  /* BFCache 返回页面时浏览器可能再次自动填充：恢复时重新核对。 */
+  const onShow = (event) => { if (event.persisted) schedule(); };
+  window.addEventListener('pageshow', onShow);
+  schedule();
+  return () => {
+    userActed = true;
+    clearInterval(pollTimer);
+    timers.forEach((timer) => clearTimeout(timer));
+    window.removeEventListener('pageshow', onShow);
+    bound.forEach(([input, name, handler]) => input.removeEventListener(name, handler));
+  };
+}
+
+/* 自动填充不保证提供特定 inputType；还要核对浏览器标记的真实填充状态。
+   分别查询标准与厂商伪类，避免旧浏览器不认识其中一个选择器时整组判断失效。 */
+export function isAutofillInputEvent(event) {
+  if (event?.inputType === 'insertReplacementText') return true;
+  for (const selector of [':autofill', ':-webkit-autofill']) {
+    try { if (event?.target?.matches?.(selector)) return true; }
+    catch { /* 当前浏览器不支持此伪类，继续检查另一个。 */ }
+  }
+  return false;
+}
+
+/* 列表筛选输入框：筛选状态以本对象为准，浏览器自动填充（静默赋值、
+   自动填充伪类或替换事件）既不会生效，也会被持续纠正回应用的筛选值。
+   真实输入（按键/粘贴/输入法、自动化工具注入文本）仍会触发 onChange。 */
+export function bindFilterInput(input, onChange = null, { initialValue = input.value ?? '' } = {}) {
+  let state = String(initialValue ?? '');
+  const sync = () => { if (input.value !== state) input.value = state; };
+  // 先同步调用方的筛选初值，再接收事件；不能把绑定前的凭据填充收编为状态。
+  sync();
+  const accept = () => {
+    state = input.value;
+    if (typeof onChange === 'function') onChange(state);
+  };
+  const onInput = (event) => {
+    if (isAutofillInputEvent(event)) { sync(); return; }
+    accept();
+  };
+  const onBeforeInput = (event) => {
+    if (isAutofillInputEvent(event)) event.preventDefault();
+  };
+  const onAutofillAnimation = (event) => {
+    if (event?.animationName === 'stss-autofill-detect') sync();
+  };
+  input.addEventListener('input', onInput);
+  input.addEventListener('beforeinput', onBeforeInput);
+  input.addEventListener('animationstart', onAutofillAnimation);
+  const timer = setInterval(() => {
+    if (!input.isConnected) { clearInterval(timer); return; }
+    sync();
+  }, 500);
+  const onShow = (event) => { if (event.persisted) sync(); };
+  window.addEventListener('pageshow', onShow);
+  return {
+    input,
+    value: () => state,
+    set(value) { state = String(value ?? ''); sync(); },
+    sync,
+    destroy() {
+      clearInterval(timer);
+      window.removeEventListener('pageshow', onShow);
+      input.removeEventListener('input', onInput);
+      input.removeEventListener('beforeinput', onBeforeInput);
+      input.removeEventListener('animationstart', onAutofillAnimation);
+    },
+  };
 }
 
 export function numberInput(value, attrs = {}) {
@@ -200,13 +322,13 @@ export function exportOrderControl(onChange, value = 'asc') {
     'aria-label': '导出排序',
     onchange: (e) => onChange(e.target.value),
   });
-  return h('label.small.row.tight', { style: 'align-items:center' },
+  return h('label.small.row.tight', null,
     h('span', '排序'), control);
 }
 
 export function checkbox(label, checked, attrs = {}) {
   const input = h('input', { type: 'checkbox', checked, ...attrs });
-  const wrap = h('label.row.tight', { style: 'align-items:center' }, input, h('span', label));
+  const wrap = h('label.row.tight', null, input, h('span', label));
   wrap.input = input;
   return wrap;
 }
@@ -532,7 +654,7 @@ export function modal({ title, body, buttons = [], width, onClose, dismissible =
 export function confirmDialog(title, text, onOk, okLabel = '确认') {
   return modal({
     title,
-    body: h('div', { style: 'white-space:pre-line' }, text),
+    body: h('div.pre-line', text),
     buttons: [{ label: okLabel, class: 'btn-primary', onClick: onOk }],
   });
 }
@@ -545,7 +667,7 @@ export function confirmAsync(title, text, okLabel = '确认', { danger = false, 
     const decide = (v) => { if (!decided) { decided = true; resolve(v); } };
     modal({
       title,
-      body: h('div', { style: 'white-space:pre-line' }, text),
+      body: h('div.pre-line', text),
       buttons: [{ label: okLabel, class: danger ? 'btn-danger' : 'btn-primary', onClick: () => decide(true) }],
       initialFocus,
       onClose: () => decide(false),
@@ -560,7 +682,7 @@ export function promptDialog({ title, label, value = '', type = 'text', required
     let settled = false;
     const control = multiline ? textarea(value)
       : type === 'integer' ? integerInput(value, { min, max })
-        : h('input', { type, value: value ?? '' });
+        : h('input', { type, value: value ?? '', ...(type === 'password' ? { autocomplete: 'new-password' } : {}) });
     control.dataset.field = 'value';
     const dlg = modal({
       title,
@@ -770,6 +892,27 @@ export function matchStatusBadge(match) {
   const extra = match.result_status && match.result_status !== 'normal'
     ? `（${match.result_status_name || match.result_status}）` : '';
   return statusBadge(text + extra, kind);
+}
+
+/* 页面标题区（交付物3 L-01）：面包屑 + 唯一 H1 + 状态徽标 + 主操作。
+   页面只传数据，不再各自拼标题结构，避免同一系统出现三种页头。 */
+export function pageHeader({ crumbs = [], title = '', badges = [], meta = [], actions = [] } = {}) {
+  const crumbNodes = [];
+  crumbs.forEach((item, index) => {
+    if (index) crumbNodes.push(h('span.page-crumb-sep', { 'aria-hidden': 'true' }, '›'));
+    const last = index === crumbs.length - 1;
+    crumbNodes.push(item.href && !last
+      ? h('a.page-crumb', { href: item.href }, item.label)
+      : h('span.page-crumb', { class: last ? 'current' : '' }, item.label));
+  });
+  return h('header.page-head',
+    crumbNodes.length ? h('nav.page-crumbs', { 'aria-label': '当前位置' }, crumbNodes) : null,
+    h('div.page-head-row',
+      h('div.page-head-main',
+        h('h1.page-title', title),
+        badges.length ? h('div.page-badges', ...badges) : null),
+      actions.length ? h('div.page-actions', ...actions) : null),
+    meta.length ? h('div.page-meta', ...meta) : null);
 }
 
 export function need(condition, message) {

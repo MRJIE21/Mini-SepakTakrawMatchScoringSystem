@@ -1,3 +1,4 @@
+import {reviewedResult,prepareReviewedFixture,approveCandidate} from './helpers/reviewed_result.mjs';
 import { scheduleFixture } from './helpers/schedule_fixture.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
@@ -102,7 +103,7 @@ try {
   const matches=(await api('GET','/api/matches?category_id='+team.id)).matches;
   for(const match of matches.filter(m=>m.status==='ready')) {
     const detail=(await api('GET','/api/matches/'+match.id)).match;
-    await api('POST','/api/scoring/submit',{
+    await reviewedResult({base,token,identity},'POST','/api/scoring/submit',{
       event_identity:identity,submission_uid:'refresh-test-'+match.id,match_id:match.id,base_version:0,
       plan_version:detail.plan_version,home_participation:detail.home.participation_id,away_participation:detail.away.participation_id,
       result_status:'away_forfeit',sets:[],events:[],

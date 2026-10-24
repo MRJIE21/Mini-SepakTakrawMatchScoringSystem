@@ -15,11 +15,13 @@ const CATALOG = read('web/js/views/catalog.js');
 const DASHBOARD = read('web/js/views/dashboard.js');
 const UI = read('web/js/ui.js');
 
-test('侧栏不再重复出现学校报名，学校报名统一从工作台报名名单进入', () => {
-  assert.match(MAIN, /\{ group: '比赛管理', items: \['workspace'\] \}/,
-    '比赛管理组应只保留项目工作台');
-  assert.doesNotMatch(MAIN, /items: \[[^\]]*'schoolRegistration'/,
-    '侧栏不能再用独立“学校报名”入口');
+test('侧栏学校报名是工作台快捷入口，不再作为独立页面入口', () => {
+  assert.match(MAIN, /\{ view: 'schoolRegistration', label: '学校报名', href: '#\/workspace\?tab=registration'/,
+    '侧栏学校报名必须是工作台报名页签的快捷入口');
+  assert.match(MAIN, /\{ group: '成绩', items: \[[\s\S]*\{ view: 'resultReview' \}/,
+    '成绩组应包含成绩复核入口');
+  assert.doesNotMatch(MAIN, /\{ group: '比赛管理'/,
+    '旧“比赛管理”分组已并入项目与赛程/成绩');
 });
 
 test('旧入口与待办链接都落到工作台报名名单，不直接打开独立页面', () => {
@@ -62,7 +64,7 @@ test('取消离开后地址回到真正渲染的那一页', () => {
     '取消离开必须把 hash 还原到已渲染页面');
 });
 
-test('工作台正文复用原三个内部页签，不再自建一套视图', () => {
-  assert.match(SCHOOL, /\['people', '人员名单'\], \['projects', '项目报名'\], \['review', '核对与提交'\]/,
-    '学校详情必须保留原三个页签');
+test('工作台正文复用学校统一编辑与整批核对视图', () => {
+  assert.match(SCHOOL, /\['edit', '统一编辑'\], \['review', '整批核对'\]/,
+    '学校详情应有统一编辑与整批核对页签');
 });

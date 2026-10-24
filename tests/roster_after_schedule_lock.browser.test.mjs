@@ -89,7 +89,8 @@ try {
   await page.goto(`${base}/#/schoolRegistration?event=${identity.event_id}&school=${school.id}`);
   await page.getByRole('heading', { name: school.name, exact: true }).waitFor();
   assert.deepEqual(errors, [], 'registration rendering errors');
-  assert.equal(await page.locator('[data-category]').count(), group.categories.length, await page.locator('body').innerText());
+  assert.equal(await page.locator('[data-category]').count(), 1, await page.locator('body').innerText());
+  assert.equal(await page.locator('.school-registration-catalog button').count(),group.categories.length);
   const card = () => page.locator(`[data-category="${category.id}"]`);
   const submit = () => page.locator('[data-action="school-preview"]');
   const people = async () => (await api('GET', `/api/schools/${school.id}/athletes`)).athletes;

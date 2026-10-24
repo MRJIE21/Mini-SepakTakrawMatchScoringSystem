@@ -1,3 +1,4 @@
+import {registrationEdit,registrationProject} from './helpers/registration_ui.mjs';
 /* 独立测试库；工具路径通过 STSS_PLAYWRIGHT_MODULE / STSS_PYTHON / STSS_BROWSER_PATH 指定。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -87,7 +88,6 @@ try {
   await page.goto(url);
   await page.getByRole('heading', { name: school.name, exact: true }).waitFor();
   const submit = () => page.locator('[data-action="school-preview"]');
-  const project = (p, cat) => p.locator(`[data-category="${cat.id}"]`);
   const openImport = async () => {
     await page.getByRole('button', { name: '粘贴 / 导入学校报名表', exact: true }).click();
     return page.getByRole('dialog', { name: '粘贴 / 导入学校报名表', exact: true });
@@ -111,7 +111,7 @@ try {
   await page.waitForFunction(() => ![...document.querySelectorAll('.modal-foot button')].find(b => b.textContent === '应用到报名表')?.disabled);
   await page.screenshot({ path: path.join(artifacts, 'school-table-preview-desktop.png'), fullPage: true });
   await dialog.getByRole('button', { name: '应用到报名表', exact: true }).click();
-  assert.ok((await project(page, team).textContent()).includes('丙'));
+  assert.ok((await (await registrationProject(page,team.id)).textContent()).includes('丙'));
   assert.equal((await api('GET', `/api/categories/${individual.id}/participations`)).participations.length, 0);
   assert.equal((await api('GET', `/api/schools/${school.id}/athletes`)).athletes.length, 2);
   // Unsaved edits stay in the current form and never appear on another device.
@@ -120,7 +120,7 @@ try {
   page2.on('pageerror', e => errors.push(e.message));
   await page2.goto(url);
   await page2.getByRole('heading', { name: school.name, exact: true }).waitFor();
-  assert.ok(!(await project(page2, team).textContent()).includes('丙'));
+  assert.ok(!(await (await registrationProject(page2,team.id)).textContent()).includes('丙'));
   assert.ok((await page2.locator('.school-registration-summary').textContent()).includes('后台已保存：1 项报名'));
   const personB = () => page.locator(`[data-person="a:${b.athlete_id}"]`);
   // Lost commit responses replay the original packet after refresh.
@@ -146,7 +146,7 @@ try {
   await page.waitForFunction(() => document.querySelector('.modal textarea')?.value.includes('上传备注'));
   await dialog.getByRole('button', { name: '核对表格', exact: true }).click();
   await dialog.getByRole('button', { name: '应用到报名表', exact: true }).click();
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+  await registrationEdit(page);
   assert.equal(await personB().getByLabel('区分信息', { exact: true }).inputValue(), '上传备注,二班');
   assert.equal((await api('GET', `/api/schools/${school.id}/athletes`)).athletes.find(p => p.id === b.athlete_id).note, '一班');
   dialog = await openImport();

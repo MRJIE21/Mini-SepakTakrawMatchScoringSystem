@@ -9,8 +9,13 @@ from ..http_server import route
 @route("POST", r"/api/login", public=True, scope="registry", transaction=False)
 def login(ctx):
     body = ctx.body or {}
-    username = (body.get("username") or "").strip()
-    password = body.get("password") or ""
+    raw_username = body.get("username")
+    raw_password = body.get("password")
+    # 字段必须是文本：数字/对象等类型若直接 .strip()/encode() 会抛异常并变成 500。
+    if not isinstance(raw_username, str) or not isinstance(raw_password, str):
+        raise bad_request("用户名和密码必须为文本")
+    username = raw_username.strip()
+    password = raw_password
     if not username or not password:
         raise bad_request("请填写用户名和密码")
     ip = ctx.remote_addr or ""

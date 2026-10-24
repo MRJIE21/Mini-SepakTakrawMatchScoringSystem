@@ -1,3 +1,4 @@
+import {liveFixture} from './helpers/reviewed_result.mjs';
 /* P2-A REQ-003/004/005 真实浏览器检查：
    - 预览角标：只在 ?preview=1 显示、带“预览模式 · 已推送 vN”、dirty 时提示未推送修改，
      版本以服务端 config_revision 为准；正式 /display.html 不显示角标、不预留预览空间；
@@ -121,7 +122,7 @@ try {
     visible_slots: [0],
   });
   const revision = published.config.revision;
-  await api('/api/display/live', {
+  await liveFixture(base, {
     method: 'POST', headers: recorderHeaders,
     body: JSON.stringify({
       match_id: 1, event_seq: 1, status: 'live', current_set: 2,

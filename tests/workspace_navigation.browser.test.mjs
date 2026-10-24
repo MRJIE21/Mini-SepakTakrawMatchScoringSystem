@@ -55,38 +55,69 @@ try {
   const url = (tab = '', extra = '', cat = category.id) => `${base}/#/workspace?event=${event.event_id}&group=${group.id}&category=${cat}${tab ? '&tab=' + tab : ''}${extra}`;
   const nav = () => page.getByRole('navigation', { name: '项目工作台导航', exact: true });
   const active = name => nav().locator('[aria-current="page"]').filter({ hasText: name }).waitFor();
-  await page.goto(url()); await nav().waitFor(); await active('报名');
-  assert.deepEqual(await nav().getByRole('link').allTextContents(), ['概况', '报名', '分组', '赛程', '比赛', '成绩']);
+  await page.goto(url()); await nav().waitFor(); await active('概况');
+  assert.deepEqual(await nav().getByRole('link').allTextContents(), ['概况', '报名', '赛程', '比赛', '成绩']);
   assert.equal(await page.locator('.workspace-schedule-nav').count(), 0);
-  await nav().getByRole('link', { name: '概况', exact: true }).click(); await page.locator('.project-step').nth(4).waitFor();
+  await page.locator('.project-step').nth(4).waitFor();
   assert.deepEqual(await page.locator('.project-step-heading strong').allTextContents(), ['报名', '分组', '赛程', '比赛', '成绩']);
   assert.equal(await page.getByRole('button', { name: '查看赛程', exact: true }).count(), 1);
   const snapshot = await api('GET', `/api/categories/${category.id}/workspace`); assert.equal(snapshot.primary_action.tab, 'groups');
   await page.locator('.workspace-next').getByRole('button', { name: '完成学校分组', exact: true }).click();
-  await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor(); await active('分组');
+  await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor(); await active('赛程');
   await nav().getByRole('link', { name: '成绩', exact: true }).click();
   await page.getByRole('button', { name: '前往分组', exact: true }).click();
-  await active('分组'); await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
+  await active('赛程'); await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: '设置后续赛程', exact: true }).count(), 0);
   await page.getByLabel('小组数量', { exact: true }).fill('2');
   await page.getByRole('button', { name: '开始小组抽签', exact: true }).click();
   await page.getByRole('button', { name: '一键完成抽签', exact: true }).click();
   await page.getByRole('button', { name: '确认抽签分组', exact: true }).click();
   await page.getByRole('dialog', { name: '确认抽签分组', exact: true }).getByRole('button', { name: '确认分组', exact: true }).click();
-  await page.getByRole('link', { name: '进入赛程', exact: true }).waitFor();
+  await page.getByRole('link', { name: '进入赛程', exact: true }).first().waitFor();
   assert.equal(await page.getByRole('button', { name: '建立小组赛阶段', exact: true }).count(), 0);
   assert.equal(await page.locator('.draw-group li:not(.draw-empty)').count(), 8);
   const capture = async name => {
     for (const width of [320,390,768,1365]) {
       await page.setViewportSize({ width, height: 1000 });
-      const dims = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth,
-        outside: [...document.querySelectorAll('.ctx-tabs a')].map(e => e.getBoundingClientRect()).filter(r => r.left < -1 || r.right > innerWidth + 1).length }));
-      assert.ok(dims.scroll <= width + 1, JSON.stringify(dims)); assert.equal(dims.outside, 0); geometry.push({ name, ...dims });
+      /* 五个页签在窄屏由 .ctx-tabs 自身横向滚动承载（app.css overflow-x:auto），
+         不再要求全部页签同时落在视口内。等价可观察行为：页面本身不横向溢出、导航容器不越界、
+         被卷起的页签可经导航自身滚动到达（无裁掉/遮挡）。 */
+      const dims = await page.evaluate(() => {
+        const nav = document.querySelector('.ctx-tabs');
+        const navRect = nav?.getBoundingClientRect();
+        const links = [...document.querySelectorAll('.ctx-tabs a')].map(e => e.getBoundingClientRect());
+        return { width: innerWidth, scroll: document.documentElement.scrollWidth,
+          nav: navRect ? { left: navRect.left, right: navRect.right, client: nav.clientWidth,
+            scroll: nav.scrollWidth, overflowX: getComputedStyle(nav).overflowX } : null,
+          outside: links.filter(r => r.left < -1 || r.right > innerWidth + 1).length };
+      });
+      assert.ok(dims.scroll <= width + 1, JSON.stringify(dims));
+      assert.ok(dims.nav, `缺少项目工作台导航：${JSON.stringify(dims)}`);
+      assert.ok(dims.nav.left >= -1 && dims.nav.right <= width + 1, `导航容器不得溢出视口：${JSON.stringify(dims)}`);
+      if (dims.outside > 0) {
+        assert.ok(['auto','scroll'].includes(dims.nav.overflowX),
+          `页签被卷起时导航自身应可横向滚动：${JSON.stringify(dims)}`);
+        assert.ok(dims.nav.scroll > dims.nav.client,
+          `导航滚动内容应大于可视宽度：${JSON.stringify(dims)}`);
+        const unreachable = await page.evaluate(() => {
+          const nav = document.querySelector('.ctx-tabs');
+          const navRect = nav.getBoundingClientRect();
+          /* 逐个页签滚入导航可视区后判定：任一页签无法被滚入即视为被裁掉/遮挡。 */
+          return [...nav.querySelectorAll('a')].filter((a) => {
+            a.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+            const r = a.getBoundingClientRect();
+            return r.left < navRect.left - 1 || r.right > navRect.right + 1;
+          }).length;
+        });
+        assert.equal(unreachable, 0, `导航内存在无法滚动到达的页签：${JSON.stringify(dims)}`);
+        await page.evaluate(() => { document.querySelector('.ctx-tabs').scrollLeft = 0; });
+      }
+      geometry.push({ name, ...dims });
       await page.screenshot({ path: path.join(artifacts, `six-tabs-${name}-${width}.png`), fullPage: true });
     }
   };
   await capture('groups');
-  await page.getByRole('link', { name: '进入赛程', exact: true }).click(); await active('赛程');
+  await page.getByRole('link', { name: '进入赛程', exact: true }).first().click(); await active('赛程');
   await page.getByRole('button', { name: '建立小组赛阶段', exact: true }).click();
   const preview = page.getByRole('dialog', { name: '核对阶段 · 小组赛', exact: true }); await preview.waitFor();
   await preview.getByRole('button', { name: '确认正式赛程', exact: true }).click();
@@ -96,15 +127,15 @@ try {
   assert.equal(stage.pools.flatMap(p => p.members).length, 8); assert.equal(schedule.stages.length, 1);
   assert.equal((await api('GET', `/api/categories/${category.id}/plan`)).plan.stages[0].matches.length, 0);
   assert.equal(await page.getByRole('heading', { name: '学校小组抽签', exact: true }).count(), 0);
-  await capture('schedule'); pass('六菜单同级、默认报名、概况独立步骤；实际抽签在分组完成，正式阶段只在赛程建立且没有自动填赛');
+  await capture('schedule'); pass('五菜单按任务顺序、默认概况、分组在赛程内；正式阶段只在赛程建立且没有自动填赛');
   await page.getByLabel('排列方式', { exact: false }).selectOption('schedule');
   await page.waitForFunction(() => location.hash.includes('sort=schedule')); const position = page.url(); await page.reload();
   await page.getByLabel('排列方式', { exact: false }).waitFor(); assert.equal(page.url(), position);
   assert.equal(await page.getByLabel('排列方式', { exact: false }).inputValue(), 'schedule');
-  await page.goto(url('schedule', '&view=groups')); await active('分组'); await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
-  assert.ok(page.url().includes('tab=groups')); assert.ok(!page.url().includes('view='));
+  await page.goto(url('schedule', '&view=groups')); await active('赛程'); await page.getByRole('heading', { name: '学校小组抽签', exact: true }).waitFor();
+  assert.ok(page.url().includes('tab=schedule')); assert.ok(page.url().includes('view=groups'));
   await nav().getByRole('link', { name: '赛程', exact: true }).click(); await active('赛程');
-  await page.goBack(); await active('分组'); await page.goForward(); await active('赛程');
+  await page.goBack(); await active('赛程'); await page.goForward(); await active('赛程');
   await page.goto(url('schedule', `&view=fixtures&stage=${stage.id}&sort=schedule`));
   await page.getByLabel('排列方式', { exact: false }).waitFor(); assert.ok(!page.url().includes('view=')); assert.ok(page.url().includes(`stage=${stage.id}`));
   pass('旧分组和赛程地址分别规范定位，刷新、前进后退、阶段与排列保持');
@@ -120,7 +151,9 @@ try {
   const held = new Promise(r => { release = r; }), ready = new Promise(r => { arrived = r; }), done = new Promise(r => { delivered = r; });
   const pattern = `**/api/categories/${category.id}/group-draw`;
   const gate = async route => { const response = await route.fetch(); arrived(); await held; await route.fulfill({ response }).catch(() => {}); delivered(); };
-  await page.route(pattern, gate); await nav().getByRole('link', { name: '分组', exact: true }).click(); await ready;
+  await page.route(pattern, gate);
+  await nav().getByRole('link', { name: '赛程', exact: true }).click();
+  await page.getByRole('link', { name: '分组与抽签', exact: true }).click(); await ready;
   await nav().getByRole('link', { name: '赛程', exact: true }).click(); await active('赛程'); release(); await done;
   await page.getByRole('heading', { name: '比赛赛程', exact: true }).waitFor();
   assert.equal(await page.getByRole('heading', { name: '学校小组抽签', exact: true }).count(), 0); await page.unroute(pattern, gate);
@@ -129,13 +162,13 @@ try {
     await api('POST', '/api/users', { username: `six-${role}`, display_name: role, password: 'SixRole123', role, event_ids: [event.event_id] });
     const login = await api('POST', '/api/login', { username: `six-${role}`, password: 'SixRole123' });
     const other = await makePage(login.token); await other.goto(url('groups')); const n = other.getByRole('navigation', { name: '项目工作台导航', exact: true }); await n.waitFor();
-    assert.deepEqual(await n.getByRole('link').allTextContents(), role === 'organizer' ? ['概况','报名','分组','赛程','比赛','成绩'] : role === 'recorder' ? ['比赛'] : ['赛程','成绩']);
+    assert.deepEqual(await n.getByRole('link').allTextContents(), role === 'organizer' ? ['概况','报名','赛程','比赛','成绩'] : role === 'recorder' ? ['比赛'] : ['赛程','成绩']);
     if (role !== 'organizer') assert.equal(await other.getByRole('heading', { name: '学校小组抽签', exact: true }).count(), 0);
     await other.context().close();
   }
   await page.goto(url('entry', '', individual.id)); await nav().waitFor();
-  assert.deepEqual(await nav().getByRole('link').allTextContents(), ['概况','报名','比赛','成绩']); await active('比赛');
-  pass('管理者六菜单，记录员/查看者保持权限，个人赛只显示适用功能');
+  assert.deepEqual(await nav().getByRole('link').allTextContents(), ['概况','报名','成绩录入','成绩']); await active('成绩录入');
+  pass('管理者五菜单，记录员/查看者保持权限，个人赛只显示适用功能');
   await page.goto(`${base}/#/dashboard`); await page.getByRole('button', { name: '进入工作台', exact: true }).first().waitFor();
   const dashboard = await api('GET', `/api/events/${event.event_id}/dashboard`);
   assert.equal(dashboard.groups[0].categories.find(c => c.id === category.id).draw_status, 'confirmed');

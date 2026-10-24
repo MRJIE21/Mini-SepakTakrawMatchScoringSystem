@@ -27,6 +27,8 @@ def connect(db_path: Path | str | None = None, *, busy_ms: int | None = None,
     source = Path(path).resolve().as_uri() + "?mode=rw" if existing else path
     conn = sqlite3.connect(source, uri=existing, timeout=wait / 1000, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    # A v2 writer has no such function: protected result writes then fail closed.
+    conn.create_function('review_writer_version', 0, lambda: 3, deterministic=True)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         if path != ":memory:":
@@ -262,6 +264,8 @@ def init_db(db_path: Path | str | None = None) -> None:
         _migrate_epoch_times(conn)
         _migrate_user_roles(conn)
         _migrate_group_draw_method(conn)
+        from . import result_candidates
+        result_candidates.initialize(conn)
     finally:
         conn.close()
 

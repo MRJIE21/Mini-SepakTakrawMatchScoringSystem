@@ -1,3 +1,4 @@
+from helpers.reviewed_result import reviewed_result
 from helpers.historical_schedule import fixture_schedule
 """Real HTTP tests of school projections, concurrency, rollback and replay."""
 from copy import deepcopy
@@ -262,9 +263,9 @@ class SchoolRegistrationTest(unittest.TestCase):
 
     def test_finished_match_freezes_roster_even_without_recording_claim(self):
         self.lock_team_schedule()
-        self.req('POST', f"/api/matches/{self.match['id']}/cancel", {
+        reviewed_result(self, 'POST', f"/api/matches/{self.match['id']}/cancel", {
             'request_uid': str(uuid.uuid4()), 'base_version': self.match['result_version'],
-            'event_identity': dict(self.event), 'result_status': 'cancelled', 'reason': '测试终止'})
+            'event_identity': dict(self.event), 'result_status': 'cancelled', 'reason': '测试终止'}, expected=200)
         self.assertEqual(self.req('PUT', f"/api/teams/{self.team['id']}", {'members': [{'athlete_id': self.b}]}, expected=409)['code'], 'roster_in_use')
         self.req('POST', f'/api/schools/{self.sid}/athletes', {'name': '赛后新人员', 'gender': 'female'})
 

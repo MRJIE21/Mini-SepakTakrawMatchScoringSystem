@@ -1,3 +1,4 @@
+import {liveFixture} from './helpers/reviewed_result.mjs';
 /* 真实浏览器检查：大屏状态、布局切换、公告、配对。 */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -59,7 +60,7 @@ const browser = await chromium.launch({ headless: true,
 try {
   await publish({ layout: 1, mode: 'score', slots: [{ match_id: 1, label: '1 号场' }],
     visible_slots: [0] });
-  await api('/api/display/live', {
+  await liveFixture(base, {
     method: 'POST', headers: recorderHeaders,
     body: JSON.stringify({
       match_id: 1, event_seq: 1, status: 'live', current_set: 1,

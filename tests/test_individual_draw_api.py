@@ -9,6 +9,7 @@
 * 原子性、并发、名单与开赛保护、删除报名冲突、旧库升级等断言全部保留；
 * 出场顺序与成绩名次/学校积分仍然分离。
 """
+from helpers.reviewed_result import reviewed_result
 import json
 import sqlite3
 import tempfile
@@ -216,7 +217,7 @@ class IndividualDrawApiTest(unittest.TestCase):
         other = self.pids[1]
         self.err('POST', f'/api/recording/individual/{other}/claim', {}, expect=409,
                  code='individual_draw_stale')
-        self.err('POST', '/api/scoring/individual', self.score(other), expect=409,
+        reviewed_result(self, 'POST', '/api/scoring/individual', self.score(other), expected=409,
                  code='individual_draw_stale')
 
     def test_deleted_and_new_enrollment_preserve_history_and_require_redraw(self):
@@ -305,7 +306,7 @@ class IndividualDrawApiTest(unittest.TestCase):
                  expect=409, code='individual_draw_locked')
         self.assertEqual(self.ok('GET', self.path)['draw']['status'], 'none')
         self.assertIsNone(self.ok('GET', self.session_path)['session'])
-        self.ok('POST', '/api/scoring/individual', self.score(pid))
+        reviewed_result(self, 'POST', '/api/scoring/individual', self.score(pid), expected=200)
         self.err('POST', self.session_path + '/start',
                  {'event_identity': self.event_identity, 'request_uid': str(uuid.uuid4())},
                  expect=409, code='individual_draw_locked')
@@ -320,14 +321,14 @@ class IndividualDrawApiTest(unittest.TestCase):
         draw = self.ok('GET', self.path)['draw']
         self.assertFalse(draw['can_draw'])
         self.assertIn('领取', draw['block_reason'])
-        self.ok('POST', '/api/scoring/individual', self.score(pid))
+        reviewed_result(self, 'POST', '/api/scoring/individual', self.score(pid), expected=200)
         draw = self.ok('GET', self.path)['draw']
         self.assertFalse(draw['can_draw'])
         self.assertIn('成绩', draw['block_reason'])
 
     def test_old_project_no_draw_can_record_and_pending_result_locks(self):
         pid = self.pids[0]
-        self.ok('POST', '/api/scoring/individual', self.score(pid, result_status='pending'))
+        reviewed_result(self, 'POST', '/api/scoring/individual', self.score(pid, result_status='pending'), expected=200)
         self.assertFalse(self.ok('GET', self.path)['draw']['can_draw'])
 
     def test_saved_start_order_does_not_decide_result_rank_or_school_points(self):
@@ -337,7 +338,7 @@ class IndividualDrawApiTest(unittest.TestCase):
         self.assertEqual([r['id'] for r in saved['entries']], order)
         self.assertEqual(sorted(order), sorted(self.pids))
         for pid, value in zip(self.pids, [32, 22, 12]):
-            self.ok('POST', '/api/scoring/individual', self.score(pid, result_value=value))
+            reviewed_result(self, 'POST', '/api/scoring/individual', self.score(pid, result_value=value), expected=200)
         self.ok('POST', f'/api/categories/{self.cid}/individual-rankings/confirm')
         ranks = {r['participation_id']: r['rank_no']
                  for r in self.ok('GET', f'/api/categories/{self.cid}/placements')['placements']}

@@ -106,3 +106,23 @@ test('completion in an old page cannot retire the new account packet', () => {
   assert.equal(readPendingRequest('scope-test', oldScope), null);
   assert.deepEqual(readPendingRequest('scope-test'), current);
 });
+
+test('completed v2 packets are pruned so pending storage does not grow forever', () => {
+  const storage = new Map();
+  globalThis.localStorage = { get length() { return storage.size; }, key: i => [...storage.keys()][i],
+    getItem: k => storage.get(k), setItem: (k,v) => storage.set(k,v), removeItem: k => storage.delete(k) };
+  setPendingRequestScope({ username: 'admin' }, base.event_identity);
+  assert.equal(writePendingRequest('prune-test', { request_uid: 'uid-1', preview_hash: 'p1' }), true);
+  assert.equal(removePendingRequest('prune-test'), true);
+  const keys = () => [...storage.keys()];
+  assert.equal(keys().some((key) => key.includes(':packet:uid-1')), false, '完成的 packet 必须删除');
+  assert.equal(keys().some((key) => key.includes(':done:uid-1')), false, 'done 墓碑应与 packet 成对删除');
+  // 上一版本可能只写了 done 墓碑、packet 长留：写入新请求时应清理同表单的历史完成对。
+  const frozen = 'stss_pending:admin:host-1:event-1:prune-test';
+  storage.set(`${frozen}:packet:old-uid`, JSON.stringify({ request_uid: 'old-uid' }));
+  storage.set(`${frozen}:done:old-uid`, '1');
+  assert.equal(writePendingRequest('prune-test', { request_uid: 'uid-2' }), true);
+  assert.equal(storage.has(`${frozen}:packet:old-uid`), false);
+  assert.equal(storage.has(`${frozen}:done:old-uid`), false);
+  assert.deepEqual(readPendingRequest('prune-test'), { request_uid: 'uid-2' });
+});

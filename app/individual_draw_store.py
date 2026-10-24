@@ -32,6 +32,9 @@ def roster(conn, cid):
 
 
 def locked_reason(conn, cid):
+    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(
+            conn,'SELECT id FROM result_candidates WHERE category_id=? LIMIT 1',(cid,)):
+        return '项目已有结果候选或成绩，不能重新抽签'
     if db.q1(conn, '''SELECT p.id FROM participations p WHERE p.category_id=? AND
         (EXISTS(SELECT 1 FROM settings s WHERE s.k='recording:individual:' || p.id)
         OR EXISTS(SELECT 1 FROM individual_results r WHERE r.participation_id=p.id)

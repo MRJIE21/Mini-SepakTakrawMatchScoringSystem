@@ -1,4 +1,5 @@
 """取消/未完成场次的旧局分不得在记录表与成绩导出中呈现为有效比分。"""
+from helpers.reviewed_result import reviewed_result
 import csv
 import io
 import tempfile
@@ -37,7 +38,7 @@ class CancelArchiveTest(unittest.TestCase):
             'round_label': '补赛',
         })['match_id']
         self.play(self.match_id, [(15, 10), (15, 12)])
-        self.ok('POST', f'/api/matches/{self.match_id}/cancel', {'reason': '现场取消'})
+        reviewed_result(self, 'POST', f'/api/matches/{self.match_id}/cancel', {'reason': '现场取消'}, expected=200)
 
     def raw(self, path):
         status, payload = self.request('GET', path, expect=200, raw=True)

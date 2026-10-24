@@ -47,6 +47,9 @@ def _roster(conn, cid):
 
 def _locked_reason(conn, cid):
     """开赛保护：已领取记录、已有成绩或名次时不得继续抽取或确认。"""
+    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(
+            conn,'SELECT id FROM result_candidates WHERE category_id=? LIMIT 1',(cid,)):
+        return ORDERING_LOCK
     if db.q1(conn, '''SELECT p.id FROM participations p WHERE p.category_id=? AND
         (EXISTS(SELECT 1 FROM settings s WHERE s.k='recording:individual:' || p.id)
         OR EXISTS(SELECT 1 FROM individual_results r WHERE r.participation_id=p.id)

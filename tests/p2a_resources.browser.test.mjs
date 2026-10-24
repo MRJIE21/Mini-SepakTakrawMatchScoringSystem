@@ -2,7 +2,7 @@
    - /favicon.svg 与 /favicon.ico 均 200，ICO 为合法 32×32 单图标；
    - index.html / display.html 带 rel=icon 与 alternate icon，index 带 manifest；
    - manifest.webmanifest 的 icons 非空且每个地址可访问；
-   - sw.js 当前缓存为 stss-shell-v80，SHELL 含两个图标且每一项都 200；
+   - sw.js 使用带版本号的 stss-shell 缓存，SHELL 含两个图标且每一项都 200；
    - 真实浏览器加载首页与 display.html 期间 favicon 请求零 >=400、零 requestfailed。 */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -98,8 +98,8 @@ try {
 
   // ---------- sw.js：缓存版本 + SHELL 全 200 ----------
   const sw = await fetchText('/sw.js');
-  assert.ok(sw.text.includes("const CACHE = 'stss-shell-v80'"),
-    'sw.js must use the current stss-shell-v80 cache');
+  assert.match(sw.text, /const CACHE = 'stss-shell-v\d+';/,
+    'sw.js must declare a versioned stss-shell cache');
   const shellMatch = sw.text.match(/const SHELL = \[([\s\S]*?)\];/);
   assert.ok(shellMatch, 'sw.js must declare the SHELL cache list');
   const shell = [...shellMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);

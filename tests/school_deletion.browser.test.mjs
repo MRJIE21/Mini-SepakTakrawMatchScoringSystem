@@ -1,3 +1,4 @@
+import {registrationEdit,registrationProject} from './helpers/registration_ui.mjs';
 /* Actual isolated school-deletion workflow. Never uses the running event database. */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -77,12 +78,17 @@ try {
   page = await context.newPage(); page.setDefaultTimeout(10000);
   page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
   let navigation = 0;
+  /* 1.5.0 报名详情页头改为 ui.js 的 pageHeader()：header.page-head + h1.page-title + .page-actions。
+     用「报名名单」面包屑链接把工作台详情页头与其它视图的 .page-head 区分开。 */
+  const registrationHead = target => target.locator('header.page-head')
+    .filter({ has: target.getByRole('link', { name: '报名名单', exact: true }) });
+  const detailHead = () => registrationHead(page);
   const openSchool = async id => {
     await page.goto(`${base}/?school_check=${++navigation}#/schoolRegistration?event=${identity.event_id}&school=${id}`);
     await page.waitForLoadState('networkidle');
-    await page.locator('.school-registration-detail-head').waitFor();
+    await detailHead().waitFor();
   };
-  const deleteButton = () => page.locator('.school-registration-detail-head').getByRole('button', { name: '删除学校', exact: true });
+  const deleteButton = () => detailHead().getByRole('button', { name: '删除学校', exact: true });
   const deleteDialog = () => page.getByRole('dialog', { name: '删除学校', exact: true });
   const screenshot = async name => {
     await page.waitForFunction(() => {
@@ -100,14 +106,14 @@ try {
     assert.equal((await fetch(base + asset)).status, 200, `${asset} served by actual server`);
   }
   assert.equal(await deleteButton().isVisible(), true);
-  assert.match(await page.locator('.school-registration-detail-head').innerText(), /误建学校 bi（测试）/);
+  assert.match(await detailHead().innerText(), /误建学校 bi（测试）/);
   await screenshot(`school-delete-${suite}-entry-1365.png`);
   checks.push('isolated service login, actual assets and administrator deletion entry in current detail');
   let deleteCalls = 0;
   page.on('request', request => { if (request.method() === 'DELETE' && /\/api\/schools\/\d+$/.test(request.url())) deleteCalls++; });
-  await page.getByRole('tab', { name: '人员名单', exact: true }).click();
-  await page.locator('.school-registration-content details summary').click();
-  const unaddedName = page.getByLabel('新增人员姓名', { exact: true });
+  await registrationEdit(page);
+  await page.locator('.school-registration-people details:not(.school-registration-person) > summary').click();
+  const unaddedName = page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true });
   await unaddedName.fill('取消删除后应保留的输入');
   await deleteButton().click();
   await deleteDialog().waitFor();
@@ -184,7 +190,7 @@ try {
     const enrolledId = await createSchool('已有个人赛报名的学校');
     const enrolledPerson = await addPerson(enrolledId, '参赛档案');
     await api('POST', `/api/categories/${individualCat.id}/participations`, { athlete_id: enrolledPerson });
-    await openSchool(enrolledId); await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    await openSchool(enrolledId); await registrationEdit(page);
     const personNote = page.locator(`[data-person="a:${enrolledPerson}"]`).getByLabel('区分信息', { exact: true });
     await personNote.fill('拒绝删除后仍保留的输入');
     await confirmDelete(); await expectFeedback('该学校已有参赛报名，不能删除'); await waitEnabled();
@@ -232,16 +238,16 @@ try {
     checks.push('committed deletion with lost acknowledgement is recovered by valid GET only, never replayed on failed/malformed reads');
 
     const retryId = await createSchool('网络失败仍在名单的学校');
-    await openSchool(retryId); await page.getByRole('tab', { name: '人员名单', exact: true }).click();
-    await page.locator('.school-registration-content details summary').click();
-    await page.getByLabel('新增人员姓名', { exact: true }).fill('未知删除结果仍保留的输入');
+    await openSchool(retryId); await registrationEdit(page);
+    await page.locator('.school-registration-people details:not(.school-registration-person) > summary').click();
+    await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('未知删除结果仍保留的输入');
     const retryUrl = `${base}/api/schools/${retryId}`, beforeRetry = deleteCalls;
     await page.route(retryUrl, handler => handler.abort('failed'));
     await confirmDelete(); await expectFeedback('删除结果尚未确认');
     assert.equal((await schools()).some(s => s.id === retryId), true);
     await page.unroute(retryUrl);
     await page.getByRole('button', { name: '核对删除结果', exact: true }).click(); await expectFeedback('学校仍在名单'); await waitEnabled();
-    assert.equal(await page.getByLabel('新增人员姓名', { exact: true }).inputValue(), '未知删除结果仍保留的输入');
+    assert.equal(await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).inputValue(), '未知删除结果仍保留的输入');
     assert.equal(deleteCalls, beforeRetry + 1);
     await confirmDelete(); await page.locator('.school-registration-directory').waitFor();
     assert.equal(deleteCalls, beforeRetry + 2); assert.equal((await schools()).some(s => s.id === retryId), false);
@@ -249,7 +255,7 @@ try {
 
     const busyId = await createSchool('报名与删除互斥学校');
     const busyPerson = await addPerson(busyId, '报名状态测试档案');
-    await openSchool(busyId); await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    await openSchool(busyId); await registrationEdit(page);
     const busyNote = () => page.locator(`[data-person="a:${busyPerson}"]`).getByLabel('区分信息', { exact: true });
     const submit = () => page.locator('[data-action="school-preview"]');
     await busyNote().fill('保存进行中'); await submit().click();
@@ -264,13 +270,13 @@ try {
     const callsWhileBusy = deleteCalls; await deleteButton().evaluate(el => el.click()); assert.equal(deleteCalls, callsWhileBusy);
     releaseCommit(); await page.getByRole('button', { name: '预览整批变更', exact: true }).waitFor(); await waitEnabled();
     await page.unroute(commitUrl);
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    await registrationEdit(page);
     await busyNote().fill('报名提交待核实'); await submit().click(); await page.getByRole('button', { name: '确认整批提交', exact: true }).waitFor();
     await page.route(commitUrl, handler => handler.abort('failed')); await submit().click();
     await page.getByRole('button', { name: '核实并重试原提交', exact: true }).waitFor();
     assert.equal(await deleteButton().isDisabled(), true); await expectFeedback('报名提交结果待核实');
     await page.unroute(commitUrl); await submit().click(); await page.getByRole('button', { name: '预览整批变更', exact: true }).waitFor(); await waitEnabled();
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click();
+    await registrationEdit(page);
     await busyNote().fill('报名已保存但读取失败'); await submit().click(); await page.getByRole('button', { name: '确认整批提交', exact: true }).waitFor();
     const workspaceUrl = `${base}/api/schools/${busyId}/registration-workspace`;
     await page.route(workspaceUrl, handler => handler.fulfill({ status: 503, json: { code: 'test_read_after_save', message: '读取保存结果失败（测试）' } }));
@@ -288,19 +294,19 @@ try {
     await page.route(delayedUrl, async handler => { const response = await handler.fetch(); deleteArrived(); await deleteRelease; await handler.fulfill({ response }).catch(() => {}); });
     await confirmDelete(); await deleteArrival;
     await openSchool(draftId);
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click(); await page.locator('.school-registration-content details summary').click();
-    await page.getByLabel('新增人员姓名', { exact: true }).fill('新页面不应被旧回执清空');
+    await registrationEdit(page); await page.locator('.school-registration-people details:not(.school-registration-person) > summary').click();
+    await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('新页面不应被旧回执清空');
     const afterNavigation = page.url(); releaseDelete(); await page.waitForLoadState('networkidle');
     assert.equal(page.url(), afterNavigation);
-    assert.equal(await page.getByLabel('新增人员姓名', { exact: true }).inputValue(), '新页面不应被旧回执清空');
-    assert.match(await page.locator('.school-registration-detail-head').innerText(), /误建学校 bi（测试）/);
+    assert.equal(await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).inputValue(), '新页面不应被旧回执清空');
+    assert.match(await detailHead().innerText(), /误建学校 bi（测试）/);
     assert.equal((await schools()).some(s => s.id === delayedId), false); assert.equal((await schools()).some(s => s.id === draftId), true);
     await page.unroute(delayedUrl);
     checks.push('late deletion response cannot redirect or clear a newly opened school');
 
     await openSchool(draftId);
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click(); await page.locator('.school-registration-content details summary').click();
-    await page.getByLabel('新增人员姓名', { exact: true }).fill('账号变化后保留的输入');
+    await registrationEdit(page); await page.locator('.school-registration-people details:not(.school-registration-person) > summary').click();
+    await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('账号变化后保留的输入');
     const staleDetailUrl = `${base}/api/schools/${draftId}/detail`, beforeAccountChange = deleteCalls;
     let releaseDetail, detailArrived;
     const detailArrival = new Promise(resolve => { detailArrived = resolve; });
@@ -314,15 +320,15 @@ try {
     await page.evaluate(nextToken => localStorage.setItem('stss_token', nextToken), newLogin.token);
     releaseDetail(); await detailResponse; await page.waitForLoadState('networkidle');
     assert.equal(await deleteDialog().count(), 0); assert.equal(deleteCalls, beforeAccountChange);
-    assert.equal(await page.getByLabel('新增人员姓名', { exact: true }).inputValue(), '账号变化后保留的输入');
+    assert.equal(await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).inputValue(), '账号变化后保留的输入');
     assert.equal((await schools()).some(s => s.id === draftId), true);
     await page.unroute(staleDetailUrl); await page.evaluate(originalToken => localStorage.setItem('stss_token', originalToken), token);
     checks.push('late preflight after an actual session-token change cannot open confirmation, clear input or send DELETE');
 
     const eventDelayedId = await createSchool('切换赛事后迟到删除回执学校');
     await openSchool(eventDelayedId);
-    await page.getByRole('tab', { name: '人员名单', exact: true }).click(); await page.locator('.school-registration-content details summary').click();
-    await page.getByLabel('新增人员姓名', { exact: true }).fill('赛事变化后保留的输入');
+    await registrationEdit(page); await page.locator('.school-registration-people details:not(.school-registration-person) > summary').click();
+    await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).fill('赛事变化后保留的输入');
     const eventDelayedUrl = `${base}/api/schools/${eventDelayedId}`;
     let releaseEventDelete, eventDeleteArrived, sentEvent;
     const eventDeleteArrival = new Promise(resolve => { eventDeleteArrived = resolve; });
@@ -344,7 +350,7 @@ try {
     releaseEventDelete(); await eventDeleteResponse; await page.waitForLoadState('networkidle');
     assert.equal(page.url(), unchangedURL); assert.equal(sentEvent, String(identity.event_id));
     assert.equal(await page.locator('#event-select').inputValue(), String(otherEvent.event_id));
-    assert.equal(await page.getByLabel('新增人员姓名', { exact: true }).inputValue(), '赛事变化后保留的输入');
+    assert.equal(await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).inputValue(), '赛事变化后保留的输入');
     assert.equal((await schools()).some(s => s.id === eventDelayedId), false);
     assert.equal((await api('GET', `/api/events/${otherEvent.event_id}/schools`, undefined, { identity: otherEvent })).schools.some(s => s.id === otherSchool), true);
     await page.unroute(eventDelayedUrl);
@@ -355,8 +361,8 @@ try {
     const safeName = '<img src=x onerror=alert(1)> 学校名称';
     const securityId = await createSchool(safeName);
     await openSchool(securityId);
-    assert.equal(await page.locator('.school-registration-detail-head h2').textContent(), safeName);
-    assert.equal(await page.locator('.school-registration-detail-head img').count(), 0);
+    assert.equal(await detailHead().getByRole('heading', { level: 1 }).textContent(), safeName);
+    assert.equal(await detailHead().locator('img').count(), 0);
     await deleteButton().click(); await deleteDialog().waitFor();
     assert.ok((await deleteDialog().innerText()).includes(safeName)); assert.equal(await deleteDialog().locator('img').count(), 0);
     await deleteDialog().getByRole('button', { name: '取消', exact: true }).click(); await waitEnabled();
@@ -371,12 +377,12 @@ try {
       const rolePage = await roleContext.newPage(); rolePage.setDefaultTimeout(10000); rolePage.on('pageerror', error => errors.push(error.message));
       await rolePage.goto(`${base}/#/schoolRegistration?event=${identity.event_id}&school=${securityId}`);
       if (role === 'organizer') {
-        await rolePage.locator('.school-registration-detail-head').waitFor();
+        await registrationHead(rolePage).waitFor();
         assert.equal(await rolePage.getByRole('button', { name: '删除学校', exact: true }).count(), 0);
-        assert.equal(await rolePage.getByRole('tab', { name: '人员名单', exact: true }).count(), 1);
+        assert.equal(await rolePage.getByRole('tab', { name: '统一编辑', exact: true }).count(), 1);
       } else {
         await rolePage.waitForURL(role === 'recorder' ? '**/#/field' : '**/#/school');
-        assert.equal(await rolePage.locator('.school-registration-detail-head').count(), 0);
+        assert.equal(await registrationHead(rolePage).count(), 0);
       }
       await rolePage.screenshot({ path: path.join(artifacts, `school-delete-role-${role}.png`), fullPage: true }); await roleContext.close();
     }
@@ -396,7 +402,7 @@ try {
     await openSchool(longId);
     const assertBounds = async label => {
       const geometry = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth,
-        outside: [...document.querySelectorAll('.school-registration-detail-head *,#school-delete-status *,.modal *')].filter(el => {
+        outside: [...document.querySelectorAll('header.page-head *,#school-delete-status *,.modal *')].filter(el => {
           if (!el.getClientRects().length) return false; const b = el.getBoundingClientRect(); return b.width > 0 && (b.left < -1 || b.right > innerWidth + 1);
         }).map(el => el.className).slice(0, 8) }));
       assert.ok(geometry.scroll <= geometry.width + 1, `${label}: ${JSON.stringify(geometry)}`); assert.deepEqual(geometry.outside, [], label);

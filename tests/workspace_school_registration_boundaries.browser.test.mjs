@@ -1,3 +1,4 @@
+import {registrationEdit,registrationProject} from './helpers/registration_ui.mjs';
 /* 真实浏览器验证：报名页校验失败可见/聚焦，可预见的 400 在预览前被拦截。 */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -70,22 +71,28 @@ try {
     page = await context.newPage(); page.setDefaultTimeout(4000);
     page.on('dialog', d => d.accept());
     await page.goto(`${http ? `http://registration.test:${port}` : base}/#/workspace?${new URLSearchParams({ event: identity.event_id, group, category: team, tab: 'registration', school })}`);
-    await page.locator('.school-registration-detail-head').waitFor();
+    await page.locator('header.page-head').filter({ has: page.getByRole('link', { name: '报名名单', exact: true }) }).waitFor();
   };
   const run = async (name, fn) => {
     if (process.env.STSS_BOUNDARIES_CASES && !process.env.STSS_BOUNDARIES_CASES.split(',').includes(name)) return;
     try { await fn(); pass(name); }
     catch (e) { failures.push({ name, error: e.stack }); console.error('FAIL ' + name + ': ' + e.message); }
   };
-  const tab = name => page.getByRole('tab', { name, exact: true }).click();
-  const card = id => page.locator(`[data-category="${id}"]`);
-  const choice = (id, value) => card(id).locator('[data-edit="entry"]').first().selectOption(value);
+  const tab = async name => {
+    await registrationEdit(page);
+    if(name==='项目报名') {
+      await page.getByLabel('人员分配状态',{exact:true}).selectOption('unassigned');
+      await page.getByLabel('人员分配状态',{exact:true}).selectOption('all');
+      await registrationEdit(page);
+    }
+  };
+  const choice = async (id, value) => (await registrationProject(page,id)).locator('[data-edit="entry"]').first().selectOption(value);
   const preview = () => page.locator('[data-action="school-preview"]');
   const people = () => page.locator('.school-registration-person');
   const row = name => people().filter({ has: page.locator(`input[value="${name}"]`) });
   const add = async (name, category = null) => {
     if (!category) await tab('人员名单');
-    const scope = category ? card(category) : page.locator('.school-registration-content');
+    const scope = category ? (await registrationProject(page,category)) : page.locator('.school-registration-people');
     const form = scope.locator('.school-registration-add');
     await form.locator('..').evaluate(d => { d.open = true; });
     await form.getByLabel('新增人员姓名', { exact: true }).fill(name);
@@ -123,12 +130,12 @@ try {
     await page.evaluate(() => Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true }));
     await add('随机源缺失');
     assert.match(await page.locator('.form-errors').innerText(), /浏览器无法生成报名标识/);
-    assert.equal(await page.getByLabel('新增人员姓名', { exact: true }).inputValue(), '随机源缺失');
+    assert.equal(await page.locator('.school-registration-people').getByLabel('新增人员姓名', { exact: true }).inputValue(), '随机源缺失');
     assert.equal(sent, 0);
   });
   await run('PARTIAL-FORM', async () => {
     await open(); await tab('人员名单');
-    const form = page.locator('.school-registration-add');
+    const form = page.locator('.school-registration-people .school-registration-add');
     await form.locator('..').evaluate(d => { d.open = true; });
     await form.getByLabel('新增人员区分信息').fill('仅备注');
     await tab('项目报名'); await tab('人员名单');
@@ -142,32 +149,32 @@ try {
     assert.match(await page.locator('.form-errors').innerText(), /尚未添加|新增人员/);
     await form.getByRole('button', { name: '清空新增输入' }).click();
     await tab('项目报名'); await choice(team, 'participate');
-    await card(team).locator('.school-registration-add').locator('..').evaluate(d => { d.open = true; });
-    await card(team).getByLabel('新增人员常用号码').fill('8');
+    await (await registrationProject(page,team)).locator('.school-registration-add').locator('..').evaluate(d => { d.open = true; });
+    await (await registrationProject(page,team)).getByLabel('新增人员常用号码').fill('8');
     await choice(team, 'not_participating');
-    assert.equal(await card(team).getByLabel('新增人员常用号码').isVisible(), true);
+    assert.equal(await (await registrationProject(page,team)).getByLabel('新增人员常用号码').isVisible(), true);
     await preview().click();
-    await card(team).getByRole('button', { name: '清空新增输入' }).click();
+    await (await registrationProject(page,team)).getByRole('button', { name: '清空新增输入' }).click();
   });
   await run('REMOVE-REFERENCES', async () => {
     await open(); await choice(team, 'participate'); await add('待删队长', team);
-    await card(team).locator('label.field', { hasText: '队长' }).locator('select').selectOption({ label: '待删队长' });
+    await (await registrationProject(page,team)).locator('label.field', { hasText: '队长' }).locator('select').selectOption({ label: '待删队长' });
     await choice(team, 'not_participating'); await tab('人员名单');
     await people().last().getByRole('button', { name: '移除新增人员' }).click();
     await tab('项目报名'); await choice(team, 'participate');
-    assert.equal(await card(team).getByText('人员档案已删除，请核对最新名单').count(), 0);
-    assert.equal(await card(team).locator('.school-registration-member').count(), 0);
+    assert.equal(await (await registrationProject(page,team)).getByText('人员档案已删除，请核对最新名单').count(), 0);
+    assert.equal(await (await registrationProject(page,team)).locator('.school-registration-member').count(), 0);
   });
   await run('INDIVIDUAL-ADD', async () => {
     await open(); await choice(individual, 'participate');
-    await card(individual).getByLabel('男子个人赛选人').selectOption(`a:${seeded}`);
+    await (await registrationProject(page,individual)).getByLabel('男子个人赛选人').selectOption(`a:${seeded}`);
     await add('只建名单', individual);
-    assert.equal(await card(individual).locator('.school-registration-member strong').innerText(), '原有甲');
+    assert.equal(await (await registrationProject(page,individual)).locator('.school-registration-member strong').innerText(), '原有甲');
     await tab('人员名单');
     assert.equal(await people().last().locator('input').first().inputValue(), '只建名单');
-    await tab('项目报名'); await card(individual).getByRole('button', { name: '移除', exact: true }).click();
+    await tab('项目报名'); await (await registrationProject(page,individual)).getByRole('button', { name: '移除', exact: true }).click();
     await add('空位自动加入', individual);
-    assert.equal(await card(individual).locator('.school-registration-member strong').innerText(), '空位自动加入');
+    assert.equal(await (await registrationProject(page,individual)).locator('.school-registration-member strong').innerText(), '空位自动加入');
   });
   await run('IMPORT-BASELINE', async () => {
     await open(); await page.getByRole('button', { name: '粘贴 / 导入学校报名表' }).click();
@@ -180,7 +187,7 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('dialog button,[role="dialog"] button')].some(b => b.textContent === '应用到报名表' && !b.disabled));
     await dlg.getByRole('button', { name: '应用到报名表', exact: true }).click();
     await tab('项目报名');
-    assert.equal(await card(individual).locator('.school-registration-member strong').innerText(), '导入甲');
+    assert.equal(await (await registrationProject(page,individual)).locator('.school-registration-member strong').innerText(), '导入甲');
     await tab('人员名单');
     await page.getByRole('button', { name: '粘贴 / 导入学校报名表' }).click();
     await dlg.locator('textarea').fill('项目,参赛选择,运动员,性别\n男子个人赛,参加,导入乙,男');
@@ -262,7 +269,7 @@ try {
   await run('POSTSAVE', async () => {
     await open(); await add('保存落点'); await waitReview(); await preview().click();
     await page.waitForFunction(() => document.querySelector('[data-action="school-preview"]')?.textContent === '预览整批变更');
-    assert.equal(await page.getByRole('tab', { name: '项目报名', exact: true }).getAttribute('aria-selected'), 'true');
+    assert.equal(await page.getByRole('tab', { name: '统一编辑', exact: true }).getAttribute('aria-selected'), 'true');
     assert.equal(await preview().isDisabled(), true);
     await add('读取失败仍已保存'); await waitReview();
     let posts = 0;
@@ -274,7 +281,7 @@ try {
     assert.equal(await preview().isDisabled(), true);
     await page.unroute('**/registration-workspace');
     await page.getByRole('button', { name: '读取最新正式名单' }).click();
-    await page.waitForFunction(() => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent === '项目报名');
+    await page.waitForFunction(() => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent === '统一编辑');
     assert.equal(posts, 1);
   });
   await run('CACHE-UPDATE', async () => {
@@ -286,7 +293,22 @@ try {
       await navigator.serviceWorker.register('/sw.js'); await navigator.serviceWorker.ready;
     });
     await page.waitForFunction(async () => !(await caches.keys()).includes('stss-shell-v79'));
-    assert.equal(await page.evaluate(async () => !!await (await caches.open('stss-shell-v80')).match('/js/registrationId.js')), true);
+    /* 1.5.0 的 CACHE 版本随每次发布升级（当前 sw.js 为 stss-shell-v92），旧用例硬编码的 v81 已过期。
+       语义不变：激活后旧外壳缓存被清理、唯一存活的 stss-shell-<ver> 缓存包含新增的报名标识模块。 */
+    const shells = await page.evaluate(async () => {
+      const found = [];
+      for (const name of await caches.keys()) {
+        if (!/^stss-shell-v\d+$/.test(name)) continue;
+        const cache = await caches.open(name);
+        found.push({ name, registrationId: !!(await cache.match('/js/registrationId.js')),
+          legacyMarker: !!(await cache.match('/old-marker')) });
+      }
+      return found;
+    });
+    assert.equal(shells.length, 1, JSON.stringify(shells));
+    assert.match(shells[0].name, /^stss-shell-v\d+$/);
+    assert.equal(shells[0].registrationId, true, JSON.stringify(shells));
+    assert.equal(shells[0].legacyMarker, false, JSON.stringify(shells));
     await context.setOffline(true);
     await page.goto(base + '/');
     assert.match(await page.evaluate(async () => (await import('/js/registrationId.js')).registrationId()), /^[a-f0-9-]{36}$/);

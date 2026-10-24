@@ -4,6 +4,9 @@ from .errors import conflict, invalid_fields
 
 
 def guard_change(conn, category_id):
+    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(
+            conn,'SELECT id FROM result_candidates WHERE category_id=? LIMIT 1',(category_id,)):
+        raise conflict('项目已有结果候选，报名和种子已冻结，请先核对原包与成绩',code='registration_in_use')
     if db.q1(conn, """SELECT s.id FROM stages s JOIN plans p ON p.id=s.plan_id WHERE p.category_id=?
         AND json_extract(s.params_json,'$.schedule_meta.state')='confirmed'
         AND json_extract(s.params_json,'$.schedule_meta.definition.purpose')<>'manual' LIMIT 1""", (category_id,)):
@@ -27,6 +30,11 @@ def guard_change(conn, category_id):
 
 def guard_team_roster(conn, team_id):
     """A team's players do not change its schedule slot. Freeze at recording/results."""
+    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(conn,
+            """SELECT c.id FROM result_candidates c JOIN matches m ON m.id=c.subject_id
+            JOIN participations p ON p.id IN (m.home_actual,m.away_actual,m.home_participation,m.away_participation)
+            WHERE c.subject_kind='match' AND p.team_id=? LIMIT 1""",(team_id,)):
+        raise conflict('该校已有结果候选，阵容已冻结，请先核对原包与成绩',code='roster_in_use')
     if db.q1(conn, """SELECT p.id FROM participations p WHERE p.team_id=? AND
         (EXISTS (SELECT 1 FROM placements x WHERE x.participation_id=p.id) OR
          EXISTS (SELECT 1 FROM matches m WHERE m.status='finished' AND

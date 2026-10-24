@@ -296,7 +296,15 @@ def _school_totals_table(conn, group_id):
                            f"（{d['base_points']}×{d['multiplier']}={d['points']}）"
                            for d in row["details"])
         # 未开赛组别不产生名次：名次列用“—”，待确认列固定 0，与页面/打印公告同口径。
-        rank_cell = (row.get("rank") or "待确认") if started else "—"
+        # 已开赛但本组仍有未确认名次时，排名按已确认积分暂排，名次列用占位（D01）。
+        if not started:
+            rank_cell = "—"
+        elif row.get("status") == "tie_pending":
+            rank_cell = "待确认"
+        elif row.get("rank_provisional"):
+            rank_cell = "—（待确认）"
+        else:
+            rank_cell = row.get("rank") or "待确认"
         rows.append([rank_cell, row["name"], _number(row["total"]),
                      _number(row["rank_counts"].get(1, 0)), _number(row["rank_counts"].get(2, 0)),
                      _number(row["rank_counts"].get(3, 0)), detail,
@@ -545,7 +553,9 @@ def export_school_notice(ctx):
     headers = ["名次", "学校", "总分", "第一名数", "第二名数", "第三名数", "待确认项目"]
     if started:
         ranked = [(r["status"] != "tie_pending",
-                   [r.get("rank") if r["status"] != "tie_pending" else "待确认", r["name"], r["total"],
+                   [("待确认" if r["status"] == "tie_pending"
+                     else "—（待确认）" if r.get("rank_provisional")
+                     else r.get("rank") or "待确认"), r["name"], r["total"],
                     r["rank_counts"].get(1, 0), r["rank_counts"].get(2, 0), r["rank_counts"].get(3, 0),
                     len(r["pending"])]) for r in data["rows"]]
     else:

@@ -91,8 +91,11 @@ try {
   page.setDefaultTimeout(12000);
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
-  const deleteButton = () => page.locator('.school-registration-detail-head')
-    .getByRole('button', { name: '删除学校', exact: true });
+  /* 1.5.0 报名详情页头改为 ui.js 的 pageHeader()：header.page-head + h1.page-title + .page-actions。
+     用「报名名单」面包屑链接把工作台详情页头与其它视图的 .page-head 区分开。 */
+  const detailHead = () => page.locator('header.page-head')
+    .filter({ has: page.getByRole('link', { name: '报名名单', exact: true }) });
+  const deleteButton = () => detailHead().getByRole('button', { name: '删除学校', exact: true });
   const deleteDialog = () => page.getByRole('dialog', { name: '删除学校', exact: true });
   const feedback = () => page.locator('.school-registration-delete-feedback');
   const waitFeedback = async (pattern) => {
@@ -104,7 +107,7 @@ try {
   };
   await page.goto(`${base}/?delete_reason=1#/schoolRegistration?event=${identity.event_id}&school=${schoolId}`);
   await page.waitForLoadState('networkidle');
-  await page.locator('.school-registration-detail-head').waitFor();
+  await detailHead().waitFor();
   await page.screenshot({ path: path.join(artifacts, 'p2a-delete-guard-1365.png'), fullPage: true });
 
   await deleteButton().click();

@@ -8,7 +8,7 @@ import { stageLabel, sourceLabel, rankRange } from '../scheduleStageModel.js';
 import { readPendingRequest, writePendingRequest, removePendingRequest, capturePendingRequestScope } from '../pendingRequests.js';
 import { h, clear, field, selectInput, textInput, numberInput, dateTimeInput, formDialog,
   modal, toast, confirmAsync, promptDialog, statusBadge, matchStatusBadge, loadingState, errorState, emptyState,
-  filteredEmptyState, setPageLeaveGuard } from '../ui.js';
+  filteredEmptyState, setPageLeaveGuard, pageHeader, categoryLabel } from '../ui.js';
 
 async function render({ el, params, signal, requestContext = captureRequestContext(), isCurrent = () => true }) {
   const alive = () => el.isConnected && !signal?.aborted && isCurrent();
@@ -37,6 +37,12 @@ async function render({ el, params, signal, requestContext = captureRequestConte
     return !pending || await confirmAsync('提交结果待核实', '原请求已保存。离开后可返回此项目核实并重试，核实前不能提交另一份操作。', '离开并保留原请求');
   }, () => !!pending || busy || !!autoEditor?.isDirty(), alive);
   el.append(recovery, body);
+  /* 分组、赛程、对阵图是同一项目的三个视图，用同一条子导航切换，避免从侧栏反复进出。 */
+  const viewNav = () => h('nav.schedule-views', { 'aria-label': '赛程视图' },
+    h('a', { href: workspaceLink(cat, 'schedule', { view: 'groups' }), class: mode === 'groups' ? 'active' : '', 'aria-current': mode === 'groups' ? 'page' : null }, '分组与抽签'),
+    h('a', { href: workspaceLink(cat, 'schedule'), class: mode === 'fixtures' ? 'active' : '', 'aria-current': mode === 'fixtures' ? 'page' : null }, '比赛赛程'),
+    h('a', { href: `#/bracket?category=${cat.id}` }, '对阵图'));
+  const bracketLink = h('a.btn', { href: `#/bracket?category=${cat.id}` }, '对阵图');
 
   async function send(packet) {
     busy = true;
@@ -82,9 +88,16 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       if (mode === 'groups') {
         const drawData = await client.get(`/api/categories/${cat.id}/group-draw`);
         if (!alive() || gen !== generation) return;
-        body.append(h('p.small.muted', '在这里完成学校分组和抽签确认。阶段、比赛及场地时间在“赛程”维护。'),
-          renderGroupDraw(cat, drawData, draw => { if (draw?.status === 'confirmed') load(); }, { client, isCurrent: alive,
-            openNotice: path => openHtml(path, {}, '小组抽签分组表', { context: requestContext, isCurrent: alive }) }));
+        body.append(pageHeader({
+          crumbs: [{ label: '项目工作台' }, { label: categoryLabel(cat) }, { label: '分组抽签' }],
+          title: '分组抽签',
+          badges: [statusBadge('三人赛', 'info')],
+          meta: [h('span', '完成学校分组并确认后，才能建立小组赛阶段；确认前可撤销重来。')],
+          actions: [h('a.btn', { href: workspaceLink(cat, 'schedule') }, '进入赛程')],
+        }), viewNav(),
+        h('p.small.muted', '在这里完成学校分组和抽签确认。阶段、比赛及场地时间在“赛程”维护。'));
+        body.append(renderGroupDraw(cat, drawData, draw => { if (draw?.status === 'confirmed') load(); }, { client, isCurrent: alive,
+          openNotice: path => openHtml(path, {}, '小组抽签分组表', { context: requestContext, isCurrent: alive }) }));
         if (drawData.draw?.status === 'confirmed') body.append(h('a.btn.mt', { href: workspaceLink(cat, 'schedule') }, '进入赛程'));
         return;
       }
@@ -100,23 +113,33 @@ async function render({ el, params, signal, requestContext = captureRequestConte
               } catch (e) { report(e); }
             } }, '建立小组赛阶段')));
         } else body.append(h('div.panel', h('p.muted', '尚未确认学校分组。可先完成分组，再建立小组赛阶段；手工比赛仍可按组委会安排录入。'),
-          h('a.btn', { href: workspaceLink(cat, 'groups') }, '前往分组')));
+          h('a.btn', { href: workspaceLink(cat, 'schedule', { view: 'groups' }) }, '前往分组')));
       }
       const stages = plan?.stages || [];
       stageId = stages.some(s => s.id === stageId) ? stageId : stages[0]?.id || null;
       rememberPosition();
       const stage = stages.find(s => s.id === stageId);
-      body.append(h('div.schedule-heading', h('div', h('h3', '比赛赛程'), h('p.small.muted', '按阶段核对对阵，再安排场地和时间。比赛记录与成绩确认在各自页签完成。')),
-        canManage ? h('div.row.tight', h('button.btn.btn-primary', { onclick: () => {
-          if (!guardClose()) return;
-          generation++;
-          autoEditor = openAutoSchedule({ root: body, category: cat, plan, venues, initialStage: stageId, event: state.structure?.event,
-            client, previewRequest: (path, values) => api.post(path, values, { context: requestContext, signal }), isCurrent: alive,
-            onBack: () => { autoEditor = null; load(); }, onSaved: () => { autoEditor = null; sort = 'schedule'; load(); } });
-        } }, '自动编排'), h('button.btn', { onclick: () => openSettings() }, '设置后续赛程'),
-          h('button.btn.btn-primary', { onclick: () => openAdd() }, '新增比赛')) : null));
+      body.append(pageHeader({
+        crumbs: [{ label: '项目工作台' }, { label: categoryLabel(cat) }, { label: '比赛赛程' }],
+        title: '比赛赛程',
+        badges: [statusBadge(`${stages.length} 个阶段`, 'info')],
+        meta: [h('span', '按阶段核对对阵，再安排场地和时间；比赛记录与成绩确认在各自页签完成。')],
+        actions: [
+          canManage ? h('button.btn.btn-primary', { onclick: () => {
+            if (!guardClose()) return;
+            generation++;
+            autoEditor = openAutoSchedule({ root: body, category: cat, plan, venues, initialStage: stageId, event: state.structure?.event,
+              client, previewRequest: (path, values) => api.post(path, values, { context: requestContext, signal }), isCurrent: alive,
+              onBack: () => { autoEditor = null; load(); }, onSaved: () => { autoEditor = null; sort = 'schedule'; load(); } });
+          } }, '自动编排') : null,
+          canManage ? h('button.btn', { onclick: () => openSettings() }, '设置后续赛程') : null,
+          canManage ? h('button.btn.btn-primary', { onclick: () => openAdd() }, '新增比赛') : null,
+          bracketLink,
+        ].filter(Boolean),
+      }), viewNav());
       body.append(h('nav.schedule-stages', { 'aria-label': '比赛阶段' }, ...stages.map(item => h('button', {
-        class: `btn${stageId === item.id ? ' active' : ''}`, onclick: () => { stageId = item.id; offset = 0; listRevision = null; load(); },
+        class: `btn${stageId === item.id ? ' active' : ''}`, 'aria-current': stageId === item.id ? 'true' : null,
+        onclick: () => { stageId = item.id; offset = 0; listRevision = null; load(); },
       }, stageLabel(item), item.params?.schedule_meta?.state === 'draft' ? ' · 草稿' : ''))));
       const filters = h('div.schedule-filters', field('排列方式', selectInput([['round', '按轮次'], ['schedule', '按时间']], sort,
         { onchange: e => { sort = e.target.value; resetPage(); } })),
@@ -159,6 +182,13 @@ async function render({ el, params, signal, requestContext = captureRequestConte
     }
   }
   function resetPage() { offset = 0; listRevision = null; load(); }
+  /* 清空“状态/场地”列表筛选并重置分页；返回是否原本处于筛选态。
+     单独成函数是因为 openAdd 内部有同名 venue 常量（场地下拉），不能直接在此赋值。 */
+  function clearListFilters() {
+    const filtered = !!(status || venue);
+    if (filtered) { status = ''; venue = ''; offset = 0; listRevision = null; }
+    return filtered;
+  }
   function rememberPosition() {
     if (alive()) replaceViewParams({ event: cat.event_id, group: cat.group_id, category: cat.id, tab: 'schedule',
       stage: stageId || null, sort, status: status || null, venue: venue || null });
@@ -308,8 +338,23 @@ async function render({ el, params, signal, requestContext = captureRequestConte
         home_participation: Number(home.value), away_participation: Number(away.value), round_label: round.value.trim() || '手工比赛',
         venue_id: Number(venue.value) || null, scheduled_at: when.value.replace('T', ' ') };
       const result = await client.post('/api/matches', value);
-      if (alive()) { stageId = result.stage_id; await load(); }
+      if (alive()) {
+        stageId = result.stage_id;
+        /* 新增场次通常为“等待前序/待记录”且未安排场地；若当前状态/场地筛选会把它隐藏，
+           先清空筛选再刷新并提示，避免“新建没成功/刷新后消失”的错觉。 */
+        const cleared = clearListFilters();
+        await load();
+        if (cleared) toast('已新增比赛，已清除筛选以显示新场次');
+        highlightMatch(result.match_id);
+      }
     } }] });
+  }
+  function highlightMatch(matchId) {
+    if (!matchId) return;
+    const node = body.querySelector(`.schedule-match[data-match-id="${Number(matchId)}"]`);
+    if (!node) return;
+    node.classList.add('flash');
+    node.scrollIntoView({ block: 'center' });
   }
   /* 调整场地时间：409 stale_revision 时保留输入，展示“重新读取最新安排”动作；
      重新读取后再用最新版本 + 用户原输入重开编辑框，避免用户重填。 */
