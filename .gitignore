@@ -10,4 +10,6 @@ data/*
 *.log
 .env
 .env.*
-/副本说明.txt
+
+# Local development experience fixtures and their test credentials
+test_environment/

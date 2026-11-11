@@ -27,8 +27,6 @@ def connect(db_path: Path | str | None = None, *, busy_ms: int | None = None,
     source = Path(path).resolve().as_uri() + "?mode=rw" if existing else path
     conn = sqlite3.connect(source, uri=existing, timeout=wait / 1000, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    # A v2 writer has no such function: protected result writes then fail closed.
-    conn.create_function('review_writer_version', 0, lambda: 3, deterministic=True)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         if path != ":memory:":
@@ -82,7 +80,7 @@ def get_event_conn(event_id: int) -> sqlite3.Connection:
             raise FileNotFoundError(f"赛事数据库不存在：{path.name}")
         conn = connect(path, existing=True)
         if not conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='individual_draw_sessions'").fetchone():
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_result_sets'").fetchone():
             conn.close()
             init_db(path)
             conn = connect(path, existing=True)
@@ -254,20 +252,72 @@ def init_db(db_path: Path | str | None = None) -> None:
         from . import individual_draw_store
         from . import individual_draw_session_store
         from . import display_store
+        from . import participation_deletion
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='categories'").fetchone() and not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_result_sets'").fetchone():
+            team_rules_store._backup(conn, '.before-manual-results-v1.sqlite')
         individual_draw_store.backup_before_upgrade(conn)
         individual_draw_session_store.backup_before_upgrade(conn)
         team_rules_store.backup_before_upgrade(conn)
         display_store.backup_before_upgrade(conn)
+        participation_deletion.backup_before_upgrade(conn)
+        # 旧 participations 表尚无 deleted_at；必须先升级再执行新版 schema。
+        participation_deletion.install(conn)
+        from . import registration_history
+        registration_history.install(conn, schema)
         conn.executescript(schema)
+        # 新库由 schema 建表；在此补记迁移标记并统一校验索引定义。
+        participation_deletion.install(conn)
         _migrate(conn)
+        _migrate_individual_results(conn)
         _migrate_token_hashes(conn)
         _migrate_epoch_times(conn)
         _migrate_user_roles(conn)
         _migrate_group_draw_method(conn)
-        from . import result_candidates
-        result_candidates.initialize(conn)
+        from . import school_deletion
+        school_deletion.clean_orphan_history(conn)
     finally:
         conn.close()
+
+
+def _migrate_individual_results(conn):
+    from .domain.individual_results import FIELDS, normalize
+
+    marker = "migration:individual-results-two-significant-digits"
+    if q1(conn, "SELECT v FROM settings WHERE k=?", (marker,)):
+        return
+    category_query = """SELECT DISTINCT pl.category_id FROM placements pl
+                       JOIN categories c ON c.id=pl.category_id WHERE c.kind='individual'"""
+    if q1(conn, "SELECT 1 FROM individual_results LIMIT 1") or q1(conn, category_query):
+        from .backup import online_backup
+        online_backup(conn, ".before-individual-results-v2.db")
+    with tx(conn):
+        if q1(conn, "SELECT v FROM settings WHERE k=?", (marker,)):
+            return
+        for row in q(conn, "SELECT * FROM individual_results"):
+            values = {}
+            for key, _ in FIELDS:
+                try:
+                    values[key] = normalize(row[key])
+                except ValueError:
+                    values[key] = None
+            status = row["result_status"]
+            if row["confirmed"] and values["violation_count"] is not None and values["violation_count"] >= 2:
+                status = "dsq"
+            elif status == "normal" and None in values.values():
+                status = "pending"
+            update(conn, "individual_results", row["id"], {
+                **values, "result_status": status, "rank_no": None,
+                "confirmed": 0 if status == "pending" else row["confirmed"],
+                "version": row["version"] + 1,
+            })
+        for category in q(conn, category_query):
+            cid = category["category_id"]
+            run(conn, """UPDATE placements SET rank_no=NULL, status='pending',
+                         note='个人赛规则已更新，请重新确认项目名次', version=version+1,
+                         confirmed_by=NULL, confirmed_at=NULL WHERE category_id=?""", (cid,))
+            run(conn, "DELETE FROM school_points WHERE category_id=?", (cid,))
+        run(conn, "INSERT INTO settings(k,v) VALUES(?, '1')", (marker,))
 
 
 def _migrate_user_roles(conn: sqlite3.Connection) -> None:
@@ -432,7 +482,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "matches": ["schedule_role TEXT NOT NULL DEFAULT ''", "schedule_revision INTEGER NOT NULL DEFAULT 1", "winner_rank INTEGER", "loser_rank INTEGER",
                     "reset_parent_id INTEGER REFERENCES matches(id)",
                     "reset_state TEXT NOT NULL DEFAULT 'none'", "reset_parent_version INTEGER"],
-        "display_config": ["poll_ms INTEGER NOT NULL DEFAULT 500 CHECK (poll_ms BETWEEN 100 AND 1000)"],
+        "display_config": ["poll_ms INTEGER NOT NULL DEFAULT 250 CHECK (poll_ms BETWEEN 100 AND 1000)"],
         "tokens": ["expires_at_epoch INTEGER NOT NULL DEFAULT 0"],
         "display_screens": ["last_seen_epoch INTEGER NOT NULL DEFAULT 0"],
         "display_pair_codes": ["expires_at_epoch INTEGER NOT NULL DEFAULT 0"],

@@ -79,8 +79,6 @@ def compute_school_totals(schools: list[dict], points_rows: list[dict],
         if entry is not None:
             entry["pending"].append(row)
 
-    # 本组仍有未确认名次时，总分排名只是按已确认积分得到的暂排，不能当作正式名次展示（D01）。
-    rank_provisional = bool(started and pending_rows)
     entries = list(table.values())
     for e in entries:
         e["details"].sort(key=lambda d: (d["category_name"], d["rank_no"] or 999))
@@ -136,7 +134,6 @@ def compute_school_totals(schools: list[dict], points_rows: list[dict],
         for e in ordered:
             e["pending"] = []
     for e in ordered:
-        e["rank_provisional"] = bool(rank_provisional)
         if e["manual_order"] is None:
             e.pop("manual_order", None)
     return {"rows": ordered, "unresolved": unresolved, "started": bool(started)}

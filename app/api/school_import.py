@@ -155,6 +155,8 @@ def _workspace_snapshot(conn, school_id):
 def template(ctx):
     with db.tx(ctx.conn):
         snapshot = _workspace_snapshot(ctx.conn, int(ctx.params['school_id']))
+    if ctx.arg('scope') == 'people':
+        return _csv_response([['姓名', '性别', '常用号码']], _download_name(snapshot['school'], '人员导入模板', 'csv'))
     return _csv_response(_template_rows(snapshot), _download_name(snapshot['school'], '报名表', 'csv'))
 
 
@@ -180,7 +182,7 @@ def preview_table(ctx):
     payload = checked_payload(ctx, int(ctx.params['school_id']))
     check_base(ctx.conn, payload)
     snapshot = workspace(ctx.conn, payload['school_id'])
-    result = school_import.convert(snapshot, payload, ctx.body.get('csv_text'))
+    result = school_import.convert(snapshot, payload, ctx.body.get('csv_text'), people_only=ctx.body.get('scope') == 'people')
     if result['errors']:
         return result
     projected = dict(payload, **{k: result['payload'][k] for k in ('people', 'projects')})

@@ -1,6 +1,9 @@
 /* 学校抽签面板：揭晓进度以服务器为准，失败重试沿用同一请求标识。 */
 import { api, newUid, openHtml } from './api.js';
 import { groupName } from './groupNames.js';
+import { drawPool, teamGroupResult, validateTeamDrawData } from './drawDisplayModel.js';
+import { drawFlowNavigation, renderGroupResult } from './drawDisplay.js';
+import { openResultImport } from './resultImport.js';
 import { h, clear, field, selectInput, textInput, numberInput, table, statusBadge, toast, confirmAsync, promptDialog, categoryLabel } from './ui.js';
 
 const METHOD_LABELS = { random: '完全随机', seeded: '种子分档', cycle: '循环落位' };
@@ -8,7 +11,8 @@ const methodLabel = (value) => METHOD_LABELS[value] || value || '';
 const STATUS = { drawing: ['抽签进行中', 'info'], complete: ['已抽完 · 待确认', 'warn'], confirmed: ['分组已确认', 'ok'], cancelled: ['已撤销', ''] };
 const ROLL_INTERVAL_MS = 125; /* 每秒最多 8 次，避免闪动 */
 
-export function renderGroupDraw(cat, initial, onChange, { client = api, isCurrent = () => true,
+export function renderGroupDraw(cat, initial, onChange, { client = api, isCurrent = () => true, plan = null,
+  readPlan = null,
   openNotice = path => openHtml(path, {}, '小组抽签分组表') } = {}) {
   const panel = h('section.panel.group-draw', { id: 'group-draw', 'aria-label': '学校小组抽签' });
   panel.addEventListener('fullscreenchange', () => {
@@ -23,11 +27,14 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
     });
   });
   let data = initial;
+  let formalPlan = plan, refreshError = '', refreshing = false, lastRead = new Date().toLocaleString();
+  validateTeamDrawData(initial, cat.id);
   let busy = false;
   const retries = new Map();
   let groups = initial.draw?.capacities.length || Math.min(2, Math.max(1, initial.roster.length));
   let method = initial.draw?.method || 'cycle';
   let sizesText = '';
+  let activeSection = null;
   const errorBox = h('div.warn-box.hidden', { role: 'alert' });
   /* 滚动揭晓只做过程呈现：句柄由组件持有，停止、响应到达、重绘、撤销与卸载时统一清理 */
   let rollFrame = 0;
@@ -58,8 +65,7 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
 
   /* 尚未揭晓的候选学校：滚动只展示它们，不参与结果决定 */
   function rollCandidates() {
-    const taken = new Set((data.draw?.steps || []).map((step) => step.school_name));
-    return data.roster.filter((school) => !taken.has(school.school_name)).map((school) => school.school_name);
+    return drawPool(data.roster, data.draw?.steps || []).map(school => school.school_name);
   }
 
   function startRoll(pool) {
@@ -148,14 +154,19 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
   }
 
   async function reload() {
-    data = await client.get(`/api/categories/${cat.id}/group-draw`);
+    const [fresh, schedule] = await Promise.all([client.get(`/api/categories/${cat.id}/group-draw`), readPlan ? readPlan() : Promise.resolve(null)]);
     if (!isCurrent()) return;
+    validateTeamDrawData(fresh, cat.id);
+    teamGroupResult(cat, schedule ? schedule.plan : formalPlan, fresh);
+    data = fresh;
+    if (schedule) formalPlan = schedule.plan;
+    refreshError = ''; lastRead = new Date().toLocaleString();
     drawPanel();
     onChange(data.draw);
   }
 
   async function mutate(action, values = {}) {
-    if (busy || !isCurrent()) return;
+    if (busy || refreshing || refreshError || data.manual_result || !isCurrent()) return;
     busy = true;
     errorBox.classList.add('hidden');
     const previous = data.draw;
@@ -168,9 +179,14 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
     try {
       const path = `/api/categories/${cat.id}/group-draw${action === 'start' ? '' : `/${action}`}`;
       await client.post(path, { ...body, request_uid: uid });
-      const fresh = await client.get(`/api/categories/${cat.id}/group-draw`);
+      const [fresh, schedule] = await Promise.all([client.get(`/api/categories/${cat.id}/group-draw`), readPlan ? readPlan() : Promise.resolve(null)]);
       if (!isCurrent()) return;
+      validateTeamDrawData(fresh, cat.id);
+      teamGroupResult(cat, schedule ? schedule.plan : formalPlan, fresh);
+      if (schedule) formalPlan = schedule.plan;
+      refreshError = ''; lastRead = new Date().toLocaleString();
       retries.delete(key);
+      if (action === 'confirm') activeSection = 'result';
       if (reveal && (revealState === 'rolling' || revealState === 'picking')) {
         /* 手动起止：结果先保存，等用户点“停止并揭晓”才定格 */
         pendingResult = fresh;
@@ -217,22 +233,50 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
   }
 
   function drawPanel() {
+    stopRoll();
     clear(panel);
-    const draw = data.draw;
+    const draw = data.manual_result ? null : data.draw;
     const active = draw && draw.status !== 'cancelled';
     const header = h('div.panel-head', h('div', h('h3', '学校小组抽签'),
       h('div.small.muted', `${categoryLabel(cat, { withGroup: true })} · ` + (active
         ? `本次 ${draw.total} 所学校 · ${draw.capacities.length} 个小组` : `当前已报名 ${data.roster.length} 所学校`))),
     h('div.row.tight', active ? statusBadge(...STATUS[draw.status]) : null,
+      h('button.btn.small', { disabled: busy || refreshing, onclick: () => openResultImport(cat, reload, { isCurrent }) }, '导入'),
       h('button.btn.small', { onclick: async () => {
-        if (busy || !isCurrent()) return;
-        try { await reload(); } catch (error) { toast(error.message, 'error'); }
+        if (busy || refreshing || !isCurrent()) return;
+        refreshing = true;
+        try { await reload(); } catch (error) {
+          if (isCurrent()) { refreshError = `刷新分组失败：${error.message}。当前保留上次成功读取的内容，请重试。`; drawPanel(); }
+        } finally { refreshing = false; }
       } }, '刷新抽签状态')));
     panel.append(header, errorBox);
-    if (data.blocked_reason) panel.append(h('div.info-box', data.blocked_reason));
-    if (active && draw.stale) panel.append(h('div.warn-box', '参赛学校或种子序号已变化。本次结果已失效，请撤销后重新核对名单并抽签。'));
+    const resultPanel = renderGroupResult(cat, formalPlan, data);
+    activeSection ||= ['draw', 'schedule', 'manual'].includes(resultPanel.dataset.resultSource) ? 'result' : active ? 'process' : 'pool';
+    panel.append(drawFlowNavigation(panel, '三人赛抽签环节', [
+      { key: 'pool', label: '抽签池' }, { key: 'process', label: '抽签过程' }, { key: 'result', label: '分组显示' },
+    ], activeSection, key => { activeSection = key; drawPanel(); }));
+    if (refreshError) panel.append(h('div.warn-box', { role: 'alert', 'data-draw-refresh-error': 'true' }, refreshError));
+    const candidates = drawPool(data.roster, active ? draw.steps : []);
+    const poolSection = h('section.draw-roster.draw-pool', { 'data-draw-section': 'pool' },
+      h('h4', `抽签池 · 未揭晓 ${candidates.length} 所学校`),
+      candidates.length ? h('div.table-scroll', table([{ label: '学校', key: 'school_name' },
+        { label: '种子序号', render: school => school.seed_no || '未设置' }], candidates))
+        : h('p.muted', data.roster.length ? '全部学校已揭晓，请核对结果。' : '当前没有有效报名，请先完成学校报名。'));
+    const processSection = h('section', { 'data-draw-section': 'process' }, h('h3.draw-process-heading', '抽签过程'));
+    const mountSections = () => {
+      panel.append(poolSection, processSection, resultPanel);
+      for (const [key, node] of [['pool', poolSection], ['process', processSection], ['result', resultPanel]]) {
+        node.classList.toggle('hidden', activeSection !== key);
+      }
+    };
+    if (data.blocked_reason) processSection.append(h('div.info-box', data.blocked_reason));
+    if (data.manual_result) {
+      processSection.append(h('p.small.muted', '已录入人工分组，本次未执行系统抽签。成员构成、人数及小组名称按人工结果保存。'));
+      mountSections();
+      return;
+    }
+    if (active && draw.stale) processSection.append(h('div.warn-box', '参赛学校或种子序号已变化。本次结果已失效，请撤销后重新核对名单并抽签。'));
     if (!active) {
-      panel.append(h('div.small.muted.mb', '核对学校名单和各组名额后开始。抽签进度自动保存，可刷新或换设备继续。'));
       const preview = h('div.draw-capacities', { 'aria-live': 'polite' });
       const start = h('button.btn.btn-primary', { disabled: !!data.blocked_reason,
         onclick: async () => {
@@ -242,36 +286,31 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
       const update = () => {
         clear(preview);
         try {
-          const values = capacities();
+          capacities();
           const seeds = data.roster.map((school) => school.seed_no);
           if (method === 'seeded' && (seeds.some((seed) => !Number.isInteger(seed) || seed < 1) || new Set(seeds).size !== seeds.length)) {
             throw new Error('请先到报名名单为每所学校填写唯一的种子序号');
           }
-          preview.append(...values.map((size, i) => h('span.chip', `${groupName(i)} ${size} 校`)));
-          start.disabled = !!data.blocked_reason;
+          start.disabled = !!data.blocked_reason || !!refreshError;
         } catch (error) { preview.append(h('span.small', error.message)); start.disabled = true; }
       };
-      panel.append(h('div.form-grid',
-        field('抽签方式', selectInput([['cycle', '循环落位'], ['random', '完全随机'], ['seeded', '种子分档']], method, {
+      processSection.append(h('div.draw-config', h('div.draw-config-fields',
+        h('div.field.draw-config-method', selectInput([['cycle', '循环落位'], ['random', '完全随机'], ['seeded', '种子分档']], method, {
           'aria-label': '抽签方式',
           disabled: !!data.blocked_reason, onchange: (event) => { method = event.target.value; update(); },
         })),
         field('小组数量', numberInput(groups, { 'aria-label': '小组数量', min: 1, step: 1, disabled: !!data.blocked_reason,
           oninput: (event) => { groups = Number(event.target.value); update(); } })),
-        field('各组人数（可选）', textInput(sizesText, { 'aria-label': '各组人数（可选）', placeholder: '例如 4,4,3；留空按人数均分', disabled: !!data.blocked_reason,
-          oninput: (event) => { sizesText = event.target.value; update(); } }), { hint: '按 A、B、C…组的顺序填写' })), preview,
-        h('p.small.muted', '循环落位：每签先从剩余学校中随机抽一所，再按 A、B、C… 顺序依次落组，某组满员后跳过。'),
-        h('p.small.muted', '完全随机：学校与组内位置都随机；种子分档：按种子序号分档，每档内抽签，每组每档最多一校。'),
-        h('details.draw-roster', h('summary', `核对参赛学校与种子（${data.roster.length} 校）`),
-          h('div.table-scroll', table([{ label: '学校', key: 'school_name' }, { label: '种子序号', render: (p) => p.seed_no || '未设置' }], data.roster))),
-        h('div.row.mt', start));
+        field('各组人数（可选）', textInput(sizesText, { 'aria-label': '各组人数（可选）', placeholder: '按 A、B、C…组填写，如 4,4,3；留空均分', disabled: !!data.blocked_reason,
+          oninput: (event) => { sizesText = event.target.value; update(); } }))), preview,
+        h('div.draw-config-actions', start)));
       update();
     } else {
       const rolling = revealState === 'rolling';
       const picking = revealState === 'picking';
-      panel.append(h('div.draw-progress', h('span', `${draw.revealed} / ${draw.total} 所学校已揭晓`),
+      processSection.append(h('div.draw-progress', h('span', `${draw.revealed} / ${draw.total} 所学校已揭晓`),
         h('span.small.muted', `${methodLabel(draw.method)} · 开始于 ${draw.created_at}`)));
-      const board = h('div.draw-board');
+      const board = h('div.draw-board', { hidden: draw.status === 'confirmed' });
       const latest = draw.steps.at(-1);
       const reveal = h('div.draw-reveal', { 'aria-live': 'polite', 'aria-atomic': 'true' });
       if (rolling || picking) {
@@ -282,7 +321,7 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
         rollNameEl = h('div.draw-school.draw-school-rolling', rollPool[0] || '正在抽签…');
         reveal.append(rollNameEl,
           h('div.draw-destination', rolling ? '点“停止并揭晓”完成本次抽签' : '已停止，等待结果…'));
-        if (!picking) startRoll(rollPool);
+        if (!picking && activeSection === 'process') startRoll(rollPool);
       } else {
         reveal.append(
           h('div.small.muted', latest ? `第 ${latest.number} 签${latest.pot ? ` · 第 ${latest.pot} 档` : ''}` : '准备揭晓'),
@@ -297,10 +336,10 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
           return h(`li${member ? '' : '.draw-empty'}`, member ? h('span', member.school_name) : '待抽签',
             member?.pot ? h('span.small.muted', `第${member.pot}档`) : null);
         }))))));
-      panel.append(board);
+      processSection.append(board);
       const actions = h('div.row.mt');
       /* 滚动/等待揭晓期间冻结抽签相关按钮：面板会随滚动重绘，必须在这里重新套用禁用状态 */
-      const locked = !!data.blocked_reason || draw.stale || busy || rolling || picking;
+      const locked = !!data.blocked_reason || draw.stale || busy || rolling || picking || !!refreshError;
       if (draw.status === 'drawing') actions.append(
         rolling
           ? h('button.btn.btn-primary', { onclick: () => stopReveal() }, '停止并揭晓')
@@ -313,8 +352,8 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
           if (await confirmAsync('确认抽签分组', '确认后在比赛赛程引用此分组，重新抽签须填写撤销原因。', '确认分组')) await mutate('confirm');
         } }, '确认抽签分组'));
       if (draw.status === 'confirmed') {
-        panel.append(h('div.info-box.mt', `已由 ${draw.confirmed_by_name} 于 ${draw.confirmed_at} 确认。比赛赛程可引用这份分组。`));
-        actions.append(h('button.btn', { disabled: draw.stale, onclick: async () => {
+        processSection.append(h('div.info-box.mt', `已由 ${draw.confirmed_by_name} 于 ${draw.confirmed_at} 确认。比赛赛程可引用这份分组。`));
+        resultPanel.append(h('button.btn.mt', { disabled: draw.stale, onclick: async () => {
           try { await openNotice(`/api/categories/${cat.id}/group-draw/notice.html`); }
           catch (error) { toast(error.message, 'error'); }
         } }, '打印分组表'));
@@ -331,15 +370,16 @@ export function renderGroupDraw(cat, initial, onChange, { client = api, isCurren
           hint: '原结果和已揭晓过程会保留；已用于正式赛程时须先处理后续依赖。', okLabel: '撤销抽签' });
         if (reason) await mutate('cancel', { reason });
       } }, '撤销本次抽签'));
-      panel.append(actions, h('details.draw-log.mt', h('summary', '查看抽签过程'),
+      processSection.append(actions, h('details.draw-log.mt', h('summary', '查看抽签过程'),
         h('div.table-scroll', table([{ label: '签次', key: 'number' }, { label: '学校', key: 'school_name' },
           { label: '小组', render: (step) => groupName(step.group) },
           { label: '档位', render: (step) => step.pot ? `第${step.pot}档` : '—' }], draw.steps))));
     }
-    if (data.history.length) panel.append(h('details.draw-history.mt', h('summary', '已撤销的抽签记录'),
+    if (data.history.length) processSection.append(h('details.draw-history.mt', h('summary', '已撤销的抽签记录'),
       ...data.history.map((old) => h('details.mt', h('summary', `抽签 ${old.id} · ${old.created_at} · ${old.revealed}/${old.total} 校已揭晓`),
         h('p.small', `撤销原因：${old.cancel_reason}`),
         ...old.groups.map((group) => h('p.small', `${group.name}：${group.members.map((p) => p.school_name).join('、') || '尚未揭晓'}`))))));
+    mountSections();
   }
   drawPanel();
   return panel;

@@ -9,14 +9,20 @@
 <link rel="stylesheet" href="/vendor/tom-select/tom-select.default.min.css">
 <link rel="stylesheet" href="/css/app.css">
 <link rel="manifest" href="/manifest.webmanifest">
-<script>
-/* 高对比主题在首屏绘制前生效，避免白底闪一下再变色。 */
-try { if (localStorage.getItem('stss_theme') === 'contrast') document.documentElement.dataset.theme = 'contrast'; } catch (e) { /* 存储不可用时使用默认主题 */ }
-</script>
 </head>
 <body>
-<a class="skip-link" href="#content">跳到主内容</a>
-<div id="app">
+<div class="login-screen" id="startup-screen">
+  <div class="login-card">
+    <div class="brand-login">
+      <span class="logo">藤</span>
+      <div class="title">藤球比赛计分系统</div>
+    </div>
+    <p id="startup-message" role="status">正在加载计分系统…</p>
+    <button class="btn" type="button" onclick="location.reload()">重新加载</button>
+    <noscript>请启用 JavaScript 后重新打开本页。</noscript>
+  </div>
+</div>
+<div id="app" class="hidden">
   <header class="topbar">
     <div class="brand">
       <span class="logo">藤</span>
@@ -26,8 +32,6 @@ try { if (localStorage.getItem('stss_theme') === 'contrast') document.documentEl
       </div>
     </div>
     <div class="topbar-right">
-      <button class="btn btn-ghost mobile-nav-toggle" id="btn-mobile-nav" type="button"
-        aria-label="打开导航" aria-expanded="false" aria-controls="sidenav">菜单</button>
       <label class="event-switcher">
         <span>当前赛事</span>
         <select id="event-select" class="select" title="当前赛事"></select>
@@ -40,26 +44,11 @@ try { if (localStorage.getItem('stss_theme') === 'contrast') document.documentEl
   </header>
   <div class="layout">
     <nav class="sidenav" id="sidenav"></nav>
-    <main class="content" id="content" tabindex="-1"><div class="panel"><div class="small muted">正在启动…</div></div></main>
+    <main class="content" id="content"></main>
   </div>
-  <div id="nav-backdrop" class="nav-backdrop" hidden></div>
-  <nav id="mobile-tabbar" class="mobile-tabbar" aria-label="快捷导航"></nav>
 </div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="/vendor/tom-select/tom-select.base.min.js"></script>
-<script type="module" src="/js/main.js"></script>
-<script>
-/* 断网等情况下模块脚本可能没有执行：页面加载后若应用未启动，再补一次启动。
-   已启动时 __stssStarted 为 true，不会重复初始化。 */
-window.addEventListener('load', function () {
-  setTimeout(function () {
-    if (window.__stssStarted) return;
-    var retry = document.createElement('script');
-    retry.type = 'module';
-    retry.src = '/js/main.js';
-    document.body.appendChild(retry);
-  }, 1200);
-});
-</script>
+<script type="module" src="/js/main.js" onerror="document.getElementById('startup-message').textContent = '页面脚本加载失败，请重新加载。'"></script>
 </body>
 </html>

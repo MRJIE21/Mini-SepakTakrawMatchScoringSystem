@@ -1,7 +1,7 @@
 /* 大屏控制台：单屏、8 个手动槽位、布局切换、推送与配对。 */
 import { api } from '../api.js';
 import { registerView, state } from '../main.js';
-import { h, clear, toast, statusBadge, fmtDateTime, pageHeader } from '../ui.js';
+import { h, clear, toast, statusBadge, fmtDateTime } from '../ui.js';
 
 const LAYOUTS = [1, 2, 3, 4, 8];
 const MODE_NAMES = { score: '比分', announce: '公告', standby: '待机' };
@@ -19,9 +19,6 @@ async function render({ el }) {
   let pollError = null;
   let pushButton = null;
   let pushHint = null;
-  let versionBadge = null;
-  let dirtyBadge = null;
-  let deviceBadge = null;
   await load();
   screenTimer = setInterval(refreshScreenStatus, 5000);
   window.addEventListener('beforeunload', () => clearInterval(screenTimer));
@@ -70,7 +67,7 @@ async function render({ el }) {
   function listRange(n) { return Array.from({ length: n }, (_, index) => index); }
   function clampPoll(value) {
     const number = Math.round(Number(value));
-    return Number.isFinite(number) && number >= 100 && number <= 1000 ? number : 500;
+    return Number.isFinite(number) && number >= 100 && number <= 1000 ? number : 250;
   }
 
   function relativeTime(value) {
@@ -102,19 +99,10 @@ async function render({ el }) {
 
   function refreshDevicePanel() {
     const old = box.querySelector('.display-device-panel');
-    updateDeviceBadge();
     if (!old) return;
     const active = ctx.screens.some((item) => !item.revoked_at);
     if (!active && old.querySelector('input')) return;
     old.replaceWith(devicePanel());
-  }
-
-  function updateDeviceBadge() {
-    if (!deviceBadge) return;
-    const paired = ctx.screens.filter((item) => !item.revoked_at);
-    const online = paired.filter((item) => item.online).length;
-    deviceBadge.textContent = paired.length ? `设备 ${online}/${paired.length} 在线` : '尚未配对';
-    deviceBadge.className = `badge ${paired.length ? (online ? 'badge-ok' : 'badge-warn') : 'badge-warn'}`;
   }
 
   function matchById(id) { return ctx.matches.find((item) => Number(item.id) === Number(id)) || null; }
@@ -135,18 +123,8 @@ async function render({ el }) {
     const { preserveScroll = true } = options;
     const scrollY = window.scrollY;
     clear(box);
-    const paired = ctx.screens.filter((item) => !item.revoked_at);
-    const online = paired.filter((item) => item.online).length;
-    versionBadge = statusBadge(`已推送 v${ctx.config?.revision || 0}`, 'ok');
-    dirtyBadge = statusBadge(ctx.dirty ? '有未推送修改' : '与已推送一致', ctx.dirty ? 'warn' : '');
-    deviceBadge = statusBadge(paired.length ? `设备 ${online}/${paired.length} 在线` : '尚未配对',
-      paired.length ? (online ? 'ok' : 'warn') : 'warn');
-    box.append(pageHeader({
-      crumbs: [{ label: '大屏' }],
-      title: '大屏控制台',
-      badges: [versionBadge, dirtyBadge, deviceBadge],
-      meta: [h('span', '单屏 · 8 个手动窗口 · 编辑后点“推送”才上屏；大屏不显示标题栏、页脚、主客队标签与队员名。')],
-      actions: [
+    box.append(
+      h('div.panel-head', h('h2', '大屏控制台'), h('div.row.tight',
         h('button.btn', {
           onclick: () => {
             const revision = Number(ctx.config?.revision || 0);
@@ -155,16 +133,15 @@ async function render({ el }) {
               '_blank', 'noopener');
           },
         }, '预览当前大屏'),
-        h('button.btn', { onclick: load }, '刷新配置'),
-      ],
-    }));
+        h('button.btn', { onclick: load }, '刷新'),
+        h('span.small.muted', `已推送 v${ctx.config?.revision || 0}`))),
+
+      h('div.row.tight.mt', h('span.small.muted', '已推送版本：'), h('b', `v${ctx.config?.revision || 0}`),
+        h('span.small.muted', ctx.dirty ? ' · 有未推送修改' : ' · 与已推送一致')),
+    );
     const workspace = h('div.display-admin-workspace');
-    const controls = h('div.display-admin-controls'); controls.append(layoutPanel(), modePanel());
-    const main = h('div.display-admin-main'); main.append(slotsPanel());
-    const center = h('div.display-admin-center'); center.append(controls, main);
-    const side = h('div.display-admin-side'); side.append(devicePanel(), pushPanel());
-    workspace.append(center, side);
-    box.append(workspace);
+    workspace.append(devicePanel(), layoutPanel(), modePanel(), slotsPanel());
+    box.append(pushPanel(), workspace);
     // 重绘后同步原地校验状态（刷新间隔/窗口数/重复场次），避免按钮与错误提示滞后。
     syncPushState();
     if (preserveScroll) {
@@ -175,7 +152,7 @@ async function render({ el }) {
   function devicePanel() {
     const screens = ctx.screens.filter((item) => !item.revoked_at);
     const card = h('div.panel.display-device-panel');
-    card.append(h('h3', '大屏设备'), h('div.small.muted', '在线状态每 5 秒自动刷新'));
+    card.append(h('h3', '大屏设备'));
     if (!screens.length) {
       card.append(h('div.info-box', '尚未配对。请让体育馆大屏打开 /display.html，把屏幕上的 6 位配对码输入这里。'));
       const code = h('input.input', { type: 'text', placeholder: '6 位配对码', inputmode: 'numeric', maxlength: '6' });
@@ -234,23 +211,24 @@ async function render({ el }) {
         },
       }, `${layout} 窗口`));
     }
-    card.append(row, h('div.small.muted.mt', '1–4 窗口时，在下方勾选要显示的槽位；8 窗口固定显示全部。'));
+    card.append(row);
     return card;
   }
 
   function modePanel() {
-    const card = h('div.panel');
-    card.append(h('h3', '画面'));
-    const row = h('div.row.tight');
+    const card = h('div.panel.display-mode-panel');
+    const row = h('div.display-mode-switch', { role: 'group', 'aria-label': '画面模式' });
     for (const mode of ['score', 'announce', 'standby']) {
       row.append(h('button.btn', {
         class: ctx.draft.mode === mode ? 'btn btn-primary' : 'btn',
+        'aria-pressed': String(ctx.draft.mode === mode),
         onclick: () => { ctx.draft.mode = mode; markDirty(); draw(); },
       }, MODE_NAMES[mode]));
     }
-    card.append(row);
+    card.append(h('div.display-mode-head', h('h3', '画面'), row));
     const poll = h('input.input', {
       type: 'number', min: '100', max: '1000', step: '50',
+      id: 'display-poll-ms',
       value: String(ctx.draft.poll_ms),
       oninput: (event) => {
         // 只做就地校验，不重绘（重绘会丢焦点）；推送按钮与错误提示在此同步。
@@ -262,19 +240,21 @@ async function render({ el }) {
       },
     });
     pollError = h('div.field-error.hidden', '刷新间隔需为 100–1000 的整数毫秒');
-    card.append(h('div.field.mt', h('label', '比分刷新间隔（100–1000ms）'), poll, pollError,
-      h('div.small.muted', '默认 500ms；仅比分模式生效，公告/待机固定 2 秒。')));
+    card.append(h('div.display-poll-setting', { class: `display-poll-setting${ctx.draft.mode === 'score' ? '' : ' hidden'}` },
+      h('label', { for: 'display-poll-ms' }, '比分刷新间隔'),
+      h('div.display-poll-control', poll, h('span.muted', 'ms')), pollError));
     const title = h('input.input', {
-      value: ctx.draft.announcement_title, placeholder: '公告标题',
+      id: 'display-announcement-title', value: ctx.draft.announcement_title, placeholder: '公告标题',
       oninput: (event) => { ctx.draft.announcement_title = event.target.value; markDirty(); },
     });
     const body = h('textarea.textarea', {
-      placeholder: '公告正文', rows: '3',
+      id: 'display-announcement-body', placeholder: '公告正文', rows: '3',
       oninput: (event) => { ctx.draft.announcement_body = event.target.value; markDirty(); },
     });
     body.value = ctx.draft.announcement_body;
-    card.append(h('div.field.mt', h('label', '公告标题'), title),
-      h('div.field', h('label', '公告正文'), body));
+    card.append(h('div.display-announcement-fields', { class: `display-announcement-fields${ctx.draft.mode === 'announce' ? '' : ' hidden'}` },
+      h('div.field', h('label', { for: 'display-announcement-title' }, '公告标题'), title),
+      h('div.field', h('label', { for: 'display-announcement-body' }, '公告正文'), body)));
     return card;
   }
 
@@ -283,8 +263,7 @@ async function render({ el }) {
     const assigned = ctx.draft.slots.filter(Boolean).length;
     card.append(h('div.panel-head',
       h('h3', '8 个窗口（手动指定比赛）'),
-      h('span.badge', `已指定 ${assigned} / 8`)),
-      h('div.small.muted', '同一场比赛不能占用两个窗口；标签默认取场地的名称，可修改。'));
+      h('span.badge', `已指定 ${assigned} / 8`)));
     const grid = h('div.display-slots');
     for (let index = 0; index < 8; index += 1) {
       grid.append(slotCard(index));
@@ -371,7 +350,7 @@ async function render({ el }) {
   }
 
   function pushHintText(check) {
-    if (check.valid) return '推送后大屏会在 1 秒内应用。';
+    if (check.valid) return '';
     if (!check.pollValid) return '请先修正刷新间隔（100–1000 的整数毫秒）。';
     return '请先按布局勾选正确数量的窗口，并避免重复场次。';
   }
@@ -383,7 +362,10 @@ async function render({ el }) {
       pushButton.disabled = ctx.busy || !check.valid;
       pushButton.textContent = ctx.busy ? '推送中…' : '推送到大屏';
     }
-    if (pushHint) pushHint.textContent = pushHintText(check);
+    if (pushHint) {
+      pushHint.textContent = pushHintText(check);
+      pushHint.hidden = check.valid;
+    }
     updateStatus();
   }
 
@@ -394,10 +376,8 @@ async function render({ el }) {
       disabled: ctx.busy || !check.valid,
       onclick: push,
     }, ctx.busy ? '推送中…' : '推送到大屏');
-    pushHint = h('span.small.muted', pushHintText(check));
-    row.append(h('div.panel-head', h('h3', '推送到大屏'),
-      h('span.small.muted', `已推送 v${ctx.config?.revision || 0}`)),
-      h('div.row.tight', pushButton, pushHint));
+    pushHint = h('span.small.muted', { hidden: check.valid }, pushHintText(check));
+    row.append(h('div.row.tight', pushButton, pushHint));
     if (ctx.pushMessage) {
       row.append(h('div.small.mt',
         { class: ctx.pushMessage.kind === 'error' ? 'field-error' : '' },
@@ -450,11 +430,8 @@ async function render({ el }) {
   function updateStatus() {
     if (!ctx.config) return;
     const published = ctx.config.revision || 0;
-    if (versionBadge) versionBadge.textContent = `已推送 v${published}`;
-    if (dirtyBadge) {
-      dirtyBadge.textContent = ctx.dirty ? '有未推送修改' : '与已推送一致';
-      dirtyBadge.className = `badge${ctx.dirty ? ' badge-warn' : ''}`;
-    }
+    const line = box.querySelector('.panel-head .small');
+    if (line) line.textContent = `已推送 v${published}${ctx.dirty ? ' · 有未推送修改' : ''}`;
   }
 }
 

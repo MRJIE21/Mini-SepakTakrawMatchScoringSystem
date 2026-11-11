@@ -30,8 +30,8 @@ def read_rows(text):
         fields = [ALIASES.get(s.strip(), s.strip()) for s in (reader.fieldnames or [])]
         if len(fields) != len(set(fields)):
             raise bad_request('表头不能重复（姓名与运动员属于同一列）')
-        if '运动员' not in fields or not ({'项目', '项目ID'} & set(fields)):
-            raise bad_request('表头至少包含“项目”和“运动员”，仅建人员时项目留空')
+        if '运动员' not in fields:
+            raise bad_request('表头至少包含“姓名”或“运动员”；不填写项目时只导入人员')
         unknown = set(fields) - set(HEADERS)
         if unknown:
             raise bad_request('无法识别表头：' + '、'.join(sorted(unknown)))
@@ -138,7 +138,7 @@ def changes_from_model(snapshot, model):
     return {'event_identity': snapshot['event_identity'], 'base_hash': snapshot['base_hash'], 'people': people, 'projects': projects}
 
 
-def convert(snapshot, initial, text):
+def convert(snapshot, initial, text, people_only=False):
     model = model_from_changes(snapshot, initial)
     rows = read_rows(text)
     errors, items, listed = [], [], {}
@@ -213,6 +213,8 @@ def convert(snapshot, initial, text):
 
     for row in rows:
         try:
+            if people_only and any(row.get(k) for k in ('项目', '项目ID', '项目号码', '队长', '种子序号', '参赛选择', '报名备注')):
+                raise bad_request('人员导入不处理参赛项目，请使用“导入项目名单”')
             if row.get('学校') and not escaped_match(row['学校'], snapshot['school']['name']):
                 raise bad_request('学校与当前工作台不一致，请进入对应学校导入')
             label, cid = row.get('项目', ''), row.get('项目ID', '')

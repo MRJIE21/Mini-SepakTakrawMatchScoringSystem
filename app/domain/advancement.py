@@ -11,8 +11,7 @@ import re
 
 from . import ranking
 from .slots import SlotSpec
-from .. import db, team_rules_store
-from ..read_projection import text_integer_rows
+from .. import team_rules_store
 
 FINISHED_RESULTS = ("normal", "home_forfeit", "away_forfeit")
 
@@ -130,15 +129,8 @@ def resolve_spec(conn, spec: SlotSpec) -> tuple[int | None, bool, str]:
 # ------------------------------------------------------------------ 方案刷新
 def refresh_plan(conn, plan_id: int) -> dict:
     """重算方案内所有签位的解析结果与场次状态。返回受影响场次清单。"""
-    matches = text_integer_rows(conn,
-        """SELECT id,reset_state,note,status,home_actual,away_actual,pool_id,
-            home_source_type,home_participation,home_source_pool,home_source_rank,home_source_match,
-            away_source_type,away_participation,away_source_pool,away_source_rank,away_source_match
-            FROM matches WHERE plan_id = ? ORDER BY seq, id""",
-        ('id','reset_state','note','status','home_actual','away_actual','pool_id',
-         'home_source_type','home_participation','home_source_pool','home_source_rank','home_source_match',
-         'away_source_type','away_participation','away_source_pool','away_source_rank','away_source_match'), (plan_id,))
-    has_candidates = bool(db.q1(conn, "SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'"))
+    matches = conn.execute(
+        "SELECT * FROM matches WHERE plan_id = ? ORDER BY seq, id", (plan_id,)).fetchall()
     affected: list[dict] = []
     for row in matches:
         if dict(row).get("reset_state") in ("inactive", "review"):
@@ -159,18 +151,6 @@ def refresh_plan(conn, plan_id: int) -> dict:
                     "resolved": resolved,
                 })
         else:
-            # A claimed ready fixture can have offline records not visible on the server.
-            # Preserve its identity until an independently reviewed impact plan resolves it.
-            recorded = (row['home_actual'], row['away_actual'])
-            resolved = (None if home_bye else home_pid, None if away_bye else away_pid)
-            if resolved != recorded or home_bye or away_bye:
-                from .. import access
-                claim = access.assignment(conn, 'match', row['id'])
-                pending = db.q1(conn,"SELECT id FROM result_candidates WHERE subject_kind='match' AND subject_id=? LIMIT 1",(row['id'],)) if has_candidates else None
-                if claim or pending:
-                    affected.append({'match_id':row['id'], 'reason':'场次已领取，可能存在本机过程，需显式处置',
-                                     'recorded':recorded, 'resolved':resolved})
-                    continue
             if home_bye and away_bye:
                 updates["status"] = "void"
             elif home_bye or away_bye:
@@ -185,9 +165,6 @@ def refresh_plan(conn, plan_id: int) -> dict:
                 updates["status"] = "pending"
                 updates["home_actual"] = None
                 updates["away_actual"] = None
-        # A refresh must not rewrite every unchanged ready row. Apart from
-        # needless locks, those no-op writes also fire roster revision triggers.
-        updates = {key: value for key, value in updates.items() if row[key] != value}
         if updates:
             sets = ", ".join(f"{k} = ?" for k in updates)
             conn.execute(f"UPDATE matches SET {sets} WHERE id = ?",

@@ -4,12 +4,12 @@
    名次一律标注来源，列表排序不冒充正式名次。 */
 import { api, download, openPrint, captureRequestContext } from '../api.js';
 import { registerView, state, loadStructure, go } from '../main.js';
+import { renderCorrections } from './admin.js';
 import { workspaceLink } from '../workspaceContext.js';
-import { mountIndividualDraw } from '../individualDraw.js';
 import {
   h, field, selectInput, textInput, table, toast, modal, confirmDialog, confirmAsync, clear,
   statusBadge, task, formDialog, searchSelect, emptyState, errorState, loadingState,
-  categoryLabel, exportOrderControl, scrollableTable, pageHeader,
+  categoryLabel, exportOrderControl, scrollableTable, groupProjectSelects,
 } from '../ui.js';
 
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
@@ -25,89 +25,91 @@ function scopedClient(context = captureRequestContext(), signal) {
   };
 }
 
-async function render({ el, params, refresh, signal, requestContext, isCurrent = () => true }) {
+async function render({ el, params, refresh, signal, requestContext, isCurrent = () => true, resultKind = null, resultView = 'results' }) {
   const client = scopedClient(requestContext, signal);
   if (!state.eventId) throw new Error('请先在“赛事首页”中创建赛事');
   const structure = state.structure || await loadStructure();
   const cats = [];
   for (const g of structure.groups) {
-    for (const c of g.categories) cats.push({ ...c, group_name: g.name });
+    for (const c of g.categories) if (!resultKind || c.kind === resultKind) cats.push({ ...c, group_name: g.name });
   }
   if (!cats.length) {
-    el.append(emptyState({ text: '当前赛事还没有项目', hint: '请先在“赛事设置”中添加比赛项目。' }));
+    el.append(emptyState({ text: resultKind ? `当前赛事没有${resultKind === 'team' ? '三人赛' : '个人赛'}项目` : '当前赛事还没有项目', hint: '请先在“赛事设置”中添加比赛项目。' }));
     return;
   }
   const catId = Number(params.category || cats[0].id);
   const cat = cats.find((c) => c.id === catId);
   const embedded = params.embedded === 'workspace';
-  let resultOrder = 'asc';
+  let resultOrder = 'desc';
+  let resultScope = '8';
   if (!cat) {
     /* 上下文非法时说明并给重新选择入口，不静默回退到第一个项目（§4.1） */
     el.append(errorState(new Error(`项目不存在或不属于本赛事（id=${catId}）`),
-      () => { location.hash = '#/results'; }));
+      () => { location.hash = `#/${resultView}`; }));
     return;
   }
 
-  if (!embedded) el.append(pageHeader({
-    crumbs: [{ label: '项目工作台' }, { label: categoryLabel(cat) }, { label: '成绩与名次' }],
-    title: '成绩与名次',
-    badges: [statusBadge(cat.kind === 'team' ? '三人赛' : '个人赛', 'info')],
-    meta: [h('span', cat.kind === 'team'
-      ? '排名依次比较积分、C 值、Z 值和现场抽签；每项名次标注来源，未确认名次不计入积分。'
-      : '个人赛只录入最终成绩与名次，不依赖三人赛的编排方案。'),
-      !canWrite() ? h('span', '只读账号如需导出/打印，请联系成绩人员。') : null,
-    ].filter(Boolean),
-    actions: [
-      h('label.context-field.page-project', h('span', '比赛项目'), selectInput(
-        cats.map((c) => [c.id, categoryLabel(c, { withGroup: true })]), cat.id,
-        { 'aria-label': '切换项目', onchange: (e) => { location.hash = `#/results?category=${e.target.value}`; } })),
-      canWrite() ? exportOrderControl((value) => { resultOrder = value; }) : null,
+  const correctionActive = !embedded && canWrite() && params.correction === '1';
+  const correctionView = cat.kind === 'team' ? 'teamRankings' : 'individualRankings';
+  const correctionLink = () => h('button.btn', {
+    onclick: () => go(correctionView, { category: cat.id, correction: 1 }),
+  }, '成绩更正');
+  if (correctionActive) {
+    el.append(h('div.panel',
+      h('div.panel-head',
+        h('h2', `成绩更正 · ${categoryLabel(cat, { withGroup: true })}`),
+        groupProjectSelects(cats, cat, id => go(resultView, { category: id, correction: 1 }))),
+      h('button.btn', { onclick: () => go(resultView, { category: cat.id }) }, '返回成绩')));
+    return renderCorrections({ el, cat, signal, requestContext, isCurrent });
+  }
+
+  const hasExportScope = cat.kind === 'individual' || resultKind === 'team';
+  const exportScope = () => hasExportScope ? h('label.small.row.tight', h('span', '导出范围'), selectInput(
+    [['all', '全部'], ['8', '前八名']], resultScope,
+    { 'aria-label': '导出范围', onchange: (event) => { resultScope = event.target.value; } })) : null;
+  const exportPath = resultKind === 'team' ? '/api/exports/placements' : '/api/exports/results';
+  const exportParams = () => ({ category_id: cat.id, order: resultOrder,
+    ...(hasExportScope ? { top_n: resultScope } : {}) });
+
+  if (!embedded) el.append(h('div.panel',
+    h('div.panel-head',
+      h('h2', resultKind ? `${resultKind === 'team' ? '三人赛名次' : '个人赛成绩排名'} · ${categoryLabel(cat, { withGroup: true })}` : `${categoryLabel(cat, { withGroup: true })} · 成绩与名次`),
+      groupProjectSelects(cats, cat, (id) => { location.hash = `#/${resultView}?category=${id}`; })),
+    h('div.row.tight.results-export-toolbar',
+      /* 导出范围写在按钮上（§13.4） */
+      canWrite() ? exportScope() : null,
+      canWrite() ? exportOrderControl((value) => { resultOrder = value; }, resultOrder) : null,
+      canWrite() ? h('div.results-export-actions',
       canWrite() ? h('button.btn', {
         title: `只导出 ${categoryLabel(cat)} 的成绩`,
-        onclick: task(() => download('/api/exports/results.csv', {
-          category_id: cat.id, order: resultOrder })),
-      }, '导出 CSV') : null,
+        onclick: task(() => download(`${exportPath}.csv`, exportParams())),
+      }, resultKind === 'team' ? '导出名次 CSV' : '导出本项目成绩 CSV') : null,
       canWrite() ? h('button.btn', {
         title: `只导出 ${categoryLabel(cat)} 的成绩（Excel）`,
-        onclick: task(() => download('/api/exports/results.xlsx', {
-          category_id: cat.id, order: resultOrder })),
-      }, '导出 XLSX') : null,
+        onclick: task(() => download(`${exportPath}.xlsx`, exportParams())),
+      }, resultKind === 'team' ? '导出名次 XLSX' : '导出本项目成绩 XLSX') : null,
       canWrite() ? h('button.btn', {
         onclick: task(() => openPrint('category-notice', {
           category_id: cat.id, order: resultOrder, event: state.eventId })),
-      }, cat.kind === 'individual' ? '打印成绩单' : '打印名次表') : null,
-    ].filter(Boolean),
-  }));
-  else el.append(h('div.workspace-toolbar',
-    h('div.small.muted.grow', cat.kind === 'team'
-      ? '排名依次比较积分、C 值、Z 值和现场抽签；正式名次以确认状态为准。'
-      : '个人赛成绩与名次独立展示，不依赖三人赛编排方案。'),
-    !canWrite() ? h('span.small.muted', '只读账号如需导出/打印，请联系成绩人员。') : null,
-    canWrite() ? exportOrderControl((value) => { resultOrder = value; }) : null,
+      }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null, correctionLink()) : null),
+  ));
+  else if (canWrite()) el.append(h('div.workspace-toolbar.results-export-toolbar',
+    canWrite() ? exportScope() : null,
+    canWrite() ? exportOrderControl((value) => { resultOrder = value; }, resultOrder) : null,
+    h('div.results-export-actions',
     canWrite() ? h('button.btn', {
       title: `只导出 ${categoryLabel(cat)} 的成绩`,
-      onclick: task(() => download('/api/exports/results.csv', {
-        category_id: cat.id, order: resultOrder })),
+      onclick: task(() => download(`${exportPath}.csv`, exportParams())),
     }, '导出本项目 CSV') : null,
     canWrite() ? h('button.btn', {
       title: `只导出 ${categoryLabel(cat)} 的成绩（Excel）`,
-      onclick: task(() => download('/api/exports/results.xlsx', {
-        category_id: cat.id, order: resultOrder })),
+      onclick: task(() => download(`${exportPath}.xlsx`, exportParams())),
     }, '导出本项目 XLSX') : null,
     canWrite() ? h('button.btn', {
       onclick: task(() => openPrint('category-notice', {
         category_id: cat.id, order: resultOrder, event: state.eventId })),
-    }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null));
+    }, cat.kind === 'individual' ? '打印个人赛成绩单' : '打印三人赛名次表') : null, correctionLink())));
 
-  if (cat.kind === 'individual') {
-    const drawBox = h('div'); el.append(drawBox);
-    /* 只读角色（viewer/recorder）不操作抽签：面板对它们只读取正式签表，
-       不会因为 GET /session 的 403 报错。 */
-    try {
-      await mountIndividualDraw({ container: drawBox, category: cat, canManage: canWrite(),
-        requestContext, signal, isCurrent });
-    } catch (error) { if (isCurrent()) drawBox.append(errorState(error)); }
-  }
   const standingsBox = h('div');
   const placementBox = h('div');
   el.append(standingsBox, placementBox);
@@ -117,12 +119,12 @@ async function render({ el, params, refresh, signal, requestContext, isCurrent =
   async function load() {
     clear(standingsBox);
     clear(placementBox);
-    if (cat.kind === 'team') {
+    if (cat.kind === 'team' && !resultKind) {
       standingsBox.append(h('div.panel', loadingState('正在计算小组排名…')));
     }
     placementBox.append(h('div.panel', loadingState('正在加载项目名次…')));
     try {
-      if (cat.kind === 'team') await drawTeamStandings(standingsBox, cat, load, params, client);
+      if (cat.kind === 'team' && !resultKind) await drawTeamStandings(standingsBox, cat, load, params, client);
       else clear(standingsBox);
       if (!isCurrent()) return;
       await drawPlacements(placementBox, cat, load, refresh, client);
@@ -152,8 +154,8 @@ async function drawTeamStandings(container, cat, reload, params, client = scoped
       hint: '在“分组”完成抽签，再在“赛程”核对并确认小组赛阶段。',
       action: canWrite() ? h('button.btn.btn-primary', {
         onclick: () => params.embedded === 'workspace'
-          ? (location.hash = workspaceLink({ ...cat, event_id: state.eventId }, 'schedule', { view: 'groups' }))
-          : go('workspace', { event: state.eventId, category: cat.id, tab: 'schedule', view: 'groups' }),
+          ? (location.hash = workspaceLink({ ...cat, event_id: state.eventId }, 'groups'))
+          : go('workspace', { event: state.eventId, category: cat.id, tab: 'groups' }),
       }, '前往分组') : null,
     }));
     return;
@@ -188,7 +190,7 @@ async function drawPool(box, pool, redraw, client = scopedClient()) {
     box.append(h('div.warn-box.mb', '成绩变化后小组名次与已确认快照不一致，请重新确认名次。'));
   }
   box.append(scrollableTable(h('div.table-scroll', table([
-    { label: '名次', render: (r) => rowRank(r), sticky: 'left' },
+    { label: '名次', render: (r) => rowRank(r), sticky: 'left', cellClass: 'nowrap' },
     { label: '参赛主体', key: 'label', sticky: 'left' },
     { label: '场次', key: 'played', align: 'center' },
     { label: '胜', key: 'wins', align: 'center' },
@@ -216,7 +218,7 @@ async function drawPool(box, pool, redraw, client = scopedClient()) {
   if (data.unresolved.length && canWrite()) {
     for (const group of data.unresolved) {
       box.append(h('div.row.mt',
-        h('div.warn-box.flex-1',
+        h('div.warn-box', { style: 'flex:1' },
           `第${group.rank_from}—${group.rank_to}名并列：${group.members.map((m) => m.label).join('、')}，需录入抽签结果`),
         h('button.btn.btn-primary', { onclick: () => openLots(pool, group, redraw, data.base_results, client) }, '录入抽签')));
     }
@@ -372,41 +374,34 @@ async function drawPlacements(container, cat, reload, refresh, client = scopedCl
   clear(container);
   container.append(panel);
   const pdata = await client.get(`/api/categories/${cat.id}/placements`);
-  /* 多组项目的名次恢复只能人工核对；单组循环项目才保留一键重生成入口（D05）。 */
-  let multiPool = false;
-  if (cat.kind === 'team') {
-    try {
-      const plan = (await client.get(`/api/categories/${cat.id}/plan`)).plan;
-      multiPool = (plan?.stages || []).flatMap((stage) => stage.pools || [])
-        .filter((pool) => pool.kind !== 'bracket').length > 1;
-    } catch { multiPool = false; }
-  }
   const prows = pdata.placements.map((p) => ({ ...p,
     display: cat.kind === 'team' ? p.school_name : `${p.school_name}·${p.subject}` }));
   if (!prows.length) {
     panel.append(emptyState({
       text: '尚未录入任何名次',
-      hint: cat.kind === 'team'
-        ? '确认小组名次后可按比赛结果推导项目名次，也可手工录入现场确认名次。'
-        : '个人赛名次来自成绩录入页；未确认名次不计入学校团体总分。',
     }));
   } else {
     panel.append(scrollableTable(h('div.table-scroll', table([
       {
-        label: '名次', sticky: 'left', render: (p) => (p.status === 'confirmed'
+        label: '名次', sticky: 'left', cellClass: 'nowrap', render: (p) => p.status === 'dsq' ? '取消成绩' : (p.status === 'confirmed'
           ? `第 ${p.rank_no} 名` : h('span.badge.badge-warn', '待确认')),
       },
       { label: '参赛主体', key: 'display', sticky: 'left' },
+      ...(cat.kind === 'individual' ? [
+        { label: '有效次数', render: p => p.result_value ?? '—', align: 'num' },
+        { label: '失误次数', render: p => p.error_count ?? '—', align: 'num' },
+        { label: '犯规次数', render: p => p.violation_count ?? '—', align: 'num' },
+      ] : []),
       { label: '基础分', key: 'base_points', align: 'center' },
       { label: '倍数', key: 'multiplier', align: 'center' },
       { label: '计入积分', key: 'points', align: 'center', sticky: 'right' },
       {
         /* 每个名次都标来源，不用列表排序冒充正式名次（§13.1） */
-        label: '来源', render: (p) => h('span.small',
+        label: '来源', render: (p) => p.status === 'dsq' ? '—' : h('span.small',
           statusBadge(SOURCE_TEXT[p.source] || p.source, p.status === 'confirmed' ? 'ok' : 'warn'),
           p.note ? ` · ${p.note}` : ''),
       },
-      {
+      ...(cat.kind === 'team' ? [{
         label: '操作',
         render: (p) => (canWrite() ? h('button.btn.small.btn-danger', {
           onclick: async () => {
@@ -420,29 +415,23 @@ async function drawPlacements(container, cat, reload, refresh, client = scopedCl
             } catch (e) { toast(e.message, 'error'); }
           },
         }, '删除') : h('span.muted', '只读')),
-      },
+      }] : []),
     ], prows)), { hint: '横向滚动查看完整数据' }));
-    const pending = prows.filter((p) => p.status !== 'confirmed');
+    const pending = prows.filter((p) => p.status === 'pending');
     if (pending.length) {
       panel.append(h('div.warn-box.mt',
         `${pending.length} 项名次待核对/待确认，不计入学校团体总分。` +
-        (multiPool
-          ? '多组项目请按各组名次逐项手工核对项目名次。'
-          : '若刚完成成绩更正或重新确认小组名次，请按当前小组名次重新生成或手工复核。')));
+        '若刚完成成绩更正或重新确认小组名次，请按当前小组名次重新生成或手工复核。'));
       if (cat.kind === 'team' && canWrite()) {
-        panel.append(h('div.row.mt', multiPool
-          ? h('button.btn', {
-            onclick: () => openManualPlacement(cat, pdata.placements, reload, client),
-          }, '多组项目请手工核对名次')
-          : h('button.btn', {
-            onclick: async () => {
-              try {
-                const res = await client.post(`/api/categories/${cat.id}/placements/from-pools`, {});
-                toast(res.message || '已按当前小组名次生成项目名次', 'ok');
-                reload();
-              } catch (e) { toast(e.message, 'error'); }
-            },
-          }, '按当前小组名次重新生成名次')));
+        panel.append(h('div.row.mt', h('button.btn', {
+          onclick: async () => {
+            try {
+              const res = await client.post(`/api/categories/${cat.id}/placements/from-pools`, {});
+              toast(res.message || '已按当前小组名次生成项目名次', 'ok');
+              reload();
+            } catch (e) { toast(e.message, 'error'); }
+          },
+        }, '按当前小组名次重新生成名次')));
       }
     }
   }
@@ -470,8 +459,7 @@ async function drawPlacements(container, cat, reload, refresh, client = scopedCl
       ? h('button.btn', { onclick: () => openManualPlacement(cat, pdata.placements, reload, client) },
         '手工录入现场确认名次')
       : h('button.btn.btn-primary', { onclick: () => go('individual', { category: cat.id }) },
-        '前往个人赛成绩录入'),
-    h('div.small.muted', '系统不会为未完成比赛或未确认名次补造结果。')));
+        '前往个人赛成绩录入')));
 }
 
 /* 手工录入名次：从有效报名名单里选，不再靠名称模糊匹配（§13.1） */
@@ -531,3 +519,8 @@ async function openManualPlacement(cat, existing, reload, client = scopedClient(
 }
 
 registerView({ name: 'results', label: '小组与项目成绩', roles: ['admin', 'organizer', 'recorder', 'viewer'], render });
+
+for (const [name, label, kind] of [['teamRankings', '三人赛名次', 'team'], ['individualRankings', '个人赛成绩排名', 'individual']]) {
+  registerView({ name, label, roles: ['admin', 'organizer', 'viewer', 'display_operator'],
+    render: args => render({ ...args, resultKind: kind, resultView: name }) });
+}

@@ -36,7 +36,8 @@ def pool_standings_payload(conn, pool, include_excluded: bool = True) -> dict:
              LEFT JOIN teams t ON t.id = p.team_id
              LEFT JOIN athletes a ON a.id = p.athlete_id
              LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)
-            WHERE pm.pool_id = ? ORDER BY pm.seed_no IS NULL, pm.seed_no, pm.id""",
+            WHERE pm.pool_id = ? AND p.deleted_at IS NULL
+            ORDER BY pm.seed_no IS NULL, pm.seed_no, pm.id""",
         (pool["id"],))
     member_list = []
     for m in members:
@@ -177,7 +178,9 @@ def record_lots(ctx):
     members = {r["participation_id"] for r in db.q(
         ctx.conn, "SELECT participation_id FROM pool_members WHERE pool_id = ?", (pool["id"],))}
     for pid in order:
-        part = db.q1(ctx.conn, "SELECT category_id FROM participations WHERE id = ?", (pid,))
+        part = db.q1(ctx.conn,
+                     "SELECT category_id FROM participations WHERE id = ? AND deleted_at IS NULL",
+                     (pid,))
         if part is None:
             raise not_found(f"参赛记录 {pid} 不存在")
         if part["category_id"] != plan["category_id"]:
@@ -489,6 +492,30 @@ def review_manual_placements_after_pool_confirm(conn, category_id: int, pool) ->
 def list_placements(ctx):
     category_id = int(ctx.params["category_id"])
     cat = category_context(ctx.conn, category_id)
+    if cat["kind"] == "individual":
+        rows = db.q(ctx.conn, """SELECT pl.*, p.id AS result_participation_id,
+                       a.name AS subject, COALESCE(s.short_name, s.name) AS school_name,
+                       s.id AS school_id, ir.result_value, ir.error_count, ir.violation_count,
+                       ir.result_status
+                  FROM individual_results ir
+                  JOIN participations p ON p.id = ir.participation_id
+                  JOIN athletes a ON a.id = p.athlete_id
+                  JOIN schools s ON s.id = a.school_id
+                  LEFT JOIN placements pl ON pl.category_id = ir.category_id AND pl.participation_id = p.id
+                 WHERE ir.category_id = ? AND p.deleted_at IS NULL
+                   AND (pl.id IS NOT NULL OR ir.result_status = 'dsq')
+                 ORDER BY ir.result_status = 'dsq', pl.rank_no IS NULL, pl.rank_no, s.name, a.name""",
+                    (category_id,))
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["participation_id"] = item.pop("result_participation_id")
+            if item["result_status"] == "dsq":
+                item.update(category_id=category_id, rank_no=None, status="dsq", source=None, note=None)
+            base, multiplier, pts = points.placement_points(item["rank_no"], cat["kind"])
+            item.update(base_points=base, multiplier=multiplier, points=pts)
+            out.append(item)
+        return {"category": cat, "placements": out}
     rows = db.q(ctx.conn,
                 """SELECT pl.*, COALESCE(t.name, a.name) AS subject,
                           COALESCE(s.short_name, s.name) AS school_name,
@@ -498,7 +525,8 @@ def list_placements(ctx):
                      LEFT JOIN teams t ON t.id = p.team_id
                      LEFT JOIN athletes a ON a.id = p.athlete_id
                      LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)
-                    WHERE pl.category_id = ? ORDER BY pl.rank_no IS NULL, pl.rank_no, pl.id""",
+                    WHERE pl.category_id = ? AND p.deleted_at IS NULL
+                    ORDER BY pl.rank_no IS NULL, pl.rank_no, pl.id""",
                 (category_id,))
     out = []
     for r in rows:
@@ -519,7 +547,8 @@ def upsert_placement(ctx):
     pid = int(ctx.body.get("participation_id") or 0)
     if not pid:
         raise bad_request("请指定参赛主体")
-    part = db.q1(ctx.conn, "SELECT * FROM participations WHERE id = ?", (pid,))
+    part = db.q1(ctx.conn,
+                 "SELECT * FROM participations WHERE id = ? AND deleted_at IS NULL", (pid,))
     if part is None:
         raise not_found("参赛记录不存在")
     if part["category_id"] != category_id:
@@ -560,6 +589,8 @@ def upsert_placement(ctx):
 @route("DELETE", r"/api/placements/(?P<placement_id>\d+)", roles=ORG)
 def delete_placement(ctx):
     placement = get_or_404(ctx.conn, "placements", int(ctx.params["placement_id"]), "名次记录")
+    if category_context(ctx.conn, placement["category_id"])["kind"] == "individual":
+        raise bad_request("个人赛名次由已确认成绩和现场抽签结果统一确定，请在个人赛成绩页更正")
     with db.tx(ctx.conn):
         db.run(ctx.conn, "DELETE FROM placements WHERE id = ?", (placement["id"],))
         recompute_category_points(ctx.conn, placement["category_id"])
@@ -789,7 +820,8 @@ def recompute_category_points(conn, category_id: int) -> int:
                            JOIN participations p ON p.id = pl.participation_id
                            LEFT JOIN teams t ON t.id = p.team_id
                            LEFT JOIN athletes a ON a.id = p.athlete_id
-                          WHERE pl.category_id = ? AND pl.status = 'confirmed'""", (category_id,))
+                          WHERE pl.category_id = ? AND pl.status = 'confirmed'
+                            AND p.deleted_at IS NULL""", (category_id,))
     db.run(conn, "DELETE FROM school_points WHERE category_id = ?", (category_id,))
     count = 0
     for pl in placements:
@@ -833,11 +865,11 @@ def group_started(conn, group_id) -> bool:
         return True
     if db.q1(conn, f"""SELECT 1 FROM individual_results ir
              JOIN participations p ON p.id = ir.participation_id
-             WHERE p.category_id IN ({marks}) LIMIT 1""", args) is not None:
+             WHERE p.category_id IN ({marks}) AND p.deleted_at IS NULL LIMIT 1""", args) is not None:
         return True
     if db.q1(conn, f"""SELECT 1 FROM settings s
-             WHERE s.k IN (SELECT 'recording:individual:' || p.id FROM participations p
-                            WHERE p.category_id IN ({marks})) LIMIT 1""", args) is not None:
+             WHERE s.k IN (SELECT 'recording:individual_project:' || c.id FROM categories c WHERE c.id IN ({marks})) OR s.k IN (SELECT 'recording:individual:' || p.id FROM participations p
+                            WHERE p.category_id IN ({marks}) AND p.deleted_at IS NULL) LIMIT 1""", args + args) is not None:
         return True
     return False
 
@@ -859,7 +891,7 @@ def group_school_totals(conn, group_id):
                      JOIN participations p ON p.id = sp.participation_id
                      LEFT JOIN teams t ON t.id = p.team_id
                      LEFT JOIN athletes a ON a.id = p.athlete_id
-                    WHERE sp.group_id = ?""", (group_id,))
+                    WHERE sp.group_id = ? AND p.deleted_at IS NULL""", (group_id,))
     pending = db.q(conn,
                    """SELECT COALESCE(t.school_id, a.school_id) AS school_id, c.name AS category_name,
                               c.gender AS category_gender,
@@ -872,6 +904,7 @@ def group_school_totals(conn, group_id):
                         LEFT JOIN individual_results ir
                                ON ir.participation_id = p.id AND ir.category_id = c.id
                        WHERE c.group_id = ? AND p.status = 'active'
+                         AND p.deleted_at IS NULL
                          AND (pl.id IS NULL OR pl.status <> 'confirmed')
                          AND NOT (c.kind = 'individual'
                                   AND COALESCE(ir.result_status, '') IN ('dns', 'dnf', 'dsq'))""", (group_id,))

@@ -56,7 +56,12 @@ def basis(conn, category_id):
     # Excludes tokens, audit and request logs; includes every mutable scheduling input.
     tables = ['events','categories','stages','plans','pools','pool_members','participations','group_draws',
               'pool_rank_snapshots','matches','match_schedule_meta','schedule_policies','venues']
-    value = {t: db.rows_to_dicts(db.q(conn, f'SELECT * FROM {t} ORDER BY rowid')) for t in tables if t!='match_schedule_meta'}
+    value = {}
+    for table in tables:
+        if table == 'match_schedule_meta':
+            continue
+        where = ' WHERE deleted_at IS NULL' if table == 'participations' else ''
+        value[table] = db.rows_to_dicts(db.q(conn, f'SELECT * FROM {table}{where} ORDER BY rowid'))
     value['match_schedule_meta']=[{'match_id':r['match_id'],'duration_minutes':r['duration_minutes'],
         'rest_minutes':r['rest_minutes'],'batch_uid':r['batch_uid'],
         'policy_hash':hashlib.sha256(r['policy_json'].encode('utf-8')).hexdigest()}
@@ -93,7 +98,7 @@ def prepare(conn, category_id, config):
                 raise conflict('小组存在已取消的比赛，请先人工核对，不自动恢复已取消对阵')
             members = pools[pool['id']]
             for pid in members:
-                part = db.q1(conn, 'SELECT * FROM participations WHERE id=?', (pid,))
+                part = db.q1(conn, 'SELECT * FROM participations WHERE id=? AND deleted_at IS NULL', (pid,))
                 if not part or part['category_id'] != category_id or part['status'] != 'active':
                     raise conflict('正式分组成员已变化，请先核对分组')
             existing = set()
@@ -149,7 +154,7 @@ def prepare(conn, category_id, config):
 def label_maps(conn):
     names = {r['id']: r['label'] for r in db.q(conn, """SELECT p.id,COALESCE(s.name,t.name,a.name,'队伍') AS label
         FROM participations p LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN schools s ON s.id=t.school_id
-        LEFT JOIN athletes a ON a.id=p.athlete_id""")}
+        LEFT JOIN athletes a ON a.id=p.athlete_id WHERE p.deleted_at IS NULL""")}
     pool_names = {r['id']: r['name'] for r in db.q(conn, 'SELECT id,name FROM pools')}
     return names, pool_names
 

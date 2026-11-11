@@ -8,13 +8,14 @@ import { api, captureRequestContext, readRequestOptions } from '../api.js';
 import { registerView, state, loadStructure, reloadShell, go, replaceViewParams } from '../main.js';
 import {
   h, field, textInput, selectInput, dateInput, toast, confirmAsync,
-  clear, setFieldError, setPageLeaveGuard,
+  clear, setFieldError, setPageLeaveGuard, formDialog,
 } from '../ui.js';
 import { PROJECT_PRESETS, existingProject, nameAfterChoice, participantLabel, setupSummary, venueOrder } from '../setupModel.js';
 import { createRulesEditor, validateEventRules } from '../teamRulesEditor.js';
 import { rulesSummary } from '../teamRules.js';
 
-const canWrite = () => state.user.role === 'admin';
+const canWrite = () => state.user.role === 'admin'
+  && !(state.structure?.event.id === state.eventId && state.structure?.settings_lock?.locked);
 const SECTIONS = [
   ['event', '赛事资料'], ['structure', '组别与项目'], ['venues', '比赛场地'], ['rules', '三人赛规则'],
 ];
@@ -45,7 +46,7 @@ function hierarchyStrip() {
 
 async function render({ el, params, refresh }) {
   if (params.action === 'new') {
-    if (!canWrite()) {
+    if (state.user.role !== 'admin') {
       el.append(h('div.panel', h('h2', '新建赛事'),
         h('div.warn-box', '当前角色没有创建赛事的权限。')));
       return;
@@ -136,13 +137,34 @@ async function render({ el, params, refresh }) {
     }, h('span.setup-step-number', String(index + 1)), h('span', h('b', label), status)));
   }
   page.append(h('header.setup-page-head',
-    h('div.setup-title-row', h('div', h('h2', eventName, ' · 赛事设置'),
-      h('p.setup-intro', '设置赛事资料，开设比赛项目，再补充比赛场地和三人赛规则。')),
-      canWrite() ? h('button.btn', { onclick: () => go('setup', { action: 'new' }) }, '新建赛事') : null),
-    h('div.setup-page-tools', nav,
-      h('div.setup-page-description', canWrite()
-        ? '各处单独保存，状态在编辑区显示。'
-        : '赛事结构由管理员维护。'))));
+    h('div.setup-title-row', h('div', h('h2', eventName, ' · 赛事设置')),
+      h('div.row',
+        h('span.badge', { role: 'status' }, structure.settings_lock?.locked ? '设置已锁定' : '设置未锁定'),
+        state.user.role === 'admin' ? h('button.btn', { onclick: async (event) => {
+          const button = event.currentTarget;
+          if (!isCurrent() || pageGuard.blocked) return;
+          if (hasEdits(page)) {
+            toast('请先保存或取消当前修改，再操作锁定设置', 'error'); return;
+          }
+          const locked = !structure.settings_lock?.locked;
+          if (!await confirmAsync(locked ? '锁定赛事设置' : '解锁赛事设置',
+            locked ? '锁定后不能修改赛事资料、组别项目、场地和规则，也不能删除赛事；报名与比赛不受影响。'
+              : '解锁后可继续修改赛事资料、组别项目、场地和规则。', locked ? '确认锁定' : '确认解锁')) return;
+          if (!isCurrent()) return;
+          button.disabled = true;
+          try {
+            const result = await api.put(`/api/events/${selectedEvent}/settings-lock`, {
+              locked, base_version: structure.settings_lock?.version || 0,
+            }, { context });
+            toast(result.message, 'ok');
+            if (isCurrent()) await refresh();
+          } catch (error) {
+            toast(error.message, 'error');
+            if (isCurrent()) await refresh();
+          } finally { if (button.isConnected) button.disabled = false; }
+        } }, structure.settings_lock?.locked ? '解锁设置' : '锁定设置') : null,
+        state.user.role === 'admin' ? h('button.btn', { onclick: () => go('setup', { action: 'new' }) }, '新建赛事') : null)),
+    ));
 
   const pageGuard = createPageGuard();
   const eventPanel = renderEventStep(structure, async () => {
@@ -151,11 +173,11 @@ async function render({ el, params, refresh }) {
     return next;
   }, { context, isCurrent, pageGuard });
   const venuesPanel = canWrite() ? renderVenuesStep(structure, readStructure, { context, isCurrent, pageGuard }) : h('section.panel',
-    h('h3', '3 · 比赛场地'), h('div.small.muted.mb', '场地由本赛事的所有组别和项目共用，可以后补。'),
+    h('h3', '3 · 比赛场地'),
     ...(structure.venues?.length ? structure.venues.map(venue => h('div', venue.name)) : [h('div.small.muted', '还没有场地')]));
   const structurePanel = canWrite() ? renderStructureSection(structure, params, readStructure, { context, isCurrent, pageGuard }) :
     h('section.panel', h('h3', '2 · 组别与项目'),
-      h('p.small.muted', '各组分别报名和排名；比赛项目属于对应组别。'),
+
       ...structure.groups.map(group => h('section.setup-readonly-group', h('h4', group.name),
           ...(group.categories.length ? group.categories.map(category => h('div', category.name, ' · ', participantLabel(category))) : [h('div.small.muted', '该组别还没有项目')]))));
   const rulesPanel = renderRulesSection(structure, readStructure, {
@@ -167,7 +189,9 @@ async function render({ el, params, refresh }) {
     venuesPanel.updateMetadata?.(nextStructure);
     rulesPanel.updateMetadata(nextStructure);
     const summary = setupSummary(nextStructure);
-    for (const [key, status] of statusNodes) if (key !== 'rules') status.textContent = summary[key];
+    for (const [key, status] of statusNodes) if (key !== 'rules') {
+      status.textContent = key === 'event' && nextStructure.settings_lock?.locked ? '已锁定，只读查看' : summary[key];
+    }
   };
   for (const [key, panel, className] of [
     ['event', eventPanel, 'setup-basic-panel'], ['venues', venuesPanel, 'setup-venues-panel'],
@@ -181,6 +205,41 @@ async function render({ el, params, refresh }) {
   }
   syncSettingsMetadata(structure);
   page.append(h('div.setup-body', eventPanel, structurePanel, venuesPanel, rulesPanel));
+  if (canWrite()) {
+    let deleting = false;
+    pageGuard.addBlocker(() => deleting);
+    page.append(h('section.panel', h('h3', '删除赛事'),
+
+      h('button.btn.btn-danger', { onclick: () => {
+        if (!isCurrent() || pageGuard.blocked) return;
+        const name = textInput('', { autocomplete: 'off' });
+        const target = { id: selectedEvent, uuid: structure.event.uuid, name: structure.event.name };
+        formDialog({ title: '删除赛事',
+          sections: [{ body: h('div', h('p', `将删除「${target.name}」的赛程和成绩，历史报名及删除前成绩快照保留在“报名历史”。其他赛事不受影响。`),
+            field('输入赛事名称确认删除', name, { required: true, name: 'confirm_name' })) }],
+          actions: [{ label: '确认删除赛事', danger: true, run: async ({ close }) => {
+            if (!isCurrent() || deleting) return;
+            if (name.value !== target.name) throw new Error('请输入完整且一致的赛事名称');
+            deleting = true;
+            try {
+              await api.del(`/api/events/${target.id}`, { event_uuid: target.uuid, confirm_name: name.value }, { context });
+            } catch (error) {
+              // 响应丢失时只读核实；不会把不确定的删除再次自动执行。
+              try {
+                const latest = await api.get('/api/events', { context });
+                if (latest.events.some(event => event.id === target.id)) throw error;
+              } catch { throw error; }
+            } finally { deleting = false; }
+            if (!isCurrent()) return;
+            close();
+            setPageLeaveGuard(null);
+            await reloadShell();
+            go('dashboard');
+            toast('赛事已删除', 'ok');
+          } }],
+        });
+      } }, '删除当前赛事')));
+  }
   el.append(page);
   installSetupLeaveGuard(page, pageGuard, isCurrent);
   if (locateOnLoad === 'rules') rulesPanel.syncLocation();
@@ -220,16 +279,13 @@ function renderRulesSection(initialStructure, readStructure, { context, isCurren
   const blocked = () => pending > 0 || !!editor?.blocked;
   pageGuard?.addBlocker(blocked);
   const panel = h('section.panel.setup-rules-panel');
-  panel.append(h('div.panel-head', h('div', h('h3', { tabindex: -1 }, '4 · 三人赛规则'),
-    h('p.setup-section-hint', '赛事级统一规则，只影响尚未开始的三人赛；已开始或已有成绩的比赛保持原规则。'))));
+  panel.append(h('div.panel-head', h('div', h('h3', { tabindex: -1 }, '4 · 三人赛规则'))));
   const body = h('div.rules-page-body');
   const title = h('h4.rules-project-title', '本赛事统一规则');
-  const scope = h('p.rules-project-path', '适用于本赛事所有组别、男子及女子三人赛；新增项目自动继承。');
-  const note = h('p.small.muted.rules-project-count');
   const legacy = h('div.rules-legacy');
   const host = h('div.setup-rules-host');
   const card = h('article.rules-project-card', { dataset: { eventId: structure.event.id } },
-    h('header.rules-project-heading', title, scope), note, legacy, host);
+    h('header.rules-project-heading', title), legacy, host);
   body.append(card);
   panel.append(body);
   const mutate = async action => {
@@ -239,10 +295,6 @@ function renderRulesSection(initialStructure, readStructure, { context, isCurren
   };
   function setStatus(text) { if (statusNode) statusNode.textContent = text; }
   function drawNote(current) {
-    note.textContent = current.rules_state === 'legacy_mixed'
-      ? `当前共 ${current.team_projects} 个三人赛项目，原有规则待统一。`
-      : current.team_projects ? `当前共 ${current.team_projects} 个三人赛项目共用此规则。`
-      : '尚未添加三人赛项目，可以先保存规则；以后新增项目自动使用。';
     setStatus(current.rules_state === 'legacy_mixed' ? '原有规则待统一' : `${current.team_projects} 个三人赛项目 · 已统一`);
   }
   function drawLegacy(current) {
@@ -257,7 +309,7 @@ function renderRulesSection(initialStructure, readStructure, { context, isCurren
   }
   function drawReadonly(current) {
     clear(host);
-    host.append(h('div.rules-readonly', h('p.small.muted', '当前角色仅可查看，修改请联系管理员。'),
+    host.append(h('div.rules-readonly', structure.settings_lock?.locked ? null : h('p.small.muted', '当前角色仅可查看，修改请联系管理员。'),
       h('p', current.rules_state === 'legacy_mixed' ? '待管理员统一，原有规则见上方差异。' : rulesSummary(current.rules))));
   }
   function showError(message) {
@@ -402,7 +454,6 @@ function renderCreateEvent(refresh, standalone = false) {
     clear(root);
     root.append(h('ol.wizard-steps', ...labels.map((label, index) => h('li', {
       class: index === step ? 'active' : index < step ? 'done' : '',
-      'aria-current': index === step ? 'step' : null,
     }, h('span', index < step ? '✓' : String(index + 1)), h('b', label)))));
     const content = h('section.wizard-content');
     root.append(content);
@@ -608,8 +659,7 @@ function renderEventStep(initialStructure, reload, { context, isCurrent, pageGua
     editor.classList.remove('hidden'); facts.classList.add('hidden'); editButton.classList.add('hidden'); name.focus();
   } }, '修改资料') : null;
   const panel = h('section.panel',
-    h('div.panel-head', h('div', h('h3', '1 · 赛事资料'),
-      h('p.setup-section-hint', '说明这场赛事的名称、时间和比赛地点。')), editButton), facts);
+    h('div.panel-head', h('div', h('h3', '1 · 赛事资料')), editButton), facts);
   let editor, name, start, end, loc, feedback;
   const controls = [], keys = ['name', 'start_date', 'end_date', 'location'];
   if (canWrite()) {
@@ -703,8 +753,7 @@ function renderStructureSection(initialStructure, params, readStructure, { conte
   groupList.append(h('div.panel-head', h('h4', '选择组别'),
     h('button.btn.small', { onclick: () => { addFeedback.clear(); addForm.classList.remove('hidden'); newName.focus(); } }, '添加组别')),
     choices, addForm);
-  const root = h('section.panel', h('div.panel-head', h('div', h('h3', { tabindex: -1 }, '2 · 组别与比赛项目'),
-    h('p.setup-section-hint', '先选择组别，再为该组开设比赛项目。各组分别报名、比赛和排名。'))),
+  const root = h('section.panel', h('div.panel-head', h('div', h('h3', { tabindex: -1 }, '2 · 组别与比赛项目'))),
     h('div.setup-structure-grid', groupList, projectHost));
   root.updateMetadata = next => {
     structure = next;
@@ -738,8 +787,7 @@ function renderStructureSection(initialStructure, params, readStructure, { conte
   function activateGroup(id, writeUrl = true) {
     activeId = id; clear(projectHost);
     const group = activeGroup(); projects = group ? makeProjects(group) : null;
-    projectHost.append(projects ? projects.panel : h('div.setup-category-list', h('h4', '比赛项目'),
-      h('p.setup-section-hint', '例如：实验赛 → 甲组 → 男子三人赛。添加组别后，即可选择该组要开设的项目。')));
+    projectHost.append(projects ? projects.panel : h('div.setup-category-list', h('h4', '比赛项目')));
     drawChoices();
     if (writeUrl && root.isConnected && isSetupRoute()) replaceViewParams({ step: 'structure', group: activeId || null });
   }
@@ -779,7 +827,6 @@ function renderStructureSection(initialStructure, params, readStructure, { conte
     let group = initialGroup, selected = null, generatedName = '';
     const rows = new Map();
     const title = h('h4', `${group.name}的比赛项目`);
-    const hierarchy = h('p.setup-section-hint', { 'aria-label': '赛事结构示例' });
     const groupName = tracked(textInput(group.name, { 'aria-label': '组别名称' }));
     const groupField = field('组别名称', groupName, { required: true });
     const editorTitle = h('h4', `编辑${group.name}`);
@@ -800,7 +847,7 @@ function renderStructureSection(initialStructure, params, readStructure, { conte
       addForm.classList.remove('hidden'); [...presetControls.values()].find(radio => !radio.disabled)?.focus();
     } }, '添加项目');
     const panel = h('div.setup-category-list', { 'aria-label': `${group.name}比赛项目` },
-      h('div.panel-head', h('div', title, hierarchy), h('div.row.tight',
+      h('div.panel-head', h('div', title), h('div.row.tight',
         h('button.btn.small', { onclick: () => { groupEditor.classList.remove('hidden'); groupName.focus(); } }, '编辑组别'), addToggle)), groupEditor);
     const list = h('div.setup-project-list');
     const empty = h('p.setup-section-hint', '该组别还没有项目。点击“添加项目”选择要开设的比赛。');
@@ -811,8 +858,7 @@ function renderStructureSection(initialStructure, params, readStructure, { conte
     const hint = h('p.small.muted');
     const presetControls = new Map();
     const presetLabels = new Map();
-    const options = h('fieldset.setup-preset-fieldset', h('legend', '选择要开设的比赛项目'),
-      h('p.setup-section-hint', '三人赛记录逐分过程；个人赛录入最终成绩。已添加的项目无需重复开设。'));
+    const options = h('fieldset.setup-preset-fieldset', h('legend', '选择要开设的比赛项目'));
     const presetGrid = h('div.setup-preset-grid');
     for (const preset of PROJECT_PRESETS) {
       const radio = tracked(h('input', { type: 'radio', name: `setup-preset-${group.id}`, value: preset.key, 'aria-label': preset.name }));
@@ -863,7 +909,6 @@ function renderStructureSection(initialStructure, params, readStructure, { conte
       group = nextGroup;
       panel.setAttribute('aria-label', `${group.name}比赛项目`);
       title.textContent = `${group.name}的比赛项目`; editorTitle.textContent = `编辑${group.name}`;
-      hierarchy.textContent = `${structure.event.name} → ${group.name}${group.categories[0] ? ` → ${group.categories[0].name}` : ' → 添加比赛项目'}`;
       if (groupName.value === inputBaselines.get(groupName)) resetInput(groupName, group.name);
       const ids = new Set(group.categories.map(category => category.id));
       for (const [id, row] of rows) if (!ids.has(id)) { row.node.remove(); rows.delete(id); }
@@ -972,9 +1017,8 @@ function renderVenuesStep(initialStructure, readStructure, { context, isCurrent 
   const box = h('div.setup-venue-list');
   const form = h('div.setup-add-form.hidden', nameField, advanced, h('div.row.mt', addButton, cancel));
   const panel = h('section.panel', h('div.panel-head', h('div',
-    h('h3', '3 · 比赛场地 ', h('span.setup-optional', '可后补')),
-    h('p.setup-section-hint', '场地是实际比赛区域，例如 1 号场、2 号场；本赛事的所有组别和项目共用。')), toggle),
-    box, form, h('p.setup-section-hint', '具体比赛的时间与场地，在项目工作台安排。'));
+    h('h3', '3 · 比赛场地')), toggle),
+    box, form);
   const feedback = mutationFeedback(panel, isCurrent);
   panel.updateMetadata = next => { structure = next; draw(); };
   draw();
@@ -1025,5 +1069,5 @@ function renderVenuesStep(initialStructure, readStructure, { context, isCurrent 
   }
 }
 
-registerView({ name: 'setup', label: '赛事设置', roles: ['admin', 'organizer', 'recorder', 'viewer'], render });
-registerView({ name: 'teamRules', label: '赛事设置', roles: ['admin', 'organizer', 'recorder', 'viewer'], render });
+registerView({ name: 'setup', label: '赛事设置', roles: ['admin', 'organizer', 'viewer'], render });
+registerView({ name: 'teamRules', label: '赛事设置', roles: ['admin', 'organizer', 'viewer'], render });

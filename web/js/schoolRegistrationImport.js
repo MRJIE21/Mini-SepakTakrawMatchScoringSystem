@@ -34,10 +34,10 @@ const EXAMPLE_ROWS = [
   { project: '女子个人赛', choice: '尚未决定', person: '', gender: '', usual: '', jersey: '', captain: '', seed: '' }
 ];
 
-export function openSchoolImport({ path, text = '', payload, getPayload = () => payload, onText, onApply, onConflict,
+export function openSchoolImport({ path, text = '', payload, getPayload = () => payload, onText, onApply, onConflict, peopleOnly = false,
     requestContext = captureRequestContext(), signal, isCurrent = () => true }) {
   const identity = JSON.stringify(getApiEventContext());
-  const source = textarea(text, { rows: 9, placeholder: '从 Excel 复制含表头的项目、运动员等列，或上传 CSV' });
+  const source = textarea(text, { rows: peopleOnly ? 7 : 9, placeholder: peopleOnly ? '姓名\t性别\t常用号码\n张三\t男\t7\n李四\t女\t8' : '从 Excel 复制含表头的项目、运动员等列，或上传 CSV' });
   const file = h('input', { type: 'file', accept: '.csv,text/csv', 'aria-label': '学校报名 CSV 文件' });
   const report = h('div', { 'aria-live': 'polite' });
   let result = null, reviewedPayload = null, ticket = 0, closed = false;
@@ -61,17 +61,17 @@ export function openSchoolImport({ path, text = '', payload, getPayload = () => 
       source.value = value; invalidate(); dlg.clearErrors();
     } catch (error) { if (alive() && ticket === current) dlg.showErrors(error); }
   };
-  const dlg = formDialog({ title: '粘贴 / 导入学校报名表', width: 'min(960px, 96vw)',
+  const dlg = formDialog({ title: peopleOnly ? '导入本校人员' : '导入项目名单', width: peopleOnly ? 'min(720px, 96vw)' : 'min(960px, 96vw)',
     onClose: () => { closed = true; ticket++; },
-    sections: [{ title: '准备表格', body: h('div',
+    sections: [{ title: peopleOnly ? '上传 CSV 或从 Excel 粘贴' : '准备表格', body: peopleOnly ? h('div',
+      h('button.btn.mb', { type: 'button', onclick: task(async () => { ensureContext(); await download(`${path}/registration-import-template.csv`, { scope: 'people' }, '人员导入模板.csv', { isCurrent: alive }); }) }, '下载人员模板'),
+      field('CSV 文件', file), field('人员表格', source, { name: 'csv_text' })) : h('div',
       h('div.toolbar',
         h('button.btn', { type: 'button', onclick: task(async () => { ensureContext(); await download(`${path}/registration-import-template.csv`, {}, '报名模板.csv', { isCurrent: alive }); }) }, '下载报名模板（8 列）'),
         h('button.btn', { type: 'button', onclick: task(async () => { ensureContext(); await download(`${path}/registration-import-guide.txt`, {}, '填写说明.txt', { isCurrent: alive }); }) }, '下载填写说明'),
         h('button.btn', { type: 'button', onclick: task(async () => { ensureContext(); await download(`${path}/registration-import-example.csv`, {}, '示例_报名表.csv', { isCurrent: alive }); }) }, '下载示例 CSV')),
-      h('p.small.muted', '模板默认 8 列：项目、参赛选择、运动员、性别、常用号码、项目号码、队长、种子序号。三人赛一名队员一行；所列项目按表中的完整名单更新，未列项目保持原状。'),
-      h('p.small.muted', '旧 14 列模板（含学校、项目ID、运动员ID、同名新建确认等）仍然兼容；示例 CSV 使用虚构人员，导入前请替换姓名或删除示例行。'),
       field('选择 CSV 文件', file), field('学校报名表内容', source, { name: 'csv_text' })) },
-    { title: '字段说明（默认 8 列）', body: h('div',
+    ...(!peopleOnly ? [{ title: '字段说明', body: h('details', h('summary', '查看字段说明与填写示例'),
       h('div.table-scroll', table([{ label: '列名', key: 'column' }, { label: '填写规则', key: 'rule' },
         { label: '示例', key: 'example' }], FIELD_ROWS)),
       h('h4', '可选的旧列'),
@@ -79,14 +79,14 @@ export function openSchoolImport({ path, text = '', payload, getPayload = () => 
         { label: '示例', key: 'example' }], OPTIONAL_ROWS)),
       h('h4', '填写示例'),
       h('div.table-scroll', table(EXAMPLE_COLUMNS, EXAMPLE_ROWS)),
-      h('p.small.muted', '示例：三人赛张三/李四/王五各一行，队长只有一人填“是”，种子只填一次；个人赛只填常用号码；不参加与尚未决定不填人员。')) },
+      h('p.small.muted', '示例：三人赛张三/李四/王五各一行，队长只有一人填“是”，种子只填一次；个人赛只填常用号码；不参加与尚未决定不填人员。')) }] : []),
     { title: '核对导入结果', body: report }],
     actions: [{ label: '核对表格', keepOpen: true, run: async () => {
       ensureContext(); result = null; dlg.setActionDisabled(1, true);
       const current = ++ticket, snapshot = JSON.stringify(getPayload());
       source.disabled = true; file.disabled = true;
       try {
-        const data = await api.post(`${path}/registration-import-preview`, { ...JSON.parse(snapshot), csv_text: source.value }, { context: requestContext, signal });
+        const data = await api.post(`${path}/registration-import-preview`, { ...JSON.parse(snapshot), csv_text: source.value, ...(peopleOnly ? { scope: 'people' } : {}) }, { context: requestContext, signal });
         if (!alive() || current !== ticket) return;
         ensureContext(); clear(report);
         if (snapshot !== JSON.stringify(getPayload())) throw new Error('报名内容已变化，请重新核对表格；当前输入已保留');
@@ -102,17 +102,16 @@ export function openSchoolImport({ path, text = '', payload, getPayload = () => 
         if (data.review.people_review.length) report.append(h('h4', '人员资料调整'), ...data.review.people_review.map((p) => h('p', `${p.name} · ${({ male: '男', female: '女', '': '性别待补' })[p.gender || '']} · 常用号码 ${p.jersey_no || '未填'} · ${p.note || '区分信息未填'}`)));
         for (const p of data.review.review) report.append(h('p', `${p.category_name}：${({ participate: '参加', unresolved: '尚未决定', withdrawn: '退出', not_participating: '不参加' })[p.choice]} · ${p.athlete_name || p.members.map((m) => `${m.name}（${m.jersey_no || '号码待补'}）`).join('、') || '无参赛名单'}${p.captain_name ? ` · 队长 ${p.captain_name}` : ''}${p.choice === 'participate' ? ` · 种子 ${p.seed_no || '未指定'} · ${p.note || '无报名备注'}` : ''}`));
         if (data.review.warnings.length) report.append(h('h4', '赛前待补充'), h('ul', ...data.review.warnings.map((w) => h('li', w.message))));
-        report.append(h('p.small.muted', '应用到报名表后，请预览核对并整批提交。'));
         dlg.setActionDisabled(1, false);
       } catch (error) { if (alive() && current === ticket) { result = null; onConflict(error); throw error; } }
       finally { if (alive() && current === ticket) { source.disabled = false; file.disabled = false; } }
-    } }, { label: '应用到报名表', primary: true, run: async () => {
+    } }, { label: '核对并继续', primary: true, run: async () => {
       ensureContext(); if (!result) throw new Error('请先核对表格');
       if (reviewedPayload !== JSON.stringify(getPayload())) {
         result = null; dlg.setActionDisabled(1, true); clear(report);
         throw new Error('报名内容已变化，请重新核对表格；当前输入已保留');
       }
-      onApply(result.model);
+      await onApply(result.model);
     } }] });
   dlg.setActionDisabled(1, true);
   return dlg;

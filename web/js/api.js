@@ -56,7 +56,7 @@ async function request(method, path, body, options = {}) {
   }
   const context = frozen.identity;
   const headers = { 'Content-Type': 'application/json' };
-  headers['X-Client-Protocol'] = '3';
+  headers['X-Client-Protocol'] = '2';
   if (frozen.user_id != null) headers['X-Actor-ID'] = String(frozen.user_id);
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -170,7 +170,6 @@ function sha256(bytes) {
   return h.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');
 }
 export async function validateReceipt(result, payload, kind, subjectId) {
-  if (payload?.payload_schema === 3) return validateCandidateReceipt(result, payload);
   const receipt = result?.receipt;
   if (!receipt || receipt.uid !== (payload.submission_uid || payload.request_uid) || receipt.kind !== kind
       || Number(receipt.subject_id) !== Number(subjectId) || receipt.status !== 'confirmed'
@@ -179,37 +178,6 @@ export async function validateReceipt(result, payload, kind, subjectId) {
     error.outcome_unknown = true; throw error;
   }
   return receipt;
-}
-
-export async function validateCandidateReceipt(result, packet) {
-  const r = result?.receipt, identity = packet?.payload?.event_identity;
-  if (!r || r.receipt_kind !== 'candidate_received' || r.uid !== packet.submission_uid
-      || r.subject_kind !== packet.subject_kind || r.subject_id !== packet.subject_id || r.status !== 'received'
-      || !/^[a-f0-9]{32}$/.test(r.candidate_id || '') || !Number.isInteger(r.revision) || r.revision < 1
-      || !/^[a-f0-9]{64}$/.test(r.candidate_hash || '') || 'applied_version' in r
-      || r.payload_hash !== await payloadHash(packet)
-      || !identity || r.identity?.event_uuid !== identity.event_uuid || r.identity?.event_id !== identity.event_id
-      || r.identity?.deployment_id !== identity.deployment_id) {
-    const e = new ApiError(200, { code:'invalid_response', message:'候选接收回执不匹配，请保留原包核实' });
-    e.outcome_unknown = true; throw e;
-  }
-  return r;
-}
-
-export async function validateReviewReceipt(result, packet, candidate) {
-  const r=result?.receipt;
-  if (!r || r.receipt_kind!=='review_decision' || r.uid!==packet.decision_uid || r.action!==packet.action
-      || r.candidate_id!==candidate.id || r.candidate_hash!==packet.candidate_hash || r.revision!==packet.revision
-      || r.subject_kind!==candidate.subject_kind || r.subject_id!==candidate.subject_id
-      || r.identity?.event_uuid!==candidate.context.identity.event_uuid
-      || r.identity?.deployment_id!==candidate.context.identity.deployment_id
-      || r.payload_hash!==await payloadHash(packet)
-      || r.status!==({approve:'approved',return:'returned',withdraw:'withdrawn'})[packet.action]
-      || packet.action==='approve' && !Number.isInteger(r.applied_version)) {
-    const e=new ApiError(200,{code:'invalid_response',message:'复核回执不匹配，请用原请求核实'});
-    e.outcome_unknown=true;throw e;
-  }
-  return r;
 }
 
 /* 下载类接口（导出 CSV / 记录表 / 备份）：用请求头带令牌，避免令牌出现在 URL 中 */

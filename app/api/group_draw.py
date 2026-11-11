@@ -17,7 +17,8 @@ def roster_for(conn, category_id):
     return [dict(p) for p in db.q(conn, """SELECT p.id, p.seed_no, t.school_id,
                 s.name AS school_name, COALESCE(NULLIF(s.short_name,''), s.name) AS display
             FROM participations p JOIN teams t ON t.id=p.team_id JOIN schools s ON s.id=t.school_id
-            WHERE p.category_id=? AND p.status='active' ORDER BY p.id""", (category_id,))]
+            WHERE p.category_id=? AND p.status='active' AND p.deleted_at IS NULL
+            ORDER BY p.id""", (category_id,))]
 
 
 def latest_draw(conn, category_id):
@@ -107,10 +108,12 @@ def get_draw(ctx):
     if db.q1(ctx.conn, "SELECT id FROM matches WHERE category_id=? AND status='finished' LIMIT 1", (category_id,)):
         blocked = '已有比赛成绩，不能改变抽签分组'
     roster = roster_for(ctx.conn, category_id)
-    return {'draw': draw_detail(ctx.conn, current), 'roster': roster,
+    from ..manual_results import snapshot
+    manual = snapshot(ctx.conn, category_id)
+    return {'draw': draw_detail(ctx.conn, current), 'roster': roster, 'manual_result': manual,
             'roster_hash': idempotency.content_hash(roster),
             'history': [draw_detail(ctx.conn, row) for row in history if row['status'] == 'cancelled'],
-            'blocked_reason': blocked}
+            'blocked_reason': blocked or ('已录入人工分组；请通过导入显式覆盖，不自动重新抽签' if manual else '')}
 
 
 @route('POST', r'/api/categories/(?P<category_id>\d+)/group-draw', roles=ORG)
@@ -118,6 +121,8 @@ def start_draw(ctx):
     category_id = int(ctx.params['category_id'])
     def create():
         ensure_editable(ctx.conn, category_id)
+        if db.q1(ctx.conn, 'SELECT category_id FROM manual_result_sets WHERE category_id=?', (category_id,)):
+            raise conflict('已录入人工分组，请通过导入显式覆盖，不能自动重新抽签', code='manual_result_final')
         previous = latest_draw(ctx.conn, category_id)
         if previous and previous['status'] != 'cancelled':
             raise conflict('已有抽签记录，请继续本次抽签；重新抽签须先填写原因并撤销', code='draw_exists')

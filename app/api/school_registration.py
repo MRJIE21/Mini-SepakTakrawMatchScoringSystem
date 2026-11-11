@@ -6,7 +6,7 @@ from ..errors import ApiError, bad_request, conflict, invalid_fields
 from ..http_server import route
 from .common import get_or_404, category_context
 from .catalog import (normalize_members, write_members, parse_seed, bump_rev,
-                      expect_rev, _confirm_same_name_creation)
+                      expect_rev, _confirm_same_name_creation, normalized_athlete_name)
 
 ORG = ('admin', 'organizer')
 
@@ -45,7 +45,9 @@ def workspace(conn, school_id):
             cat['locked_reason'] = exc.message
         team = db.q1(conn, 'SELECT * FROM teams WHERE category_id=? AND school_id=?', (cat['id'], school_id))
         parts = db.q(conn, """SELECT p.* FROM participations p LEFT JOIN teams t ON t.id=p.team_id
-            LEFT JOIN athletes a ON a.id=p.athlete_id WHERE p.category_id=? AND (t.school_id=? OR a.school_id=?) ORDER BY p.id""", (cat['id'], school_id, school_id))
+            LEFT JOIN athletes a ON a.id=p.athlete_id WHERE p.category_id=?
+            AND p.deleted_at IS NULL AND (t.school_id=? OR a.school_id=?) ORDER BY p.id""",
+                     (cat['id'], school_id, school_id))
         active = next((p for p in parts if p['status'] == 'active'), None)
         part = active or (parts[-1] if parts else None)
         cat['roster_locked_reason'] = cat['locked_reason']
@@ -55,7 +57,7 @@ def workspace(conn, school_id):
                 cat['roster_locked_reason'] = ''
             except ApiError as exc:
                 cat['roster_locked_reason'] = exc.message
-        cat['edit_notice'] = ('赛程已确认：仍可补录本队人员、号码和队长；参赛学校与种子顺序已固定。'
+        cat['edit_notice'] = ('赛程已确认：仍可补录本队人员和号码；参赛学校与种子顺序已固定。'
                               if cat['locked_reason'] and not cat['roster_locked_reason'] else '')
         cats.append(cat)
         decision = db.q1(conn, 'SELECT choice FROM school_registration_choices WHERE school_id=? AND category_id=?', (school_id, cat['id']))
@@ -71,8 +73,6 @@ def workspace(conn, school_id):
         if active and team:
             if len(members) < 3:
                 warnings.append({'category_id': cat['id'], 'message': '队员不足 3 人，赛前需补齐'})
-            if not any(m['is_captain'] for m in members):
-                warnings.append({'category_id': cat['id'], 'message': '队长待补充'})
         if active:
             aids = [m['athlete_id'] for m in members] if team else [part['athlete_id']]
             for aid in aids:
@@ -144,7 +144,7 @@ def apply_changes(conn, payload):
     new_people = []
     for person in people:
         key = person['key']
-        name = str(person.get('name') or '').strip()
+        name = normalized_athlete_name(person.get('name'))
         gender = person.get('gender') or ''
         if not name or gender not in ('male', 'female', ''):
             raise invalid_fields('请填写姓名并核对性别', {'people': '姓名或性别无效'})
@@ -189,6 +189,7 @@ def apply_changes(conn, payload):
         touched.add(cid)
         active = db.q1(conn, """SELECT p.* FROM participations p LEFT JOIN teams t ON t.id=p.team_id
             LEFT JOIN athletes a ON a.id=p.athlete_id WHERE p.category_id=? AND p.status='active'
+            AND p.deleted_at IS NULL
             AND (t.school_id=? OR a.school_id=?)""", (cid, school['id'], school['id']))
         # Keeping the same entrant and seed changes no draw, slot or opponent.
         if (active and project['choice'] == 'participate'
@@ -199,7 +200,8 @@ def apply_changes(conn, payload):
         registration.guard_change(conn, cid)
         # Withdraw all affected entries first; additions are validated only in final state.
         db.run(conn, """UPDATE participations SET status='withdrawn',rev=rev+1
-            WHERE category_id=? AND status='active' AND (team_id IN (SELECT id FROM teams WHERE school_id=?)
+            WHERE category_id=? AND status='active' AND deleted_at IS NULL
+              AND (team_id IN (SELECT id FROM teams WHERE school_id=?)
               OR athlete_id IN (SELECT id FROM athletes WHERE school_id=?))""", (cid, school['id'], school['id']))
 
     for project in projects:
@@ -228,7 +230,9 @@ def apply_changes(conn, payload):
                 subject_key, subject_id = 'team_id', tid
             else:
                 subject_key, subject_id = 'athlete_id', resolve(project.get('athlete_key'))
-            part = db.q1(conn, f'SELECT * FROM participations WHERE category_id=? AND {subject_key}=?', (cid, subject_id))
+            part = db.q1(conn, f'''SELECT * FROM participations
+                WHERE category_id=? AND {subject_key}=? AND deleted_at IS NULL''',
+                         (cid, subject_id))
             fields = {'status': 'active', 'seed_no': parse_seed(project.get('seed_no')), 'note': str(project.get('note') or '')}
             if cid in preserved_entries:
                 if fields['note'] != part['note']:
@@ -238,7 +242,7 @@ def apply_changes(conn, payload):
                 db.update(conn, 'participations', part['id'], fields)
                 bump_rev(conn, 'participations', part['id'])
             else:
-                db.insert(conn, 'participations', dict(fields, category_id=cid, **{subject_key: subject_id}))
+                db.insert(conn, 'participations', dict(fields, category_id=cid, event_id=school['event_id'], **{subject_key: subject_id}))
         if cid not in preserved_entries:
             db.run(conn, """INSERT INTO school_registration_choices(school_id,category_id,choice) VALUES(?,?,?)
                 ON CONFLICT(school_id,category_id) DO UPDATE SET choice=excluded.choice,rev=rev+1""", (school['id'], cid, choice))

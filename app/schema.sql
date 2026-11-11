@@ -159,17 +159,30 @@ CREATE TABLE IF NOT EXISTS team_members (
 -- 参赛记录（参赛主体）：三人赛=队伍，个人赛=运动员
 CREATE TABLE IF NOT EXISTS participations (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
   team_id     INTEGER REFERENCES teams(id) ON DELETE CASCADE,
   athlete_id  INTEGER REFERENCES athletes(id) ON DELETE CASCADE,
   seed_no     INTEGER,
   status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','withdrawn')),
   note        TEXT NOT NULL DEFAULT '',
   rev         INTEGER NOT NULL DEFAULT 1,
-  CHECK ((team_id IS NULL) <> (athlete_id IS NULL))
+  deleted_at  TEXT,
+  deleted_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  delete_batch_id TEXT,
+  event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+  event_name_snapshot TEXT NOT NULL DEFAULT '',
+  archived_at TEXT,
+  history_json TEXT NOT NULL DEFAULT '{}',
+  CHECK ((team_id IS NULL) <> (athlete_id IS NULL)
+         OR (category_id IS NULL AND event_id IS NULL AND archived_at IS NOT NULL
+             AND event_name_snapshot <> ''))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_part_team  ON participations(category_id, team_id)  WHERE team_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_part_athl  ON participations(category_id, athlete_id) WHERE athlete_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_part_team ON participations(category_id, team_id)
+  WHERE team_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_part_athl ON participations(category_id, athlete_id)
+  WHERE athlete_id IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_part_active_category
+  ON participations(category_id, deleted_at, id);
 
 -- 组合提交幂等记录：同一 request_uid + 相同内容重放返回原结果，
 -- 相同 uid 但内容不同视为冲突（改进方案 §9.2、§15.3）。
@@ -482,6 +495,23 @@ CREATE TABLE IF NOT EXISTS schedule_policies (
 );
 
 -- 出场抽签与种子、成绩名次分别保存；名单快照不随删除报名丢失。
+-- 人工结果按报名唯一标识关联；原始分组名称、排序号和文件行序均不重算。
+CREATE TABLE IF NOT EXISTS manual_result_sets (
+  category_id INTEGER PRIMARY KEY REFERENCES categories(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  roster_json TEXT NOT NULL,
+  imported_by INTEGER REFERENCES users(id),
+  imported_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS manual_result_rows (
+  category_id INTEGER NOT NULL REFERENCES manual_result_sets(category_id) ON DELETE CASCADE,
+  participation_id INTEGER NOT NULL REFERENCES participations(id) ON DELETE CASCADE,
+  group_name TEXT,
+  rank_no INTEGER CHECK(rank_no > 0),
+  row_seq INTEGER NOT NULL,
+  PRIMARY KEY(category_id,participation_id),
+  CHECK((group_name IS NOT NULL AND rank_no IS NULL) OR (group_name IS NULL AND rank_no IS NOT NULL))
+);
 CREATE TABLE IF NOT EXISTS individual_draws (
   category_id INTEGER PRIMARY KEY REFERENCES categories(id) ON DELETE CASCADE,
   revision INTEGER NOT NULL CHECK(revision > 0),
@@ -557,7 +587,7 @@ CREATE TABLE IF NOT EXISTS display_config (
   visible_slots_json TEXT NOT NULL DEFAULT '[]',
   announcement_title TEXT NOT NULL DEFAULT '',
   announcement_body  TEXT NOT NULL DEFAULT '',
-  poll_ms            INTEGER NOT NULL DEFAULT 500 CHECK (poll_ms BETWEEN 100 AND 1000),
+  poll_ms            INTEGER NOT NULL DEFAULT 250 CHECK (poll_ms BETWEEN 100 AND 1000),
   revision           INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
   updated_at         TEXT NOT NULL DEFAULT '',
   updated_by         INTEGER REFERENCES users(id)
@@ -584,3 +614,14 @@ CREATE TABLE IF NOT EXISTS display_live (
 );
 CREATE INDEX IF NOT EXISTS idx_display_live_expiry ON display_live(expires_at);
 
+
+-- Registry tombstones locate retained registration rows in the original event DB.
+CREATE TABLE IF NOT EXISTS event_deletion_history (
+  event_id INTEGER PRIMARY KEY,
+  event_uuid TEXT NOT NULL,
+  event_name TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  counts_json TEXT NOT NULL,
+  registrations_retained INTEGER NOT NULL DEFAULT 0
+);

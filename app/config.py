@@ -67,10 +67,7 @@ LOGIN_LOCK_SECONDS = int(os.environ.get("STSS_LOGIN_LOCK_SECONDS", "60"))
 # 接入上限和期限可以按隔离压测结果调节；各期限均为秒。
 HTTP_WORKERS = int(os.environ.get("STSS_HTTP_WORKERS", "32"))
 HTTP_PENDING = int(os.environ.get("STSS_HTTP_PENDING", "128"))
-# Windows 的 listen 队列在突发连接下会直接 RST 未 accept 的连接；256 档在
-# 300/500 并发冲击时大量客户端收不到 503。提高到 1024 让接入层先 accept、
-# 再按 pending 上限返回规范 503（拒绝语义仍由 pending/worker 上限保证）。
-HTTP_BACKLOG = int(os.environ.get("STSS_HTTP_BACKLOG", "1024"))
+HTTP_BACKLOG = int(os.environ.get("STSS_HTTP_BACKLOG", "256"))
 HTTP_QUEUE_TIMEOUT = float(os.environ.get("STSS_HTTP_QUEUE_TIMEOUT", "5"))
 HTTP_HEADER_TIMEOUT = float(os.environ.get("STSS_HTTP_HEADER_TIMEOUT", "3"))
 HTTP_BODY_TIMEOUT = float(os.environ.get("STSS_HTTP_BODY_TIMEOUT", "15"))

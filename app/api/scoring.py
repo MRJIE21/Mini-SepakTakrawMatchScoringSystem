@@ -1,7 +1,7 @@
 """现场记录提交：三人赛完整成绩包、个人赛最终结果、提交查询与正式更正。
 
 对应设计大纲 4.2、6、12.2、12.3。
-提交只接收不可变候选，独立复核后才写正式结果；旧写入口仅回放已存回执。
+默认提交成功即确认；服务器接收成功前前端不得清除本地记录。
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 from itertools import groupby
 
 from .. import db, security, access, idempotency, team_rules_store
-from ..domain import advancement, validation
+from ..domain import advancement, individual_results, validation
 from ..errors import ApiError, bad_request, conflict, forbidden, not_found
 from ..http_server import route
 from ..result_safety import (atomic_result, can_read_receipt, receipt, require_result_role,
@@ -21,43 +21,42 @@ REC = ("admin", "organizer", "recorder")
 ORG = ("admin", "organizer")
 
 
-def _legacy_result_receipt(ctx):
-    """No new writes, even for admins and even with the newest protocol header."""
-    body=ctx.body or {}
-    uid=body.get('submission_uid') or idempotency.extract_uid(body)
-    old=db.q1(ctx.conn,'SELECT * FROM submissions WHERE uid=?',(str(uid or ''),))
-    if old:
-        if old['user_id']!=ctx.user['id'] or old['payload_hash']!=validation.payload_hash(body):
-            raise conflict('旧请求标识与账号或原内容不一致',code='uid_conflict')
-        expected_kind='individual' if ctx.path.endswith('/individual') else 'match'
-        if old['kind']!=expected_kind:raise conflict('旧回执对象不一致',code='uid_conflict')
-        if expected_kind=='match' and old['match_id']!=body.get('match_id'):
-            raise conflict('旧回执场次不一致',code='uid_conflict')
-        if expected_kind=='individual':
-            item=db.q1(ctx.conn,'SELECT participation_id FROM individual_results WHERE id=?',(old['individual_result_id'],))
-            if not item or item['participation_id']!=body.get('participation_id'):
-                raise conflict('旧回执个人对象不一致',code='uid_conflict')
-        return {'duplicate':True,'receipt':submission_receipt(ctx.conn,old),'message':'原提交已接收；本次未重复写入'}
-    saved=db.q1(ctx.conn,'SELECT * FROM request_log WHERE uid=?',(str(uid or ''),))
-    if saved:
-        if saved['user_id']!=ctx.user['id'] or saved['payload_hash']!=idempotency.content_hash(body):
-            raise conflict('旧请求与原账号或内容不一致',code='uid_conflict')
-        result=_loads(saved['result_json'])
-        if result.get('receipt'):
-            # Strict original scope includes the old route and subject identity.
-            scope=json.loads(saved['scope'] or '{}')
-            if scope.get('path')!=ctx.path or scope.get('subject_id')!=int(ctx.params.get('match_id') or 0):
-                raise conflict('旧回执操作不一致',code='uid_conflict')
-            return {'replayed':True,'receipt':result['receipt'],'message':'原决定已生效；本次未重复写入'}
-    raise ApiError(426,'client_upgrade_required','此入口不再直接确认成绩。请保留原包，升级后提交独立复核；本次未写入')
-
-
-@route("POST", r"/api/recording/(?P<kind>match|individual)/(?P<subject_id>\d+)/claim", roles=REC)
+@route("POST", r"/api/recording/(?P<kind>match|individual|individual_project)/(?P<subject_id>\d+)/claim", roles=REC, transaction=False)
 def claim_recording(ctx):
-    return access.claim(ctx, ctx.params['kind'], int(ctx.params['subject_id']))
+    return recording_action(ctx, 'claim')
 
 
-@route("POST", r"/api/recording/(?P<kind>match|individual)/(?P<subject_id>\d+)/transfer", roles=ORG)
+def recording_action(ctx, action):
+    kind, sid = ctx.params['kind'], int(ctx.params['subject_id'])
+    try:
+        with db.tx(ctx.conn):
+            db.ensure_user_snapshot(ctx.conn, ctx.user)
+            if action == 'claim': return access.claim(ctx, kind, sid)
+            return access.change_recording(ctx, kind, sid, action)
+    except ApiError as error:
+        with db.tx(ctx.conn):
+            db.ensure_user_snapshot(ctx.conn, ctx.user)
+            security.audit(ctx.conn, ctx.user, action + '_recording', kind, sid,
+                           {'result': 'failed', 'reason': str(error)})
+        raise
+
+
+@route("GET", r"/api/recording/(?P<kind>match|individual|individual_project)/(?P<subject_id>\d+)", roles=REC)
+def recording_status(ctx):
+    return access.recording_state(ctx, ctx.params['kind'], int(ctx.params['subject_id']))
+
+
+@route("POST", r"/api/recording/(?P<kind>match|individual|individual_project)/(?P<subject_id>\d+)/release", roles=REC, transaction=False)
+def release_recording(ctx):
+    return recording_action(ctx, 'release')
+
+
+@route("POST", r"/api/recording/(?P<kind>match|individual|individual_project)/(?P<subject_id>\d+)/start", roles=REC, transaction=False)
+def start_recording(ctx):
+    return recording_action(ctx, 'start')
+
+
+@route("POST", r"/api/recording/(?P<kind>match|individual|individual_project)/(?P<subject_id>\d+)/transfer", roles=ORG)
 def transfer_recording(ctx):
     return access.claim(ctx, ctx.params['kind'], int(ctx.params['subject_id']), transfer=True)
 
@@ -95,10 +94,6 @@ def match_package(ctx):
 @route("POST", r"/api/scoring/submit", roles=REC)
 @atomic_result
 def submit_match(ctx):
-    return _legacy_result_receipt(ctx)
-
-
-def _commit_team_submission(ctx):
     """三人赛完整成绩包提交（幂等 + 版本冲突检测 + 过程结果一致性校验）。"""
     payload = ctx.body or {}
     uid = str(payload.get("submission_uid") or "").strip()
@@ -385,7 +380,9 @@ def _loads(text: str) -> dict:
 @route("POST", r"/api/scoring/individual", roles=REC)
 @atomic_result
 def submit_individual(ctx):
-    return _legacy_result_receipt(ctx)
+    """个人赛最终成绩提交：只记录结果与确认名次，不记录过程。"""
+    with db.tx(ctx.conn):
+        return _submit_individual(ctx)
 
 
 def _submit_individual(ctx):
@@ -395,7 +392,8 @@ def _submit_individual(ctx):
         raise bad_request("缺少提交标识 submission_uid")
     pid = int(payload.get("participation_id") or 0)
     access.require_owner(ctx, 'individual', pid)
-    part = db.q1(ctx.conn, "SELECT * FROM participations WHERE id = ?", (pid,))
+    part = db.q1(ctx.conn,
+                 "SELECT * FROM participations WHERE id = ? AND deleted_at IS NULL", (pid,))
     if part is None:
         raise not_found("参赛记录不存在")
     cat = category_context(ctx.conn, part["category_id"])
@@ -417,28 +415,28 @@ def _submit_individual(ctx):
                     "receipt": submission_receipt(ctx.conn, previous)}
         raise conflict("相同提交标识的内容与已保存记录不一致", code="uid_conflict")
 
-    result_status = payload.get("result_status") or "normal"
-    result_value = payload.get("result_value")
-    error_count = payload.get("error_count")
-    violation_count = payload.get("violation_count")
-    result_text = payload.get("result_text") or ""
-    rank_no = payload.get("rank_no")
-    rank_no = int(rank_no) if rank_no not in (None, "") else None
-    if rank_no is not None:
+    if payload.get("rank_no") not in (None, ""):
         raise bad_request("原始成绩提交不能直接确认名次；请在全部结果完整后统一确认项目名次",
                           code="rank_requires_project_confirmation")
-    errors = validation.validate_individual_package(
-        result_status=result_status, result_value=result_value, result_text=result_text,
-        rank_no=rank_no, events=payload.get("events"), error_count=error_count,
-        violation_count=violation_count)
-    if rank_no is not None and result_status != "normal":
-        errors.append("只有正常完成的成绩才能记录名次；取消成绩、未完成、未参加请单独标记")
+    values, errors = {}, {}
+    for key, label in individual_results.FIELDS:
+        try:
+            values[key] = individual_results.normalize(payload.get(key), integer_only=key == "error_count")
+        except ValueError as exc:
+            errors[key] = f"{label}：{exc}"
     if errors:
         raise ApiError(422, "invalid_package", "提交数据未通过校验，请核对后重试",
-                       detail={"errors": errors})
+                       detail={"fields": errors})
+    if any(payload.get(key) for key in ("events", "result_text", "note")):
+        raise bad_request("个人赛成绩仅填写裁判确认的有效、失误和犯规次数",
+                          code="unsupported_individual_details")
+    result_status = "dsq" if values["violation_count"] >= 2 else "normal"
     existing = db.q1(ctx.conn, "SELECT * FROM individual_results WHERE category_id = ? AND participation_id = ?",
                      (cat["id"], pid))
     if not existing:
+        owner = access.assignment(ctx.conn, 'individual_project', cat['id'])
+        if not owner or owner['user_id'] != ctx.user['id'] or not owner.get('started'):
+            raise forbidden('请先通过“领取录入任务”领取整个项目')
         from ..individual_draw_store import guard_recording
         guard_recording(ctx.conn, cat['id'])
     base_version = require_version(payload)
@@ -450,26 +448,22 @@ def _submit_individual(ctx):
     correcting = bool(existing)
     reason = str(payload.get("reason") or "").strip()
     if correcting:
-        if ctx.user["role"] not in ORG and not getattr(ctx, '_review_materialization', False):
+        if ctx.user["role"] not in ORG:
             raise forbidden("已有确认成绩，正式更正需要编排与成绩人员或管理员操作")
         if not reason:
             raise bad_request("请填写正式更正原因", code="correction_reason_required",
                               detail={"fields": {"reason": "请填写正式更正原因"}})
     with db.tx(ctx.conn):
+        result_data = {**values, "rank_no": None, "result_status": result_status,
+                       "confirmed": 1, "version": current_version + 1}
         if existing:
             db.update(ctx.conn, "individual_results", existing["id"], {
-                "result_value": result_value, "error_count": error_count,
-                "violation_count": violation_count, "result_text": result_text, "rank_no": rank_no,
-                "result_status": result_status, "confirmed": int(result_status != "pending"),
-                "note": payload.get("note") or "", "version": current_version + 1,
+                **result_data, "result_text": "", "note": "",
                 "updated_at": db.now(ctx.conn)})
             result_id = existing["id"]
         else:
             result_id = db.insert(ctx.conn, "individual_results", {
-                "category_id": cat["id"], "participation_id": pid, "result_value": result_value,
-                "error_count": error_count, "violation_count": violation_count,
-                "result_text": result_text, "rank_no": rank_no, "result_status": result_status,
-                "confirmed": int(result_status != "pending"), "note": payload.get("note") or "", "version": 1})
+                **result_data, "category_id": cat["id"], "participation_id": pid})
         # 任一原始结果变化都可能改变其他选手名次，整项退回待确认。
         db.run(ctx.conn, "UPDATE individual_results SET rank_no = NULL WHERE category_id = ?", (cat["id"],))
         db.run(ctx.conn, """UPDATE placements SET rank_no = NULL, status = 'pending',
@@ -481,16 +475,16 @@ def _submit_individual(ctx):
         submission_id = db.insert(ctx.conn, "submissions", {
             "uid": uid, "kind": "individual", "individual_result_id": result_id,
             "device": payload.get("device") or "", "base_version": base_version,
-            "payload_hash": digest, "status": "confirmed",
-            "message": payload.get("note") or "", "user_id": ctx.user["id"]})
+            "payload_hash": digest, "status": "confirmed", "user_id": ctx.user["id"]})
         security.audit(ctx.conn, ctx.user, "correct_individual" if correcting else "submit_individual",
                        "individual_result", result_id,
                        {"reason": reason, "before": dict(existing) if existing else None,
                         "after": dict(db.q1(ctx.conn, "SELECT * FROM individual_results WHERE id = ?", (result_id,)))})
     return {"submission_id": submission_id, "duplicate": False,
-            "message": "个人成绩已保存，待核对" if result_status == "pending" else "个人成绩已提交，项目名次需统一确认",
+            "message": "成绩已保存，犯规达到 2 次，取消成绩" if result_status == "dsq"
+            else "个人成绩已提交，项目名次需统一确认",
             "receipt": receipt(uid, "individual", pid, payload, base_version + 1, submission_id),
-            "result_id": result_id, "placement_updated": rank_no is not None}
+            "result_id": result_id, "placement_updated": False}
 
 
 def _upsert_individual_placement(conn, cat, pid: int, rank_no: int, user) -> None:
@@ -513,19 +507,21 @@ def list_individual_results(ctx):
     category_id = int(ctx.params["category_id"])
     cat = category_context(ctx.conn, category_id)
     rows = db.q(ctx.conn,
-                """SELECT ir.*, COALESCE(t.name, a.name) AS subject, s.name AS school_name,
+                """SELECT ir.id, ir.participation_id, ir.category_id, ir.result_value,
+                          ir.error_count, ir.violation_count, ir.rank_no, ir.result_status,
+                          ir.confirmed, ir.version, ir.updated_at,
+                          COALESCE(t.name, a.name) AS subject, s.name AS school_name,
                           s.short_name AS school_short
                      FROM individual_results ir
                      JOIN participations p ON p.id = ir.participation_id
                      LEFT JOIN teams t ON t.id = p.team_id
                      LEFT JOIN athletes a ON a.id = p.athlete_id
                      LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)
-                    WHERE ir.category_id = ? ORDER BY ir.rank_no IS NULL, ir.rank_no, s.name""",
+                    WHERE ir.category_id = ? AND p.deleted_at IS NULL
+                    ORDER BY ir.result_status = 'dsq', ir.rank_no IS NULL, ir.rank_no, s.name""",
                 (category_id,))
     results = db.rows_to_dicts(rows)
-    disputed=bool(db.q1(ctx.conn,"SELECT 1 FROM result_disputes WHERE category_id=? AND status='open'",(category_id,)))
     for result in results:
-        result['result_disputed']=disputed
         result.update(access.owner_info(ctx.conn, 'individual', result['participation_id']))
         authors = db.q(ctx.conn, '''SELECT u.display_name FROM submissions s
             LEFT JOIN users u ON u.id=s.user_id WHERE s.individual_result_id=? ORDER BY s.id''', (result['id'],))
@@ -538,7 +534,7 @@ def list_individual_results(ctx):
 @route("POST", r"/api/categories/(?P<category_id>\d+)/individual-rankings/confirm", roles=ORG)
 @atomic_result
 def confirm_individual_rankings(ctx):
-    """按有效次数降序、失误次数升序统一确认个人赛名次。"""
+    """按有效次数降序、失误次数升序确认名次，同分采用现场抽签结果。"""
     with db.tx(ctx.conn):
         return _confirm_individual_rankings(ctx)
 
@@ -546,13 +542,6 @@ def confirm_individual_rankings(ctx):
 def _confirm_individual_rankings(ctx):
     category_id = int(ctx.params["category_id"])
     cat = category_context(ctx.conn, category_id)
-    from .. import result_impacts, result_candidates
-    result_impacts.guard_category(ctx.conn, category_id)
-    pending_candidates=db.q(ctx.conn, '''SELECT c.subject_id FROM result_candidates c JOIN candidate_heads h ON h.candidate_id=c.id
-            WHERE c.category_id=? AND c.subject_kind='individual' AND h.status='submitted' ''', (category_id,))
-    if pending_candidates:
-        raise conflict('仍有成绩待独立复核，不能确认项目名次', code='results_pending',
-                       detail={'participation_ids':[r['subject_id'] for r in pending_candidates]})
     if cat["kind"] != "individual":
         raise bad_request("该项目不是个人赛")
     rows = db.q(ctx.conn,
@@ -562,29 +551,40 @@ def _confirm_individual_rankings(ctx):
                                                    AND ir.category_id = p.category_id
                     LEFT JOIN athletes a ON a.id = p.athlete_id
                     LEFT JOIN schools s ON s.id = a.school_id
-                    WHERE p.category_id = ? AND p.status = 'active' ORDER BY p.id""",
+                    WHERE p.category_id = ? AND p.status = 'active'
+                      AND p.deleted_at IS NULL ORDER BY p.id""",
                 (category_id,))
     missing = [r["participation_id"] for r in rows if r["id"] is None]
-    if not rows:
-        raise conflict('尚无有效报名，不能确认项目名次', code='results_empty')
     if missing:
         raise conflict("仍有运动员未录入结果，不能确认项目名次", code="results_incomplete",
                        detail={"participation_ids": missing})
+    incomplete = [r["participation_id"] for r in rows if r["result_status"] in ("normal", "pending")
+                  and any(r[key] is None for key, _ in individual_results.FIELDS)]
+    if incomplete:
+        raise conflict("部分旧成绩缺少裁判确认的次数，请更正并补齐三项数据后再确认名次",
+                       code="results_incomplete", detail={"participation_ids": incomplete})
     pending = [r["participation_id"] for r in rows if r["result_status"] == "pending" or not r["confirmed"]]
     if pending:
         raise conflict("仍有运动员的成绩待确认，请先完成成绩核对", code="results_pending",
                        detail={"participation_ids": pending})
     snapshot = validation.payload_hash([
-        {k: r[k] for k in ("participation_id", "version", "result_status", "result_value", "error_count")}
+        {k: r[k] for k in ("participation_id", "version", "result_status", "rank_no",
+                           "result_value", "error_count", "violation_count")}
         for r in rows])
     body = ctx.body or {}
     if body.get("base_results") and body["base_results"] != snapshot:
         raise conflict("成绩或报名名单已变化，请关闭抽签窗口并重新核对", code="ranking_changed")
     normal = [r for r in rows if r["result_status"] == "normal"]
-    normal.sort(key=lambda r: (-int(r["result_value"]), int(r["error_count"])))
+    if body.get("tie_orders") is None and all(r["rank_no"] is not None for r in normal):
+        return {"message": f"已确认 {len(normal)} 个名次", "count": len(normal)}
+
+    def score_key(row):
+        return (-row["result_value"], row["error_count"])
+
+    normal.sort(key=score_key)
     ties = []
     offset = 0
-    for _, members in groupby(normal, key=lambda r: (r["result_value"], r["error_count"])):
+    for _, members in groupby(normal, key=score_key):
         members = list(members)
         if len(members) > 1:
             ties.append({"rank_from": offset + 1, "rank_to": offset + len(members), "members": [
@@ -594,23 +594,23 @@ def _confirm_individual_rankings(ctx):
     orders = body.get("tie_orders")
     if ties and orders is None:
         involved = [member["participation_id"] for tie in ties for member in tie["members"]]
-        raise conflict("存在有效次数和失误次数均相同的运动员，请先录入抽签结果",
+        raise conflict("存在有效次数和失误次数均相同的运动员，请录入现场抽签确定的最终名次",
                        code="individual_tie_pending",
                        detail={"participation_ids": involved, "ties": ties, "base_results": snapshot})
     if orders is not None:
         if not body.get("base_results"):
             raise bad_request("抽签确认缺少成绩版本，请重新核对")
         if not isinstance(orders, list) or len(orders) != len(ties):
-            raise bad_request("请完整填写每一组并列运动员的抽签顺序")
+            raise bad_request("请完整填写每一组并列运动员的最终名次")
         for tie, order in zip(ties, orders):
             members = {m["participation_id"] for m in tie["members"]}
             if (not isinstance(order, list) or len(order) != len(members)
                     or any(type(pid) is not int for pid in order) or set(order) != members):
-                raise bad_request("抽签顺序必须包含本组所有运动员且不能重复")
+                raise bad_request("最终名次必须包含本组所有运动员且不能重复")
             lookup = {r["participation_id"]: r for r in normal}
             normal[tie["rank_from"] - 1:tie["rank_to"]] = [lookup[pid] for pid in order]
     with db.tx(ctx.conn):
-        db.run(ctx.conn, "DELETE FROM placements WHERE category_id = ? AND source = 'individual'",
+        db.run(ctx.conn, "DELETE FROM placements WHERE category_id = ?",
                (category_id,))
         db.run(ctx.conn, "UPDATE individual_results SET rank_no = NULL WHERE category_id = ?",
                (category_id,))
@@ -619,8 +619,10 @@ def _confirm_individual_rankings(ctx):
             _upsert_individual_placement(ctx.conn, cat, row["participation_id"], rank_no, ctx.user)
         from .standings import recompute_category_points
         recompute_category_points(ctx.conn, category_id)
+        draw_ranks = [{"rank_no": rank, "participation_id": normal[rank - 1]["participation_id"]}
+                      for tie in ties for rank in range(tie["rank_from"], tie["rank_to"] + 1)]
         security.audit(ctx.conn, ctx.user, "confirm_individual_rankings", "category", category_id,
-                       {"count": len(normal), "tie_orders": orders or [], "base_results": snapshot})
+                       {"count": len(normal), "draw_ranks": draw_ranks})
     return {"message": f"已按成绩确认 {len(normal)} 个名次", "count": len(normal)}
 
 
@@ -662,7 +664,7 @@ def match_submissions(ctx):
 @route("POST", r"/api/matches/(?P<match_id>\d+)/correction", roles=ORG)
 @atomic_result
 def correct_match(ctx):
-    return _legacy_result_receipt(ctx)
+    return _run_result_mutation(ctx, "correction", _correct_match)
 
 
 def _run_result_mutation(ctx, kind, fn):
@@ -735,7 +737,7 @@ def _correct_match(ctx):
 @route("POST", r"/api/matches/(?P<match_id>\d+)/cancel", roles=ORG)
 @atomic_result
 def cancel_match(ctx):
-    return _legacy_result_receipt(ctx)
+    return _run_result_mutation(ctx, "cancel", _cancel_match)
 
 
 def _cancel_match(ctx):
@@ -769,7 +771,7 @@ def _cancel_match(ctx):
 @route("POST", r"/api/matches/(?P<match_id>\d+)/reset-review", roles=ORG)
 @atomic_result
 def review_reset_match(ctx):
-    return _legacy_result_receipt(ctx)
+    return _run_result_mutation(ctx, "reset_review", _review_reset_match)
 
 
 def _review_reset_match(ctx):

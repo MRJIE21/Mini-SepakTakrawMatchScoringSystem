@@ -1,5 +1,5 @@
 /* 把计分页的本机草稿异步同步给大屏；失败不阻塞计分。 */
-import { api, recordRequestContext } from './api.js';
+import { api } from './api.js';
 import { summarize } from './scoring.js';
 
 let latest = null;
@@ -60,7 +60,6 @@ function snapshot(draft, match) {
     away_sets: summary.winners?.away ?? 0,
     sets,
     draft_uid: draft.uid || '',
-    claim_epoch:draft.claim_epoch??0,stream_epoch:draft.stream_epoch,
     lineup_hash: `${draft.lineup?.home || ''}:${draft.lineup?.away || ''}`,
   };
 }
@@ -72,13 +71,7 @@ async function flush() {
   inflight = true;
   const current = latest;
   try {
-    const context=recordRequestContext(current.draft);
-    if (!current.draft.stream_epoch) {
-      const result=await api.post('/api/display/live/start',{match_id:current.match.id,draft_uid:current.draft.uid,
-        claim_epoch:current.draft.claim_epoch??0,expected_stream_epoch:current.draft.live_base_epoch??0},{context});
-      current.draft.stream_epoch=result.stream_epoch;
-    }
-    await api.post('/api/display/live', snapshot(current.draft, current.match),{context});
+    await api.post('/api/display/live', snapshot(current.draft, current.match));
     failures = 0;
     if (latest !== current) timer = setTimeout(flush, 120);
   } catch (error) {

@@ -12,7 +12,6 @@ export function buildMatchPayload(draft, summary) {
     match_id: draft.match_id,
     device: draft.device,
     base_version: draft.base_version,
-    ...(draft.protocol_schema === 3 ? { claim_epoch: draft.claim_epoch ?? 0 } : {}),
     plan_version: draft.plan_version,
     ...(draft.rules_hash ? { rules_hash: draft.rules_hash } : {}),
     home_participation: draft.lineup ? draft.lineup.home : null,
@@ -22,7 +21,7 @@ export function buildMatchPayload(draft, summary) {
     events: draft.events || [],
     note: draft.note || '',
   };
-  draft.payload = draft.protocol_schema === 3 ? candidateEnvelope(draft,payload) : structuredClone(payload);
+  draft.payload = structuredClone(payload);
   return draft.payload;
 }
 
@@ -34,25 +33,11 @@ export function buildIndividualPayload(draft) {
     participation_id: draft.participation_id,
     device: draft.device,
     base_version: draft.base_version,
-    ...(draft.protocol_schema === 3 ? { claim_epoch: draft.claim_epoch ?? 0 } : {}),
-    result_status: draft.result_status,
-    result_value: draft.result_value === '' ? null : draft.result_value,
-    error_count: draft.error_count === '' ? null : draft.error_count,
-    violation_count: draft.violation_count === '' ? null : draft.violation_count,
-    result_text: draft.result_text || '',
-    rank_no: draft.rank_no === '' || draft.rank_no == null ? null : Number(draft.rank_no),
-    note: draft.note || '',
+    result_value: draft.result_value,
+    error_count: draft.error_count,
+    violation_count: draft.violation_count,
   };
   if (draft.reason) payload.reason = draft.reason;
-  draft.payload = draft.protocol_schema === 3 ? candidateEnvelope(draft,payload) : structuredClone(payload);
+  draft.payload = structuredClone(payload);
   return draft.payload;
-}
-
-export function candidateEnvelope(draft,payload) {
-  return { payload_schema:3,subject_kind:draft.kind === 'individual' ? 'individual' : 'match',
-    subject_id:draft.match_id || draft.participation_id, submission_uid:draft.uid,
-    operation:draft.operation || (draft.base_version ? 'correction' : 'initial'),
-    ...(draft.parent_id ? { parent_id:draft.parent_id } : {}),
-    ...(draft.impact_hash ? { impact_hash:draft.impact_hash, impact_actions:draft.impact_actions || [] } : {}),
-    payload:structuredClone(payload) };
 }

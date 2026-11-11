@@ -94,9 +94,9 @@ async function render({ el, params, signal, requestContext = captureRequestConte
         const list = stage.matches.filter((m) => m.pool_id === pool.id);
         if (!list.length) continue;
         const others = bracketPools.filter((p) => p.id !== pool.id);
-        panel.append(h('h4.mt.mb-xs',
+        panel.append(h('h4.mt', { style: 'margin-bottom:6px' },
           pool.name,
-          others.length ? h('span.small.muted.ml-sm.fw-400',
+          others.length ? h('span.small.muted', { style: 'margin-left:8px;font-weight:400' },
             `与${others.map((p) => p.name).join('、')}通过标签衔接`) : null));
         panel.append(renderTree(list, { ...ctxBase, sectionPoolId: pool.id }));
       }
@@ -170,8 +170,8 @@ function renderTree(matches, ctx) {
       canvas.append(h('div.bk-champion', {
         style: `left:${p.x + BOX_W + COL_GAP}px;top:${p.y + HEAD_H + 8}px;width:${BOX_W * 0.62}px`,
       },
-        h('div.small.muted.text-11', final.winner_rank && final.winner_rank !== 1 ? `第${final.winner_rank}名` : '冠军'),
-        h('div.fw-700', name)));
+        h('div.small.muted', { style: 'font-size:11px' }, final.winner_rank && final.winner_rank !== 1 ? `第${final.winner_rank}名` : '冠军'),
+        h('div', { style: 'font-weight:700' }, name)));
     }
   }
   return h('div.bk-wrap', canvas);
@@ -220,7 +220,7 @@ function teamNode(slot, ctx) {
     }[slot.type] || '待定';
     parts.push(h('span.bk-team.muted', { title: slot.reason || '' }, `${text}（待定）`));
   }
-  return h('span.bracket-parts', parts);
+  return h('span', { style: 'display:flex;gap:4px;align-items:center;min-width:0;flex:1' }, parts);
 }
 
 function winnerOf(m) {

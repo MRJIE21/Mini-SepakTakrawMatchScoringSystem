@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 
 from .. import db
-from ..read_projection import text_integer_rows
 from ..domain import slots as slotmod
 from ..domain import validation, advancement
 from ..errors import not_found
@@ -33,7 +32,10 @@ def get_or_404(conn, table: str, row_id: int, label: str = "对象"):
     return row
 
 
-_PARTICIPATION_INFO_SQL = """SELECT p.id, p.category_id, p.team_id, p.athlete_id, p.seed_no, p.status,
+def participation_info(conn, pid: int) -> dict:
+    row = db.q1(
+        conn,
+        """SELECT p.id, p.category_id, p.team_id, p.athlete_id, p.seed_no, p.status,
                   t.name AS team_name, t.school_id AS team_school,
                   a.name AS athlete_name, a.school_id AS athlete_school, a.gender AS athlete_gender,
                   s.id AS school_id, s.name AS school_name, s.short_name AS school_short,
@@ -44,29 +46,11 @@ _PARTICIPATION_INFO_SQL = """SELECT p.id, p.category_id, p.team_id, p.athlete_id
              JOIN groups g ON g.id = c.group_id
              LEFT JOIN teams t ON t.id = p.team_id
              LEFT JOIN athletes a ON a.id = p.athlete_id
-             LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)"""
-
-
-def participation_info(conn, pid: int) -> dict:
-    row = db.q1(conn, _PARTICIPATION_INFO_SQL + ' WHERE p.id = ?', (pid,))
+             LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)
+            WHERE p.id = ? AND p.deleted_at IS NULL""",
+        (pid,))
     if row is None:
         raise not_found(f"参赛记录不存在（id={pid}）")
-    return _participation_info(row)
-
-
-def participation_info_map(conn, ids) -> dict:
-    ids = list(dict.fromkeys(ids))
-    result = {}
-    for start in range(0, len(ids), 800):
-        part = ids[start:start + 800]
-        rows = db.q(conn, _PARTICIPATION_INFO_SQL + ' WHERE p.id IN (' + ','.join('?' for _ in part) + ')', part)
-        # The explicit projection above has unique aliases. Positional values
-        # avoid repeated sqlite3.Row key scans while retaining the formatter.
-        result.update((row['id'], _participation_info(dict(zip(row.keys(), row)))) for row in rows)
-    return result
-
-
-def _participation_info(row) -> dict:
     info = dict(row)
     school_label = info["school_short"] or info["school_name"]
     if info["team_id"]:
@@ -78,23 +62,6 @@ def _participation_info(row) -> dict:
         info["subject"] = info["athlete_name"]
         info["display"] = f"{school_label}·{info['label']}"
     return info
-
-
-def participation_profile_map(conn, category_id):
-    """Only fields used by workbench profile reminders; keep display semantics."""
-    rows = text_integer_rows(conn, '''SELECT p.id,p.team_id,a.name AS athlete_name,a.gender AS athlete_gender,
-        s.id AS school_id,s.name AS school_name,s.short_name AS school_short
-        FROM participations p LEFT JOIN teams t ON t.id=p.team_id
-        LEFT JOIN athletes a ON a.id=p.athlete_id
-        LEFT JOIN schools s ON s.id=COALESCE(t.school_id,a.school_id)
-        WHERE p.category_id=? AND p.status='active' ''',
-        ('id','team_id','athlete_name','athlete_gender','school_id','school_name','school_short'), (category_id,))
-    result = {}
-    for row in rows:
-        label = row['school_short'] or row['school_name']
-        result[row['id']] = {'school_id':row['school_id'], 'athlete_gender':row['athlete_gender'],
-            'display':label if row['team_id'] else f"{label}·{row['athlete_name']}"}
-    return result
 
 
 def participation_display_map(conn, ids: list[int]) -> dict[int, str]:
@@ -109,7 +76,7 @@ def participation_display_map(conn, ids: list[int]) -> dict[int, str]:
                       LEFT JOIN teams t ON t.id = p.team_id
                       LEFT JOIN athletes a ON a.id = p.athlete_id
                       LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)
-                     WHERE p.id IN ({marks})""", ids)
+                     WHERE p.id IN ({marks}) AND p.deleted_at IS NULL""", ids)
     return {r["id"]: r["school"] if r["team_id"]
             else f"{r['school']}·{r['subject']}" for r in rows}
 
@@ -153,14 +120,9 @@ def plan_effective(conn, plan) -> bool:
 
 def match_plan_effective(conn, row, plan=None):
     plan = plan or db.q1(conn, "SELECT * FROM plans WHERE id=?", (row["plan_id"],))
-    stage = db.q1(conn, "SELECT kind,params_json FROM stages WHERE id=? AND plan_id=?", (row["stage_id"], plan["id"])) if plan else None
-    return match_plan_effective_from_state(plan, stage)
-
-
-def match_plan_effective_from_state(plan, stage):
-    """The same stage rule for single-object and request-local bulk reads."""
     if not plan or plan["status"] == "archived":
         return False
+    stage = db.q1(conn, "SELECT kind,params_json FROM stages WHERE id=? AND plan_id=?", (row["stage_id"], plan["id"]))
     managed = json.loads(stage['params_json'] or '{}').get('schedule_meta') if stage else None
     if managed:
         return managed['state'] == 'confirmed'
@@ -170,18 +132,6 @@ def match_plan_effective_from_state(plan, stage):
 
 
 def recording_blocker(conn, row):
-    from .. import result_candidates
-    return recording_blocker_from_state(row,
-        result_candidates.active(conn,'match',row['id']),
-        db.q1(conn,"SELECT 1 FROM result_disputes WHERE category_id=? AND status='open'",(row['category_id'],)),
-        lambda: match_plan_effective(conn, row))
-
-
-def recording_blocker_from_state(row, candidate_pending, disputed, plan_effective):
-    if candidate_pending:
-        return '终场已提交，待独立复核'
-    if disputed:
-        return '项目存在未解决的成绩争议，暂不可推进新记录'
     if dict(row).get('reset_state', 'none') in ('inactive', 'review'):
         return '该重置场次已停用或待复核，不能记录'
     if row["status"] == "pending":
@@ -190,7 +140,7 @@ def recording_blocker_from_state(row, candidate_pending, disputed, plan_effectiv
         return "该场次为轮空，没有实际比赛"
     if row["status"] == "finished":
         return "该场次已确认，更正需要编排与成绩人员操作"
-    if not plan_effective():
+    if not match_plan_effective(conn, row):
         return "赛程阶段尚未确认，请管理员核对并确认后再领取和记录"
     return ""
 
@@ -279,14 +229,6 @@ def serialize_match(conn, row, with_sets: bool = True) -> dict:
     info.update(team_rules_store.match_rules(conn, row))
     info["can_score"] = not bool(info["blocked_reason"])
     info.update(owner_info(conn, 'match', row['id']))
-    from .. import result_candidates
-    info['claim_epoch'] = result_candidates.epoch_info(conn,'match',row['id'])['epoch']
-    stream=db.q1(conn,'SELECT v FROM settings WHERE k=?',(f"display:stream:{row['id']}",))
-    info['live_stream_epoch']=json.loads(stream['v'])['epoch'] if stream else 0
-    pending_candidate = result_candidates.active(conn,'match',row['id'])
-    info['review_status'] = 'submitted' if pending_candidate else ('approved' if row['result_version'] else 'none')
-    info['candidate_id'] = pending_candidate['id'] if pending_candidate else None
-    info['result_disputed'] = bool(db.q1(conn,"SELECT 1 FROM result_disputes WHERE category_id=? AND status='open'",(row['category_id'],)))
     authors = db.q(conn, 'SELECT s.user_id,u.display_name FROM submissions s LEFT JOIN users u ON u.id=s.user_id WHERE s.match_id=? ORDER BY s.id', (row['id'],))
     if authors:
         info['recorder_name'] = authors[0]['display_name'] or ''

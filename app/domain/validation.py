@@ -5,7 +5,6 @@ import json
 from . import team_rules
 
 RESULT_STATUSES = ("normal", "home_forfeit", "away_forfeit", "unfinished", "cancelled")
-INDIVIDUAL_STATUSES = ("normal", "dnf", "dns", "dsq", "pending")
 
 
 def _rules(rules=None, cap=None, max_sets=None):
@@ -165,44 +164,6 @@ def validate_team_package(*, sets, events, result_status, require_events=True, r
         actual = {no: sc for no, sc in scores.items() if any(sc)}
         if actual != submitted:
             errors.append("提交局分与得分过程回放结果不一致，或缺少对应局分/过程")
-    return errors
-
-
-def validate_individual_package(*, result_status: str, result_value, result_text: str,
-                                rank_no, events: list | None = None, error_count=None,
-                                violation_count=None) -> list[str]:
-    errors: list[str] = []
-    if result_status not in INDIVIDUAL_STATUSES:
-        return [f"未知结果状态：{result_status}"]
-    if events:
-        errors.append("个人赛不保存逐次得分过程")
-    if result_status == "normal":
-        if result_value is None:
-            errors.append("正常完成的个人成绩必须填写有效次数，不能仅填写文字说明")
-    for value, label in ((result_value, "有效次数"), (error_count, "失误次数"),
-                         (violation_count, "违规次数")):
-        if value is None:
-            if result_status == "normal" and label != "违规次数":
-                errors.append(f"正常完成的个人成绩必须填写{label}")
-            continue
-        try:
-            number = float(value)
-            if number < 0 or not number.is_integer():
-                errors.append(f"{label}必须是非负整数")
-        except (TypeError, ValueError):
-            errors.append(f"{label}格式不正确")
-    if violation_count is not None:
-        try:
-            if int(violation_count) >= 2 and result_status == "normal":
-                errors.append("违规达到两次及以上，结果状态不能标记为正常")
-        except (TypeError, ValueError):
-            pass
-    if rank_no is not None:
-        try:
-            if int(rank_no) < 1:
-                errors.append("名次必须为正整数")
-        except (TypeError, ValueError):
-            errors.append("名次格式不正确")
     return errors
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from . import clock, db, display_store, result_candidates
+from . import clock, db, display_store
 from .errors import ApiError
 
 
@@ -87,13 +87,8 @@ def _tile(event_conn, index: int, slot) -> dict:
     base["match_status"] = match_status
     base["result_status"] = result_status
     base["revision"] = int(ctx.get("result_version") or 0)
-    base['result_disputed'] = bool(ctx.get('result_disputed'))
-    pending = result_candidates.active(event_conn, 'match', match_id)
     if match_status == "finished":
         sets = ctx.get("sets") or []
-        if result_status in ('cancelled', 'unfinished'):
-            base['status'] = result_status
-            return base
         home_points, away_points, home_sets, away_sets = _points_from_sets(sets)
         base.update({
             "status": "finished",
@@ -112,7 +107,7 @@ def _tile(event_conn, index: int, slot) -> dict:
         expired = db.q1(event_conn, "SELECT * FROM display_live WHERE match_id = ?", (match_id,))
         if expired is not None and match_status == "ready":
             base.update({
-                "status": "pending_review_stale" if pending else "stale",
+                "status": "stale",
                 "current_set": expired["current_set"],
                 "sets": _set_chips(_loads(expired["sets_json"]), expired["current_set"]),
                 "home": {**base["home"], "points": int(expired["home_points"]), "sets": int(expired["home_sets"])},
@@ -121,10 +116,10 @@ def _tile(event_conn, index: int, slot) -> dict:
                 "revision": int(expired["revision"] or 0),
             })
             return base
-        base["status"] = "pending_review" if pending else "upcoming"
+        base["status"] = "upcoming"
         return base
     base.update({
-        "status": "pending_review" if pending else "live",
+        "status": "live",
         "current_set": live.get("current_set"),
         "sets": _set_chips(live.get("sets") or [], live.get("current_set")),
         "home": {**base["home"], "points": int(live.get("home_points") or 0), "sets": int(live.get("home_sets") or 0)},
@@ -156,15 +151,14 @@ def _state_version(config: dict, tiles: list[dict]) -> str:
     parts = [
         f"config:{int(config.get('revision') or 0)}",
         f"mode:{config.get('mode') or 'score'}",
-        f"poll:{int(config.get('poll_ms') or 500)}",
+        f"poll:{int(config.get('poll_ms') or display_store.DEFAULT_POLL_MS)}",
         f"layout:{int(config.get('layout') or 8)}",
         f"visible:{','.join(str(item) for item in (config.get('visible_slots') or []))}",
     ]
     for tile in tiles:
         parts.append(
             f"{tile.get('slot')}:{tile.get('match_id')}:{tile.get('status')}:"
-            f"{tile.get('revision', 0)}:{tile.get('updated_at', '')}:{int(bool(tile.get('visible')))}:"
-            f"{int(bool(tile.get('result_disputed')))}")
+            f"{tile.get('revision', 0)}:{tile.get('updated_at', '')}:{int(bool(tile.get('visible')))}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
@@ -174,10 +168,7 @@ def build_state(event_conn, screen: dict) -> dict:
     tiles = []
     revision_parts = [str(int(config.get("revision") or 0))]
     for index in range(display_store.SLOT_COUNT):
-        slot = config["slots"][index] if index < len(config["slots"]) else None
-        if screen.get('id') is not None and index not in visible:
-            slot = None  # Hidden slots are excluded from device payloads too.
-        tile = _tile(event_conn, index, slot)
+        tile = _tile(event_conn, index, config["slots"][index] if index < len(config["slots"]) else None)
         tile["visible"] = index in visible
         if tile.get("match_id") is not None:
             revision_parts.append(
@@ -195,7 +186,7 @@ def build_state(event_conn, screen: dict) -> dict:
         "event_id": screen.get("event_id"),
         "layout": int(config.get("layout") or 8),
         "mode": config.get("mode") or "score",
-        "poll_ms": int(config.get("poll_ms") or 500),
+        "poll_ms": int(config.get("poll_ms") or display_store.DEFAULT_POLL_MS),
         "visible_slots": visible,
         "slots": tiles,
         "announcement": {

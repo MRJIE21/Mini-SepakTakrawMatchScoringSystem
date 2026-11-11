@@ -70,9 +70,9 @@ def _number(value):
     return value
 
 
-def _order_arg(ctx) -> str:
-    """成绩类导出的行顺序：缺省正序，只接受 asc/desc，未知值明确拒绝。"""
-    value = (ctx.arg("order") or "asc").strip().lower()
+def _order_arg(ctx, default="asc") -> str:
+    """成绩类导出的行顺序：缺省采用调用方指定顺序，只接受 asc/desc，未知值明确拒绝。"""
+    value = (ctx.arg("order") or default).strip().lower()
     if value not in ("asc", "desc"):
         raise bad_request("排序只能选择正序（asc）或倒序（desc）", code="invalid_order")
     return value
@@ -191,19 +191,31 @@ def _source_text(row, side: str, pool_names=None) -> str:
     return "待定"
 
 
-def _results_table(conn, category_id):
+def _results_export_scope(ctx):
+    value = (ctx.arg('top_n') or 'all').strip()
+    if value not in ('all', '8'):
+        raise bad_request('导出范围必须为全部或前八名', code='invalid_top_n')
+    return 8 if value == '8' else None
+
+
+def _results_table(conn, category_id, top_n=None, order="asc"):
     """项目成绩表：CSV 与 XLSX 共用同一行数据。"""
     cat = category_context(conn, category_id)
     if cat["kind"] == "individual":
         data = _individual_rows(conn, category_id)
-        headers = ["大组别", "项目", "学校", "运动员", "有效次数", "失误次数", "违规次数",
+        if top_n is not None:
+            data = [row for row in data if _has_rank(row) and 1 <= row['rank_no'] <= top_n]
+        headers = ["大组别", "项目", "学校", "运动员", "有效次数", "失误次数", "犯规次数",
                    "结果状态", "名次", "积分"]
-        rows = [[cat["group_name"], _category_label(cat["name"], cat["gender"]),
-                 row["school_name"], row["athlete_name"], _number(row["result_value"]),
-                 _number(row["error_count"]), _number(row["violation_count"]),
-                 _individual_status(row), _confirmed_rank(row),
-                 row["points"] if _has_rank(row) else ""] for row in data]
-        return headers, rows, f"individual_results_{category_id}.csv"
+        paired = [(_has_rank(row), [cat["group_name"], _category_label(cat["name"], cat["gender"]),
+                   row["school_name"], row["athlete_name"], *_individual_counts(row),
+                   _individual_status(row), _confirmed_rank(row),
+                   row["points"] if _has_rank(row) else ""]) for row in data]
+        rows, _ = _confirmed_then_pending(paired, order)
+        suffix = '_top8' if top_n is not None else ''
+        return headers, rows, f"individual_results_{category_id}{suffix}.csv"
+    if top_n is not None:
+        raise bad_request('前八名导出仅适用于个人赛项目', code='invalid_export_scope')
     matches = db.q(conn,
                    """SELECT m.id, m.round_label, m.status, m.result_status, m.home_actual, m.away_actual
                         FROM matches m WHERE m.category_id = ?
@@ -219,21 +231,59 @@ def _results_table(conn, category_id):
                      labels.get(r["home_actual"], ""), labels.get(r["away_actual"], ""),
                      set_text, _winner_text(r["result_status"], sets),
                      _result_status_text(r["result_status"])])
-    return headers, rows, f"results_{category_id}.csv"
+    return headers, _ordered(rows, order), f"results_{category_id}.csv"
+
+
+def _team_ranking_rows(conn, category_id):
+    return db.q(conn, """SELECT p.id, s.name AS school_name, pl.rank_no,
+                        pl.status AS placement_status, pl.source, COALESCE(sp.points, 0) AS points
+                    FROM participations p JOIN teams t ON t.id = p.team_id
+                    JOIN schools s ON s.id = t.school_id
+                    LEFT JOIN placements pl ON pl.participation_id = p.id AND pl.category_id = p.category_id
+                    LEFT JOIN school_points sp ON sp.placement_id = pl.id
+                    WHERE p.category_id = ? AND p.deleted_at IS NULL
+                      AND (p.status = 'active' OR pl.status = 'confirmed')
+                    ORDER BY pl.status <> 'confirmed' OR pl.status IS NULL, pl.rank_no IS NULL,
+                             pl.rank_no, s.name, p.id""", (category_id,))
+
+
+
+
+@route('GET', r'/api/exports/placements\.(?P<format>csv|xlsx)')
+def export_placements(ctx):
+    cid = int(ctx.arg('category_id') or 0)
+    cat = category_context(ctx.conn, cid)
+    if cat['kind'] != 'team':
+        raise bad_request('此导出仅适用于三人赛名次')
+    top_n = _results_export_scope(ctx)
+    data = _team_ranking_rows(ctx.conn, cid)
+    if top_n is not None:
+        data = [row for row in data if _has_rank(row) and 1 <= row['rank_no'] <= top_n]
+    suffix = '_top8' if top_n is not None else ''
+    headers = ['大组别', '项目', '名次', '学校', '积分', '确认状态']
+    paired = [(_has_rank(row), [cat['group_name'], _category_label(cat['name'], cat['gender']),
+               _confirmed_rank(row), row['school_name'], row['points'] if _has_rank(row) else '',
+               '已确认' if _has_rank(row) else '待确认']) for row in data]
+    rows, _ = _confirmed_then_pending(paired, _order_arg(ctx))
+    if ctx.params['format'] == 'csv':
+        return _csv_response([headers, *rows], f'team_rankings_{cid}{suffix}.csv')
+    return _xlsx_response(workbook_bytes(headers, rows, '三人赛名次'), f'team_rankings_{cid}{suffix}.xlsx')
 
 
 @route("GET", r"/api/exports/results.csv")
 def export_results(ctx):
-    headers, rows, filename = _results_table(ctx.conn, int(ctx.arg("category_id") or 0))
-    return _csv_response([headers, *_ordered(rows, _order_arg(ctx))], filename)
+    headers, rows, filename = _results_table(ctx.conn, int(ctx.arg("category_id") or 0),
+                                             _results_export_scope(ctx), _order_arg(ctx))
+    return _csv_response([headers, *rows], filename)
 
 
 @route("GET", r"/api/exports/results.xlsx")
 def export_results_xlsx(ctx):
-    headers, rows, _ = _results_table(ctx.conn, int(ctx.arg("category_id") or 0))
+    top_n = _results_export_scope(ctx)
     category_id = int(ctx.arg("category_id") or 0)
-    return _xlsx_response(workbook_bytes(headers, _ordered(rows, _order_arg(ctx)), "项目成绩"),
-                          f"results_{category_id}.xlsx")
+    headers, rows, _ = _results_table(ctx.conn, category_id, top_n, _order_arg(ctx))
+    return _xlsx_response(workbook_bytes(headers, rows, "项目成绩"),
+                          f"results_{category_id}{'_top8' if top_n is not None else ''}.xlsx")
 
 
 def _winner_text(result_status, sets) -> str:
@@ -284,27 +334,29 @@ def export_standings_xlsx(ctx):
                           "standings.xlsx")
 
 
-def _school_totals_table(conn, group_id):
+def _school_export_limit(ctx):
+    value = (ctx.arg("top_n") or "all").strip()
+    if value == "all":
+        return None
+    if not value.isascii() or not value.isdecimal() or len(value) > 9 or int(value) < 1:
+        raise bad_request("导出名次数量必须是正整数或 all", code="invalid_top_n")
+    return int(value)
+
+
+def _school_totals_table(conn, group_id, top_n=None):
     from .standings import group_school_totals
     result = group_school_totals(conn, group_id)
     started = bool(result.get("started", True))
     headers = ["名次", "学校", "团体总分", "第一名数", "第二名数", "第三名数", "分项目明细", "待确认项目"]
     rows = []
-    for row in result["rows"]:
+    # 先取总分榜前 N 项，再应用导出正/倒序，避免倒序时选到末尾学校。
+    for row in result["rows"][:top_n]:
         detail = "；".join(f"{_category_label(d['category_name'], d.get('category_gender', ''))}"
                            f"{d['participation_label']}第{d['rank_no']}名"
                            f"（{d['base_points']}×{d['multiplier']}={d['points']}）"
                            for d in row["details"])
         # 未开赛组别不产生名次：名次列用“—”，待确认列固定 0，与页面/打印公告同口径。
-        # 已开赛但本组仍有未确认名次时，排名按已确认积分暂排，名次列用占位（D01）。
-        if not started:
-            rank_cell = "—"
-        elif row.get("status") == "tie_pending":
-            rank_cell = "待确认"
-        elif row.get("rank_provisional"):
-            rank_cell = "—（待确认）"
-        else:
-            rank_cell = row.get("rank") or "待确认"
+        rank_cell = (row.get("rank") or "待确认") if started else "—"
         rows.append([rank_cell, row["name"], _number(row["total"]),
                      _number(row["rank_counts"].get(1, 0)), _number(row["rank_counts"].get(2, 0)),
                      _number(row["rank_counts"].get(3, 0)), detail,
@@ -315,14 +367,14 @@ def _school_totals_table(conn, group_id):
 @route("GET", r"/api/exports/school-totals.csv")
 def export_school_totals(ctx):
     group_id = int(ctx.arg("group_id") or 0)
-    group, headers, rows = _school_totals_table(ctx.conn, group_id)
+    group, headers, rows = _school_totals_table(ctx.conn, group_id, _school_export_limit(ctx))
     return _csv_response([headers, *_ordered(rows, _order_arg(ctx))], "school_totals.csv")
 
 
 @route("GET", r"/api/exports/school-totals.xlsx")
 def export_school_totals_xlsx(ctx):
     group_id = int(ctx.arg("group_id") or 0)
-    group, headers, rows = _school_totals_table(ctx.conn, group_id)
+    group, headers, rows = _school_totals_table(ctx.conn, group_id, _school_export_limit(ctx))
     return _xlsx_response(workbook_bytes(headers, _ordered(rows, _order_arg(ctx)), "学校总分"),
                           "school_totals.xlsx")
 
@@ -447,7 +499,8 @@ def export_record_sheet_csv(ctx):
 
 
 def _has_rank(row):
-    return row["placement_status"] == "confirmed" and row["rank_no"] is not None
+    return (row["placement_status"] == "confirmed" and row["rank_no"] is not None
+            and _row_value(row, "result_status") != "dsq")
 
 
 def _row_value(row, key):
@@ -472,6 +525,12 @@ def _individual_status(row):
     return names.get(row["result_status"], "待核对")
 
 
+def _individual_counts(row):
+    # 保持数值类型，避免把大浮点数强制转成带二进制误差的长整数。
+    counts = [row[key] for key in ("result_value", "error_count", "violation_count")]
+    return [_number(value) if value is None or value <= 2**53 else value for value in counts]
+
+
 def _individual_rows(conn, category_id):
     return db.q(conn, """SELECT p.status AS participation_status, a.name AS athlete_name,
                 s.name AS school_name, ir.id AS result_id, ir.result_value, ir.error_count,
@@ -482,8 +541,10 @@ def _individual_rows(conn, category_id):
             LEFT JOIN individual_results ir ON ir.participation_id = p.id AND ir.category_id = p.category_id
             LEFT JOIN placements pl ON pl.participation_id = p.id AND pl.category_id = p.category_id
             LEFT JOIN school_points sp ON sp.placement_id = pl.id
-            WHERE p.category_id = ? AND (p.status = 'active' OR ir.id IS NOT NULL)
-            ORDER BY pl.status <> 'confirmed' OR pl.status IS NULL, pl.rank_no IS NULL,
+            WHERE p.category_id = ? AND p.deleted_at IS NULL
+              AND (p.status = 'active' OR ir.id IS NOT NULL)
+            ORDER BY COALESCE(ir.result_status = 'dsq', 0),
+                     pl.status <> 'confirmed' OR pl.status IS NULL, pl.rank_no IS NULL,
                      pl.rank_no, s.name, a.name, p.id""", (category_id,))
 
 
@@ -498,30 +559,21 @@ def _print_response(ctx, title, event, scope, headers, rows, note, separator=Non
 @route("GET", r"/api/exports/category-notice.html")
 def export_category_notice(ctx):
     category_id = int(ctx.arg("category_id") or 0)
-    order = _order_arg(ctx)
+    order = _order_arg(ctx, "desc")
     cat = category_context(ctx.conn, category_id)
     scope = f"{cat['group_name']} · {_category_label(cat['name'], cat['gender'])}"
     if cat["kind"] == "individual":
         data = _individual_rows(ctx.conn, category_id)
-        headers = ["名次", "学校", "运动员", "有效次数", "失误次数", "违规次数", "结果状态", "积分"]
+        headers = ["名次", "学校", "运动员", "有效次数", "失误次数", "犯规次数", "结果状态", "积分"]
         paired = [(_has_rank(r), [_confirmed_rank(r), r["school_name"], r["athlete_name"],
-                                  _number(r["result_value"]), _number(r["error_count"]),
-                                  _number(r["violation_count"]), _individual_status(r),
+                                  *_individual_counts(r), _individual_status(r),
                                   r["points"] if _has_rank(r) else "—"]) for r in data]
         pending = sum(r["participation_status"] == "active" and r["result_status"] not in ("dns", "dnf", "dsq")
                       and not _has_rank(r) for r in data)
         title = "个人赛成绩单"
-        note = f"按有效次数降序、失误次数升序核对；仅展示已经确认的名次。待确认 {pending} 人。"
+        note = f"三项次数四舍五入保留小数点后两位。有效次数多者在前，失误次数少者优先，两项均相同按现场抽签结果确认。待确认 {pending} 人。"
     else:
-        data = db.q(ctx.conn, """SELECT p.id, s.name AS school_name, pl.rank_no,
-                        pl.status AS placement_status, pl.source, COALESCE(sp.points, 0) AS points
-                    FROM participations p JOIN teams t ON t.id = p.team_id
-                    JOIN schools s ON s.id = t.school_id
-                    LEFT JOIN placements pl ON pl.participation_id = p.id AND pl.category_id = p.category_id
-                    LEFT JOIN school_points sp ON sp.placement_id = pl.id
-                    WHERE p.category_id = ? AND (p.status = 'active' OR pl.status = 'confirmed')
-                    ORDER BY pl.status <> 'confirmed' OR pl.status IS NULL, pl.rank_no IS NULL,
-                             pl.rank_no, s.name, p.id""", (category_id,))
+        data = _team_ranking_rows(ctx.conn, category_id)
         sources = {"auto": "比赛推导", "standings": "小组排名", "manual": "现场确认"}
         headers = ["名次", "参赛学校", "名次来源", "积分", "核对状态"]
         paired = [(_has_rank(r), [_confirmed_rank(r), r["school_name"], sources.get(r["source"], "—"),
@@ -535,6 +587,8 @@ def export_category_notice(ctx):
         note = f"{rules_label}：{current_rules['rules_summary']}；历史场次按各场记录规则。集体项目积分双倍计入。待确认 {pending} 所学校。"
     # 倒序只作用于已确认名次块；待确认名次固定追加在最后并单独分组，避免倒序把待确认排到最前。
     rows, separator = _confirmed_then_pending(paired, order)
+    if separator and cat["kind"] == "individual":
+        separator["text"] = "未列名次（不计入积分）"
     return _print_response(ctx, title, cat["event_name"], scope, headers, rows,
                            note + " 请经核对、签字后公示；成绩更正后请重新打印。", separator)
 
@@ -543,7 +597,7 @@ def export_category_notice(ctx):
 def export_school_notice(ctx):
     from .standings import school_totals
     group_id = int(ctx.arg("group_id") or 0)
-    order = _order_arg(ctx)
+    order = _order_arg(ctx, "desc")
     # 复用成绩页面的完整汇总，包含未确认名次、学校总分并列状态与“已开赛”口径。
     from ..http_server import Context
     nested = Context(ctx.conn, ctx.user, {}, {}, {"group_id": str(group_id)}, ctx.headers, "GET", ctx.path)
@@ -553,9 +607,7 @@ def export_school_notice(ctx):
     headers = ["名次", "学校", "总分", "第一名数", "第二名数", "第三名数", "待确认项目"]
     if started:
         ranked = [(r["status"] != "tie_pending",
-                   [("待确认" if r["status"] == "tie_pending"
-                     else "—（待确认）" if r.get("rank_provisional")
-                     else r.get("rank") or "待确认"), r["name"], r["total"],
+                   [r.get("rank") if r["status"] != "tie_pending" else "待确认", r["name"], r["total"],
                     r["rank_counts"].get(1, 0), r["rank_counts"].get(2, 0), r["rank_counts"].get(3, 0),
                     len(r["pending"])]) for r in data["rows"]]
     else:

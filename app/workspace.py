@@ -1,79 +1,48 @@
 """从后台正式记录推导项目进度和操作入口；读取不改变赛程或成绩。"""
 import json
-from collections import defaultdict
 from . import db
-from .read_projection import text_integer_rows
-from .api.common import (active_plan, category_context, participation_profile_map,
-                         plan_effective, match_plan_effective_from_state,
-                         recording_blocker_from_state, serialize_match)
+from .api.common import (active_plan, category_context, participation_info,
+                         plan_effective, recording_blocker, serialize_match)
 
 
 def category_snapshot(conn, category_id, role):
     # 资料判断与报名名单共用，保持两个入口的口径一致。
-    from .api.catalog import team_profile_gaps_from_members
-    from .api.batch_matches import BatchReadConnection
+    from .api.catalog import team_captain_id, team_profile_gaps
 
     cat = category_context(conn, category_id)
-    parts = text_integer_rows(conn, "SELECT id,team_id,status FROM participations WHERE category_id = ? ORDER BY id",
-                 ('id','team_id','status'), (category_id,))
+    parts = db.q(conn, """SELECT * FROM participations
+        WHERE category_id = ? AND deleted_at IS NULL ORDER BY id""",
+                 (category_id,))
     active = [p for p in parts if p["status"] == "active"]
-    # Request-local reads use the same profile and serialization rules. There
-    # is no cross-request cache: a later request sees new claims and decisions.
-    info_by_id = participation_profile_map(conn, category_id)
-    members_by_team = defaultdict(list)
-    if cat['kind'] == 'team':
-        for member in db.q(conn, """SELECT tm.team_id,a.id,a.name,a.gender,tm.is_captain
-                FROM team_members tm JOIN athletes a ON a.id=tm.athlete_id
-                JOIN participations p ON p.team_id=tm.team_id
-                WHERE p.category_id=? AND p.status='active' ORDER BY tm.id""", (category_id,)):
-            members_by_team[member['team_id']].append(member)
     incomplete = []
     for part in active:
         if cat["kind"] == "team":
-            members = members_by_team[part['team_id']]
-            captain = next((m['id'] for m in members if m['is_captain']), None)
-            gaps = team_profile_gaps_from_members(members, captain)
+            gaps = team_profile_gaps(conn, part["team_id"], team_captain_id(conn, part["team_id"]))
         else:
-            gaps = ["性别待补充"] if not info_by_id[part['id']]['athlete_gender'] else []
+            athlete = db.q1(conn, "SELECT gender FROM athletes WHERE id = ?", (part["athlete_id"],))
+            gaps = ["性别待补充"] if athlete and not athlete["gender"] else []
         if gaps:
-            info = info_by_id[part['id']]
+            info = participation_info(conn, part["id"])
             incomplete.append({"participation_id": part["id"], "school_id": info["school_id"],
                                "display": info["display"], "gaps": gaps})
 
     plan = active_plan(conn, category_id)
-    matches = text_integer_rows(conn, """SELECT id,category_id,plan_id,stage_id,status,reset_state,venue_id,scheduled_at
-        FROM matches WHERE category_id = ?
+    matches = db.q(conn, """SELECT * FROM matches WHERE category_id = ?
         ORDER BY NULLIF(TRIM(scheduled_at), '') IS NULL, NULLIF(TRIM(scheduled_at), ''),
-                 stage_id, round_no, seq, id""",
-        ('id','category_id','plan_id','stage_id','status','reset_state','venue_id','scheduled_at'), (category_id,))
+                 stage_id, round_no, seq, id""", (category_id,))
     actual = [m for m in matches if m["status"] != "void"]
     ready = [m for m in actual if m["status"] == "ready"]
-    candidate_matches = {r['subject_id'] for r in db.q(conn, """SELECT h.subject_id
-        FROM candidate_heads h JOIN result_candidates c ON c.id=h.candidate_id
-        WHERE c.category_id=? AND h.subject_kind='match' AND h.status='submitted'""", (category_id,))}
-    disputed = bool(db.q1(conn, "SELECT 1 FROM result_disputes WHERE category_id=? AND status='open'", (category_id,)))
-    plans = {p['id']: p for p in db.q(conn, 'SELECT * FROM plans WHERE category_id=?', (category_id,))}
-    stages = {s['id']: s for s in db.q(conn, '''SELECT s.* FROM stages s JOIN plans p ON p.id=s.plan_id
-        WHERE p.category_id=?''', (category_id,))}
-    effective = {}
-    def stage_effective(match):
-        key = (match['plan_id'], match['stage_id'])
-        if key not in effective:
-            stage = stages.get(match['stage_id'])
-            if stage and stage['plan_id'] != match['plan_id']:
-                stage = None
-            effective[key] = match_plan_effective_from_state(plans.get(match['plan_id']), stage)
-        return effective[key]
-    scoreable = [m for m in ready if not recording_blocker_from_state(
-        m, m['id'] in candidate_matches, disputed, lambda: stage_effective(m))]
+    scoreable = [m for m in ready if not recording_blocker(conn, m)]
     pending = [m for m in actual if m["status"] == "pending"]
     finished = [m for m in actual if m["status"] == "finished"]
     unscheduled = [m for m in actual if m["status"] != "finished"
                    and (not m["venue_id"] or not (m["scheduled_at"] or "").strip())]
     results = db.q(conn, """SELECT r.* FROM individual_results r JOIN participations p
-        ON p.id = r.participation_id WHERE r.category_id = ? AND p.status = 'active'""", (category_id,))
+        ON p.id = r.participation_id WHERE r.category_id = ? AND p.status = 'active'
+        AND p.deleted_at IS NULL""", (category_id,))
     placements = db.q(conn, """SELECT r.* FROM placements r JOIN participations p
-        ON p.id = r.participation_id WHERE r.category_id = ? AND p.status = 'active'""", (category_id,))
+        ON p.id = r.participation_id WHERE r.category_id = ? AND p.status = 'active'
+        AND p.deleted_at IS NULL""", (category_id,))
     confirmed = sum(p["status"] == "confirmed" for p in placements)
     missing_results = max(0, len(active) - len({r["participation_id"] for r in results}))
     pools = []
@@ -105,10 +74,6 @@ def category_snapshot(conn, category_id, role):
         "placements_total": len(placements), "placements_confirmed": confirmed,
         "placements_pending": len(placements) - confirmed,
     }
-    for status,key in (('submitted','candidates_pending'),('returned','candidates_returned')):
-        counts[key] = db.q1(conn,'''SELECT COUNT(*) AS n FROM result_candidates c
-            JOIN candidate_heads h ON h.candidate_id=c.id WHERE c.category_id=? AND h.status=?''',(category_id,status))['n']
-    counts['disputes_open'] = db.q1(conn,"SELECT COUNT(*) AS n FROM result_disputes WHERE category_id=? AND status='open'",(category_id,))['n']
     blockers = []
     reminders = []
     if not active:
@@ -152,13 +117,6 @@ def category_snapshot(conn, category_id, role):
     else:
         primary, task = {"tab": "schedule", "label": "核对赛程"}, "核对比赛安排"
 
-    if counts['disputes_open']:
-        primary,task={'tab':'review','label':'核对成绩争议'},'最后正式结果保留，先核对争议与明确处置'
-        blockers.append({'code':'result_disputed','tab':'review','message':'存在未解决的成绩争议，新的推进受保护。'})
-    elif counts['candidates_pending']:
-        primary,task={'tab':'review','label':'核对待审候选'},f"{counts['candidates_pending']} 份候选待独立复核"
-        blockers.append({'code':'review_pending','tab':'review','message':'候选已接收，独立复核后才成为正式结果。'})
-
     schedule_summary = "未安排比赛"
     schedule_state = "pending"
     if needs_plan:
@@ -196,7 +154,7 @@ def category_snapshot(conn, category_id, role):
               "action": {"tab": "results", "pool": p["id"], "label": "核对排名"}} for p in pools]
     if incomplete:
         tasks.append({"code": "profiles_incomplete", "message": f"{len(incomplete)} 所学校的参赛资料待补充",
-            "detail": "进入学校报名，补齐队员、队长或性别。", "items": incomplete,
+            "detail": "进入学校报名，补齐队员或性别。", "items": incomplete,
             "action": {"tab": "registration", "label": "检查名单"}})
     if unscheduled:
         tasks.append({"code": "unscheduled", "message": f"{len(unscheduled)} 场比赛的场地或时间尚未安排",
@@ -205,20 +163,13 @@ def category_snapshot(conn, category_id, role):
     if counts["placements_pending"]:
         tasks.append({"code": "placements_pending", "message": f"{counts['placements_pending']} 项名次待确认",
             "detail": "核对来源与名次后提交确认。", "action": {"tab": "results", "label": "核对名次"}})
-    # Only these eight cards need full match serialization. Counts above use
-    # the shared rules over this request's database snapshot, without building
-    # thousands of unrelated card dependencies or intercepting per-row SQL.
-    card_ids = [m['id'] for m in scoreable[:5] + pending[:3]]
-    cards = {r['id']:dict(r) for r in db.q(conn,
-        'SELECT * FROM matches WHERE id IN (' + ','.join('?' for _ in card_ids) + ')', card_ids)} if card_ids else {}
-    match_reads = BatchReadConnection(conn, cards.values(), with_sets=False)
     return {
         "category": cat, "counts": counts,
         "plan": {k: plan[k] for k in ("id", "name", "status", "version")} if plan else None,
         "task": task, "primary_action": primary, "steps": steps, "tasks": tasks,
         "blockers": blockers, "reminders": reminders,
-        "upcoming_matches": [serialize_match(match_reads, cards[m['id']], with_sets=False) for m in scoreable[:5]],
-        "waiting_matches": [serialize_match(match_reads, cards[m['id']], with_sets=False) for m in pending[:3]],
+        "upcoming_matches": [serialize_match(conn, m, with_sets=False) for m in scoreable[:5]],
+        "waiting_matches": [serialize_match(conn, m, with_sets=False) for m in pending[:3]],
         "allowed_actions": {"registration": role in ("admin", "organizer"),
                             "schedule": cat["kind"] == "team" and role in ("admin", "organizer"),
                             "record": role in ("admin", "organizer", "recorder"), "view_results": True},

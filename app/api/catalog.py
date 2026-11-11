@@ -1,12 +1,13 @@
 """赛事、大组别、项目、学校、运动员、队伍、参赛名单、场地。"""
 from __future__ import annotations
 
-import logging
 import threading
 import time
 import uuid
+import json
 
-from .. import config, db, idempotency, security, registration, team_rules_store
+from .. import (config, db, idempotency, participation_deletion, registration,
+                security, team_rules_store, event_settings)
 from ..domain import team_rules
 from ..errors import (ApiError, bad_request, conflict, invalid_fields, not_found,
                       stale_revision)
@@ -16,7 +17,6 @@ from .common import (GENDER_NAMES, KIND_NAMES, category_context, get_or_404,
 
 ADMIN = ("admin",)
 ORG = ("admin", "organizer")
-logger = logging.getLogger("stss.catalog")
 
 
 # ------------------------------------------------------------------ 队伍成员
@@ -120,7 +120,7 @@ def validate_no_event_double_entry(conn, cat: dict, athlete_ids: list[int],
                          JOIN categories c ON c.id = p.category_id
                          JOIN groups g ON g.id = c.group_id
                          LEFT JOIN team_members tm ON tm.team_id = p.team_id
-                        WHERE g.event_id = ? AND p.status = 'active'
+                        WHERE g.event_id = ? AND p.status = 'active' AND p.deleted_at IS NULL
                           AND (p.athlete_id = ? OR tm.athlete_id = ?)
                           AND c.id <> ? LIMIT 1""",
                     (cat["event_id"], athlete_id, athlete_id, exclude_category or cat["id"]))
@@ -133,7 +133,8 @@ def validate_individual_school_limit(conn, cat: dict, athlete_id: int) -> None:
     athlete = get_or_404(conn, "athletes", athlete_id, "运动员")
     hit = db.q1(conn,
                 """SELECT p.id FROM participations p JOIN athletes a ON a.id = p.athlete_id
-                    WHERE p.category_id = ? AND p.status = 'active' AND a.school_id = ? LIMIT 1""",
+                    WHERE p.category_id = ? AND p.status = 'active'
+                      AND p.deleted_at IS NULL AND a.school_id = ? LIMIT 1""",
                 (cat["id"], athlete["school_id"]))
     if hit:
         raise conflict("同一学校在同一个人项目最多报名 1 人", code="school_individual_limit")
@@ -180,18 +181,11 @@ def expect_rev(conn, body: dict, table: str, row_id: int, label: str) -> None:
 def team_profile_gaps(conn, team_id: int, captain_id: int | None) -> list[str]:
     """资料待补充项：实时计算，不落库（§6.6、§15.4）。"""
     members = team_members(conn, team_id)
-    return team_profile_gaps_from_members(members, captain_id)
-
-
-def team_profile_gaps_from_members(members, captain_id) -> list[str]:
-    """Shared rules for single-team and request-local bulk reads."""
     gaps = []
     if not members:
         gaps.append("尚未选择队员")
     elif len(members) < 3:
         gaps.append(f"队员不足 3 人（当前 {len(members)} 人）")
-    if members and not captain_id:
-        gaps.append("待补充队长")
     unknown = [m["name"] for m in members if not m["gender"]]
     if unknown:
         gaps.append(f"性别待补充：{'、'.join(unknown)}")
@@ -247,13 +241,7 @@ def _event_stats(conn, event_id: int) -> dict:
             if cached is not None and cached[0] > time.monotonic():
                 return dict(cached[1])
     event_path = db.event_db_path(event_id)
-    if not event_path.exists():
-        # 赛事库缺失时不能伪装成 0 计数并写缓存：记录告警并让调用方看到数据源异常标记，
-        # 下次读取仍会重试，而不是在 TTL 内持续返回“看起来正常”的旧值。
-        logger.warning("赛事数据库缺失，统计计数不可用：%s", event_path)
-        return {"categories": 0, "schools": 0, "finished_matches": 0,
-                "data_error": "event_database_missing"}
-    data_conn = db.connect(event_path)
+    data_conn = db.connect(event_path) if event_path.exists() else conn
     try:
         counts = db.q1(data_conn,
                        """SELECT (SELECT COUNT(*) FROM categories c JOIN groups g ON g.id = c.group_id
@@ -265,7 +253,8 @@ def _event_stats(conn, event_id: int) -> dict:
                                    WHERE g.event_id = ? AND m.status = 'finished') AS finished_matches
                        """, (event_id, event_id, event_id))
     finally:
-        data_conn.close()
+        if data_conn is not conn:
+            data_conn.close()
     stats = dict(counts)
     if ttl > 0:
         with _EVENT_STATS_LOCK:
@@ -461,6 +450,60 @@ def update_event(ctx):
     return {"message": "已更新"}
 
 
+@route("DELETE", r"/api/events/(?P<event_id>\d+)", roles=ADMIN, scope="registry", transaction=False)
+def delete_event(ctx):
+    event_id = int(ctx.params["event_id"])
+    event_uuid = ctx.body.get("event_uuid")
+    confirm_name = ctx.body.get("confirm_name")
+    if not event_uuid or not isinstance(confirm_name, str):
+        raise bad_request("请填写赛事名称以确认删除")
+    attached = False
+    retained = {}
+    try:
+        path = db.event_db_path(event_id)
+        if path.exists():
+            # ATTACH 与索引库共用提交/回滚，避免第二个连接先提交后留下半删除状态。
+            ctx.conn.execute("ATTACH DATABASE ? AS deleting_event", (str(path.resolve()),))
+            attached = True
+        with db.tx(ctx.conn):
+            event = get_or_404(ctx.conn, "events", event_id, "赛事")
+            if event["uuid"] != event_uuid:
+                raise conflict("赛事身份已变化，请刷新后重新核对", code="event_identity_mismatch")
+            if confirm_name != event["name"]:
+                raise bad_request("输入的赛事名称不一致，未执行删除")
+            ctx.conn.execute("PRAGMA defer_foreign_keys = ON")
+            if attached:
+                target = ctx.conn.execute("SELECT id, uuid FROM deleting_event.events").fetchall()
+                if len(target) != 1 or target[0]["id"] != event_id or target[0]["uuid"] != event_uuid:
+                    raise conflict("赛事数据库身份不一致，未执行删除", code="event_identity_mismatch")
+                from ..registration_history import retain
+                retained = retain(ctx.conn, dict(event), ctx.user["id"])
+                ctx.conn.execute("DELETE FROM deleting_event.events WHERE id=?", (event_id,))
+                ctx.conn.execute("DELETE FROM deleting_event.display_config")
+                ctx.conn.execute("DELETE FROM deleting_event.submissions")
+                ctx.conn.execute("DELETE FROM deleting_event.request_log")
+                ctx.conn.execute("DELETE FROM deleting_event.settings WHERE k LIKE 'recording:%'")
+            ctx.conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+            ctx.conn.execute("DELETE FROM user_snapshot_outbox WHERE event_id=?", (event_id,))
+            for access_row in db.q(ctx.conn, "SELECT k,v FROM settings WHERE k LIKE 'access:user:%'"):
+                ids = json.loads(access_row["v"])
+                if event_id in ids:
+                    ctx.conn.execute("UPDATE settings SET v=? WHERE k=?",
+                                     (json.dumps([eid for eid in ids if eid != event_id]), access_row["k"]))
+            if retained:
+                retained['after'] = {table: ctx.conn.execute(f'SELECT COUNT(*) FROM deleting_event."{table}"').fetchone()[0]
+                                     for table in retained['before']}
+                ctx.conn.execute('UPDATE event_deletion_history SET counts_json=? WHERE event_id=?',
+                                 (json.dumps({'before': retained['before'], 'after': retained['after']}), event_id))
+            security.audit(ctx.conn, ctx.user, "delete_event", "event", event_id,
+                           {"name": event["name"], "event_uuid": event_uuid, **retained})
+    finally:
+        if attached:
+            ctx.conn.execute("DETACH DATABASE deleting_event")
+    invalidate_event_stats()
+    return {"message": "赛事已删除，历史报名已保留", "event_id": event_id, **retained}
+
+
 @route("POST", r"/api/events/(?P<event_id>\d+)/bootstrap", roles=ADMIN)
 def bootstrap_event(ctx):
     """建立甲、乙、丙三个大组别及各自四个项目，并建立默认场地。"""
@@ -510,7 +553,7 @@ def event_structure(ctx):
         for c in cats:
             counts = db.q1(ctx.conn,
                            """SELECT COUNT(*) AS participants FROM participations
-                               WHERE category_id = ?""", (c["id"],))
+                               WHERE category_id = ? AND deleted_at IS NULL""", (c["id"],))
             plan = db.q1(ctx.conn,
                          """SELECT id, status, version FROM plans WHERE category_id = ?
                              ORDER BY id DESC LIMIT 1""", (c["id"],))
@@ -529,8 +572,28 @@ def event_structure(ctx):
                              (g["id"],))
         out.append({**dict(g), "categories": cat_items, "schools": school_count["n"]})
     venues = db.q(ctx.conn, "SELECT * FROM venues WHERE event_id = ? ORDER BY seq, id", (event_id,))
-    return {"event": dict(event), "groups": out, "venues": [dict(v) for v in venues],
+    return {"event": dict(event), "settings_lock": event_settings.read(event_id), "groups": out, "venues": [dict(v) for v in venues],
             "team_rules": team_rules_store.event_impact(ctx.conn, event_id)}
+
+
+@route('PUT', r'/api/events/(?P<event_id>\d+)/settings-lock', roles=ADMIN, scope='registry')
+def set_settings_lock(ctx):
+    eid = int(ctx.params['event_id'])
+    get_or_404(ctx.conn, 'events', eid, '赛事')
+    if type(ctx.body.get('locked')) is not bool or type(ctx.body.get('base_version')) is not int:
+        raise bad_request('请提供锁定状态和当前版本')
+    old = event_settings.read(eid)
+    if ctx.body['base_version'] != old['version']:
+        raise conflict('锁定状态已变化，请刷新赛事设置', code='settings_lock_changed')
+    if old['locked'] == ctx.body['locked']:
+        return {'message': '锁定状态未变化', 'settings_lock': old}
+    value = {'locked': ctx.body['locked'], 'version': old['version'] + 1,
+             'updated_by': ctx.user['id'], 'updated_at': db.now(ctx.conn)}
+    db.run(ctx.conn, 'INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)',
+           (f'event-settings-lock:{eid}', json.dumps(value)))
+    security.audit(ctx.conn, ctx.user, 'lock_event_settings' if value['locked'] else 'unlock_event_settings',
+                   'event', eid, {'before': old, 'after': value})
+    return {'message': '赛事设置已锁定' if value['locked'] else '赛事设置已解锁', 'settings_lock': value}
 
 
 @route("GET", r"/api/categories/(?P<category_id>\d+)/workspace")
@@ -592,8 +655,6 @@ def create_group(ctx):
         "event_id": event_id, "code": code,
         "name": ctx.body.get("name") or f"{code}组",
         "seq": int(ctx.body.get("seq") or 0)})
-    # 结构写入不依赖 HTTP 层的按头失效：即使调用方/代理未带事件头也要让计数缓存失效。
-    _invalidate_event_of(ctx.conn, event_id=event_id)
     return {"group_id": group_id}
 
 
@@ -614,7 +675,6 @@ def update_group(ctx):
         fields["seq"] = int(ctx.body["seq"])
     if fields:
         db.update(ctx.conn, "groups", group_id, fields)
-        _invalidate_event_of(ctx.conn, group_id=group_id)
     return {"message": "组别已更新"}
 
 
@@ -747,11 +807,19 @@ def create_school(ctx):
 @route("PUT", r"/api/schools/(?P<school_id>\d+)", roles=ORG)
 def update_school(ctx):
     school_id = int(ctx.params["school_id"])
-    get_or_404(ctx.conn, "schools", school_id, "学校")
+    school = get_or_404(ctx.conn, "schools", school_id, "学校")
     expect_rev(ctx.conn, ctx.body, "schools", school_id, "学校")
     fields = {k: ctx.body[k] for k in ("name", "short_name", "note") if k in ctx.body}
+    for key in ('name', 'short_name'):
+        if key in fields:
+            if not isinstance(fields[key], str):
+                raise invalid_fields('学校名称和简称须为文字', {key: '请填写文字'})
+            fields[key] = fields[key].strip()
     if "name" in fields and not (fields["name"] or "").strip():
         raise invalid_fields("学校名称不能为空", {"name": "学校名称不能为空"})
+    if 'name' in fields and db.q1(ctx.conn, 'SELECT id FROM schools WHERE event_id=? AND name=? AND id<>?',
+                                 (school['event_id'], fields['name'], school_id)):
+        raise conflict('该学校名称已存在', code='duplicate', detail={'fields': {'name': '该学校名称已存在'}})
     if "group_id" in ctx.body:
         # 已有参赛引用时不允许用改组别的方式整校迁移（§8.1）
         used = db.q1(ctx.conn,
@@ -771,71 +839,18 @@ def update_school(ctx):
         display_name = current["short_name"] or current["name"]
         db.run(ctx.conn, "UPDATE teams SET name = ?, rev = rev + 1 WHERE school_id = ? AND name <> ?",
                (display_name, school_id, display_name))
-    return {"message": "已更新", "rev": bump_rev(ctx.conn, "schools", school_id)}
-
-
-def _school_delete_reasons(conn, school_id: int) -> list[dict]:
-    """学校被报名引用时，给出真实原因与可执行步骤（不改变任何守卫规则）。"""
-    pids = [row["id"] for row in db.q(
-        conn,
-        """SELECT p.id FROM participations p
-             LEFT JOIN teams t ON t.id = p.team_id
-             LEFT JOIN athletes a ON a.id = p.athlete_id
-            WHERE t.school_id = ? OR a.school_id = ?""", (school_id, school_id))]
-    if not pids:
-        return []
-    marks = ",".join("?" for _ in pids)
-    args = tuple(pids)
-    results = db.q1(
-        conn,
-        f"""SELECT COUNT(*) AS n FROM matches m
-             WHERE m.result_version > 0
-               AND (m.home_participation IN ({marks}) OR m.away_participation IN ({marks})
-                    OR m.home_actual IN ({marks}) OR m.away_actual IN ({marks}))""",
-        args * 4)
-    placed = db.q1(conn, f"SELECT COUNT(*) AS n FROM placements WHERE participation_id IN ({marks})", args)
-    individual = db.q1(conn, f"SELECT COUNT(*) AS n FROM individual_results WHERE participation_id IN ({marks})", args)
-    if (results["n"] or 0) + (placed["n"] or 0) + (individual["n"] or 0) > 0:
-        return [{
-            "code": "has_results",
-            "message": "该学校已有比赛成绩或名次，不能删除",
-            "steps": ["先由管理员或编排对相关场次做正式更正或取消",
-                      "或在成绩页删除/作废相关名次",
-                      "确认该校已无成绩后再删除学校"],
-        }]
-    locked = db.q1(
-        conn,
-        f"""SELECT pl.id FROM plans pl
-              JOIN categories c ON c.id = pl.category_id
-              JOIN participations p ON p.category_id = c.id
-             WHERE p.id IN ({marks}) AND pl.status IN ('locked','running') LIMIT 1""", args)
-    if locked:
-        return [{
-            "code": "plan_locked",
-            "message": "该学校所在项目的赛程或编排方案已锁定，报名冻结，不能删除",
-            "steps": ["由管理员撤回阶段确认或解锁方案",
-                      "确认该校报名不再冻结后再删除学校"],
-        }]
-    return [{
-        "code": "registration_in_use",
-        "message": "该学校已有参赛报名，不能删除",
-        "steps": ["先在学校报名中退出或删除该学校的报名记录",
-                  "确认报名名单为空后再删除学校"],
-    }]
+    rev = bump_rev(ctx.conn, "schools", school_id)
+    security.audit(ctx.conn, ctx.user, 'update_school', 'school', school_id,
+                   {'before': dict(school), 'changes': fields, 'rev': rev})
+    return {"message": "已更新", "rev": rev}
 
 
 @route("DELETE", r"/api/schools/(?P<school_id>\d+)", roles=ADMIN)
 def delete_school(ctx):
-    school_id = int(ctx.params["school_id"])
-    school = get_or_404(ctx.conn, "schools", school_id, "学校")
-    used = db.q1(ctx.conn, "SELECT COUNT(*) AS n FROM participations p JOIN teams t ON t.id = p.team_id WHERE t.school_id = ?", (school_id,))
-    used2 = db.q1(ctx.conn, "SELECT COUNT(*) AS n FROM participations p JOIN athletes a ON a.id = p.athlete_id WHERE a.school_id = ?", (school_id,))
-    if (used["n"] or 0) + (used2["n"] or 0) > 0:
-        reasons = _school_delete_reasons(ctx.conn, school_id)
-        raise conflict(reasons[0]["message"], code="in_use", detail={"reasons": reasons})
-    db.run(ctx.conn, "DELETE FROM schools WHERE id = ?", (school_id,))
-    security.audit(ctx.conn, ctx.user, "delete_school", "school", school_id)
-    invalidate_event_stats(school["event_id"])  # 学校计数立即刷新
+    from .. import school_deletion
+    event_id = school_deletion.delete_school(ctx.conn, ctx.user, int(ctx.params["school_id"]))
+    # HTTP 层在事务提交后再次失效，避免并发读取在提交前回填旧统计。
+    invalidate_event_stats(event_id)
     return {"message": "已删除"}
 
 
@@ -865,7 +880,8 @@ def school_detail(ctx):
         item["captain_name"] = next((m["name"] for m in members if m["id"] == captain), "")
         item["profile_gaps"] = team_profile_gaps(ctx.conn, t["id"], captain)
         part = db.q1(ctx.conn,
-                     "SELECT id, seed_no, status FROM participations WHERE team_id = ?", (t["id"],))
+                     """SELECT id, seed_no, status FROM participations
+                         WHERE team_id = ? AND deleted_at IS NULL""", (t["id"],))
         item["participation"] = dict(part) if part else None
         teams.append(item)
     # 个人赛报名：按运动员归属本校列出
@@ -878,7 +894,8 @@ def school_detail(ctx):
              JOIN athletes a ON a.id = p.athlete_id
              JOIN categories c ON c.id = p.category_id
              JOIN groups g ON g.id = c.group_id
-            WHERE a.school_id = ? ORDER BY g.seq, c.seq, a.name""", (school_id,)))
+            WHERE a.school_id = ? AND p.deleted_at IS NULL
+            ORDER BY g.seq, c.seq, a.name""", (school_id,)))
     return {"school": dict(school),
             "group": dict(entry) if entry else None,
             "athletes": athletes, "teams": teams, "individual_entries": individual}
@@ -891,13 +908,27 @@ def list_athletes(ctx):
     return {"athletes": db.rows_to_dicts(rows)}
 
 
+def normalized_athlete_name(value):
+    if not isinstance(value, str):
+        raise invalid_fields('姓名必须为文本', {'name': '姓名必须为文本，长度为 1–50 个字符'})
+    name = value.strip()
+    if not name:
+        raise invalid_fields('姓名不能为空', {'name': '姓名不能为空，请输入 1–50 个字符'})
+    if len(name) > 50:
+        raise invalid_fields('姓名不能超过 50 个字符', {'name': '姓名长度须为 1–50 个字符'})
+    return name
+
+
+@route("GET", r"/api/athletes/(?P<athlete_id>\d+)", roles=ORG)
+def athlete_detail(ctx):
+    return {'athlete': dict(get_or_404(ctx.conn, 'athletes', int(ctx.params['athlete_id']), '人员'))}
+
+
 @route("POST", r"/api/schools/(?P<school_id>\d+)/athletes", roles=ORG)
 def create_athlete(ctx):
     school_id = int(ctx.params["school_id"])
     get_or_404(ctx.conn, "schools", school_id, "学校")
-    name = (ctx.body.get("name") or "").strip()
-    if not name:
-        raise invalid_fields("请填写运动员姓名", {"name": "请填写运动员姓名"})
+    name = normalized_athlete_name(ctx.body.get("name"))
     gender = ctx.body.get("gender") or ""
     if gender not in ("male", "female", ""):
         raise invalid_fields("性别不合法", {"gender": "性别只能是男子、女子或留空"})
@@ -927,10 +958,7 @@ def update_athlete(ctx):
     expect_rev(ctx.conn, ctx.body, "athletes", athlete_id, "运动员")
     fields = {}
     if "name" in ctx.body:
-        name = (ctx.body["name"] or "").strip()
-        if not name:
-            raise invalid_fields("请填写运动员姓名", {"name": "请填写运动员姓名"})
-        fields["name"] = name
+        fields["name"] = normalized_athlete_name(ctx.body["name"])
     if "gender" in ctx.body:
         gender = ctx.body["gender"] or ""
         if gender not in ("male", "female", ""):
@@ -947,7 +975,11 @@ def update_athlete(ctx):
         if any(key in fields and fields[key] != old[key] for key in ('name', 'gender')):
             registration.guard_athlete_identity(ctx.conn, athlete_id)
         registration.validate_categories(ctx.conn, categories)
-    return {"message": "已更新", "rev": bump_rev(ctx.conn, "athletes", athlete_id)}
+    rev = bump_rev(ctx.conn, "athletes", athlete_id)
+    security.audit(ctx.conn, ctx.user, 'update_athlete', 'athlete', athlete_id,
+                   {'fields': list(fields), 'rev': rev})
+    return {"message": "保存成功", "rev": rev,
+            "athlete": dict(get_or_404(ctx.conn, 'athletes', athlete_id, '人员'))}
 
 
 @route("DELETE", r"/api/athletes/(?P<athlete_id>\d+)", roles=ORG)
@@ -1089,7 +1121,8 @@ def team_impact(ctx):
     """修改影响预检查（§15.2）：只读，提交时仍会重复校验。"""
     team_id = int(ctx.params["team_id"])
     get_or_404(ctx.conn, "teams", team_id, "学校项目名单")
-    part = db.q1(ctx.conn, "SELECT id FROM participations WHERE team_id = ?", (team_id,))
+    part = db.q1(ctx.conn, """SELECT id FROM participations
+        WHERE team_id = ? AND deleted_at IS NULL""", (team_id,))
     if not part:
         return {"participation_id": None, "matches": 0, "finished_matches": 0,
                 "placements": 0, "locked_plan": False, "members": 0}
@@ -1138,7 +1171,8 @@ def list_participations(ctx):
                      LEFT JOIN teams t ON t.id = p.team_id
                      LEFT JOIN athletes a ON a.id = p.athlete_id
                      LEFT JOIN schools s ON s.id = COALESCE(t.school_id, a.school_id)
-                    WHERE p.category_id = ? ORDER BY p.seed_no IS NULL, p.seed_no, s.name""",
+                    WHERE p.category_id = ? AND p.deleted_at IS NULL
+                    ORDER BY p.seed_no IS NULL, p.seed_no, s.name""",
                 (category_id,))
     plan = db.q1(ctx.conn,
                  "SELECT status FROM plans WHERE category_id = ? ORDER BY id DESC LIMIT 1",
@@ -1212,7 +1246,8 @@ def create_participation(ctx):
         team = get_or_404(ctx.conn, "teams", int(team_id), "学校项目名单")
         if team["category_id"] != category_id:
             raise invalid_fields("该学校项目名单不属于本项目", {"team_id": "该学校项目名单不属于本项目"})
-        if db.q1(ctx.conn, "SELECT id FROM participations WHERE category_id = ? AND team_id = ?",
+        if db.q1(ctx.conn, """SELECT id FROM participations
+                 WHERE category_id = ? AND team_id = ? AND deleted_at IS NULL""",
                  (category_id, int(team_id))):
             raise conflict("该学校已在本项目参赛名单中", code="duplicate",
                            detail={"fields": {"team_id": "该学校已在本项目参赛名单中"}})
@@ -1228,14 +1263,15 @@ def create_participation(ctx):
                                  {"athlete_id": "该运动员不属于本项目所在大组别"})
         if ath["gender"] and ath["gender"] != cat["gender"]:
             raise invalid_fields("运动员性别与项目不符", {"athlete_id": "运动员性别与项目不符"})
-        if db.q1(ctx.conn, "SELECT id FROM participations WHERE category_id = ? AND athlete_id = ?",
+        if db.q1(ctx.conn, """SELECT id FROM participations
+                 WHERE category_id = ? AND athlete_id = ? AND deleted_at IS NULL""",
                  (category_id, int(athlete_id))):
             raise conflict("该运动员已在参赛名单中", code="duplicate",
                            detail={"fields": {"athlete_id": "该运动员已在参赛名单中"}})
         validate_individual_school_limit(ctx.conn, cat, int(athlete_id))
         validate_no_event_double_entry(ctx.conn, cat, [int(athlete_id)])
     pid = db.insert(ctx.conn, "participations", {
-        "category_id": category_id,
+        "event_id": cat["event_id"], "category_id": category_id,
         "team_id": int(team_id) if team_id else None,
         "athlete_id": int(athlete_id) if athlete_id else None,
         "seed_no": parse_seed(ctx.body.get("seed_no")),
@@ -1434,7 +1470,8 @@ def _enroll_team(conn, user, cat: dict, body: dict) -> dict:
         created["teams"].append(team_id)
         write_members(conn, team_id, members, captain_id)
 
-    existing = db.q1(conn, "SELECT * FROM participations WHERE category_id = ? AND team_id = ?",
+    existing = db.q1(conn, """SELECT * FROM participations
+        WHERE category_id = ? AND team_id = ? AND deleted_at IS NULL""",
                      (category_id, team_id))
     if existing:
         raise conflict("该学校已在本项目参赛名单中", code="duplicate",
@@ -1442,7 +1479,7 @@ def _enroll_team(conn, user, cat: dict, body: dict) -> dict:
                                "participation_id": existing["id"]})
     validate_no_event_double_entry(conn, cat, [m["athlete_id"] for m in members])
     pid = db.insert(conn, "participations", {
-        "category_id": category_id, "team_id": team_id,
+        "event_id": cat["event_id"], "category_id": category_id, "team_id": team_id,
         "seed_no": parse_seed(body.get("seed_no")),
         "status": "active", "note": body.get("note") or ""})
     security.audit(conn, user, "enroll_team", "participation", pid,
@@ -1508,7 +1545,8 @@ def _enroll_individual(conn, user, cat: dict, body: dict) -> dict:
     reviewed = _confirm_same_name_creation(conn, school['id'], source)
     athlete = _resolve_athlete(conn, cat, source or {}, school, created, "运动员",
                                field_name="athlete")
-    existing = db.q1(conn, "SELECT * FROM participations WHERE category_id = ? AND athlete_id = ?",
+    existing = db.q1(conn, """SELECT * FROM participations
+        WHERE category_id = ? AND athlete_id = ? AND deleted_at IS NULL""",
                      (category_id, athlete["id"]))
     if existing:
         raise conflict("该运动员已在参赛名单中", code="duplicate",
@@ -1517,7 +1555,7 @@ def _enroll_individual(conn, user, cat: dict, body: dict) -> dict:
     validate_individual_school_limit(conn, cat, athlete["id"])
     validate_no_event_double_entry(conn, cat, [athlete["id"]])
     pid = db.insert(conn, "participations", {
-        "category_id": category_id, "athlete_id": athlete["id"],
+        "event_id": cat["event_id"], "category_id": category_id, "athlete_id": athlete["id"],
         "seed_no": parse_seed(body.get("seed_no")),
         "status": "active", "note": body.get("note") or ""})
     security.audit(conn, user, "enroll_individual", "participation", pid,
@@ -1563,7 +1601,7 @@ def enrollment_candidates(ctx):
                            else f"{r['school_short'] or r['school_name']}·{r['subject']}")
         existing = db.q1(ctx.conn,
                          f"""SELECT id, status FROM participations
-                              WHERE category_id = ? AND {key} = ?""",
+                              WHERE category_id = ? AND {key} = ? AND deleted_at IS NULL""",
                          (category_id, r["subject_id"]))
         if existing and existing["status"] == "active":
             item["action"] = "enrolled"
@@ -1651,7 +1689,8 @@ def _enroll_subject(conn, cat: dict, key: str, subject_id: int, seed, note: str)
         team = get_or_404(conn, "teams", subject_id, "学校项目名单")
         if team["category_id"] != category_id:
             raise bad_request("该学校项目名单不属于本项目")
-        if db.q1(conn, "SELECT id FROM participations WHERE category_id = ? AND team_id = ?",
+        if db.q1(conn, """SELECT id FROM participations
+                 WHERE category_id = ? AND team_id = ? AND deleted_at IS NULL""",
                  (category_id, subject_id)):
             raise conflict("该学校已在本项目参赛名单中", code="duplicate")
         validate_no_event_double_entry(conn, cat, [r["athlete_id"] for r in db.q(
@@ -1664,13 +1703,14 @@ def _enroll_subject(conn, cat: dict, key: str, subject_id: int, seed, note: str)
             raise bad_request("该运动员不属于本项目所在大组别")
         if ath["gender"] and ath["gender"] != cat["gender"]:
             raise bad_request("运动员性别与项目不符")
-        if db.q1(conn, "SELECT id FROM participations WHERE category_id = ? AND athlete_id = ?",
+        if db.q1(conn, """SELECT id FROM participations
+                 WHERE category_id = ? AND athlete_id = ? AND deleted_at IS NULL""",
                  (category_id, subject_id)):
             raise conflict("该运动员已在参赛名单中", code="duplicate")
         validate_individual_school_limit(conn, cat, subject_id)
         validate_no_event_double_entry(conn, cat, [subject_id])
     pid = db.insert(conn, "participations", {
-        "category_id": category_id,
+        "event_id": cat["event_id"], "category_id": category_id,
         "team_id": subject_id if key == "team_id" else None,
         "athlete_id": subject_id if key == "athlete_id" else None,
         "seed_no": seed, "status": "active", "note": note})
@@ -1682,7 +1722,10 @@ def _enroll_subject(conn, cat: dict, key: str, subject_id: int, seed, note: str)
 @route("PUT", r"/api/participations/(?P<participation_id>\d+)", roles=ORG)
 def update_participation(ctx):
     pid = int(ctx.params["participation_id"])
-    part = get_or_404(ctx.conn, "participations", pid, "参赛记录")
+    part = db.q1(ctx.conn, """SELECT * FROM participations
+        WHERE id=? AND deleted_at IS NULL""", (pid,))
+    if part is None:
+        raise not_found(f"参赛记录不存在（id={pid}）")
     expect_rev(ctx.conn, ctx.body, "participations", pid, "报名记录")
     fields = {}
     if "seed_no" in ctx.body:
@@ -1704,32 +1747,19 @@ def update_participation(ctx):
     return {"message": "已更新", "rev": bump_rev(ctx.conn, "participations", pid)}
 
 
-@route("DELETE", r"/api/participations/(?P<participation_id>\d+)", roles=ORG)
+@route("DELETE", r"/api/participations/(?P<participation_id>\d+)",
+       roles=None, transaction=False)
 def delete_participation(ctx):
     pid = int(ctx.params["participation_id"])
-    part = get_or_404(ctx.conn, "participations", pid, "参赛记录")
-    # 既要看已解析的对阵（*_actual），也要看尚未解析的签位来源（*_participation），
-    # 否则删除后待定场次会指向不存在的参赛主体
-    used = db.q1(ctx.conn, """SELECT COUNT(*) AS n FROM matches
-                               WHERE home_actual = ? OR away_actual = ?
-                                  OR home_participation = ? OR away_participation = ?""",
-                 (pid, pid, pid, pid))
-    if used["n"]:
-        raise conflict("该参赛主体已进入对阵（含待定签位），不能删除；请改用“退出”标记",
-                       code="in_use")
-    if db.q1(ctx.conn, "SELECT id FROM placements WHERE participation_id = ?", (pid,)):
-        raise conflict("该参赛主体已有名次记录，请先删除名次或改用“退出”标记", code="in_use")
-    if db.q1(ctx.conn, "SELECT id FROM individual_results WHERE participation_id = ?", (pid,)):
-        raise conflict("该参赛主体已有成绩记录，不能删除；请改用“退出”标记", code="in_use")
-    if part['athlete_id']:
-        registration.guard_change(ctx.conn, part['category_id'])
-    with db.tx(ctx.conn):
-        db.run(ctx.conn, "DELETE FROM pool_members WHERE participation_id = ?", (pid,))
-        subject = get_or_404(ctx.conn, 'teams' if part['team_id'] else 'athletes', part['team_id'] or part['athlete_id'], '参赛主体')
-        registration.sync_choice(ctx.conn, part['category_id'], subject['school_id'])
-        db.run(ctx.conn, "DELETE FROM participations WHERE id = ?", (pid,))
-        security.audit(ctx.conn, ctx.user, "delete_participation", "participation", pid)
-    return {"message": "已删除"}
+    return participation_deletion.delete_records(
+        ctx.conn, ctx.user, [pid], ctx.body, single=True)
+
+
+@route("POST", r"/api/participations/batch-delete", roles=None, transaction=False)
+def batch_delete_participations(ctx):
+    body = ctx.body if isinstance(ctx.body, dict) else {}
+    return participation_deletion.delete_records(
+        ctx.conn, ctx.user, body.get("ids"), body, single=False)
 
 
 # ------------------------------------------------------------------ 场地

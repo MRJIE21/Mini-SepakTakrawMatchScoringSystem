@@ -1,14 +1,15 @@
 /* One schedule, explicit stage sources, on-demand editors. */
-import { api, captureRequestContext, newUid, openHtml, getToken } from '../api.js';
+import { api, download, captureRequestContext, newUid, openHtml, getToken } from '../api.js';
 import { state, registerView, go, replaceViewParams } from '../main.js';
 import { workspaceLink } from '../workspaceContext.js';
 import { renderGroupDraw } from '../groupDraw.js';
+import { renderGroupResult } from '../drawDisplay.js';
 import { openAutoSchedule } from '../autoSchedule.js';
 import { stageLabel, sourceLabel, rankRange } from '../scheduleStageModel.js';
 import { readPendingRequest, writePendingRequest, removePendingRequest, capturePendingRequestScope } from '../pendingRequests.js';
 import { h, clear, field, selectInput, textInput, numberInput, dateTimeInput, formDialog,
   modal, toast, confirmAsync, promptDialog, statusBadge, matchStatusBadge, loadingState, errorState, emptyState,
-  filteredEmptyState, setPageLeaveGuard, pageHeader, categoryLabel } from '../ui.js';
+  filteredEmptyState, setPageLeaveGuard } from '../ui.js';
 
 async function render({ el, params, signal, requestContext = captureRequestContext(), isCurrent = () => true }) {
   const alive = () => el.isConnected && !signal?.aborted && isCurrent();
@@ -37,12 +38,6 @@ async function render({ el, params, signal, requestContext = captureRequestConte
     return !pending || await confirmAsync('提交结果待核实', '原请求已保存。离开后可返回此项目核实并重试，核实前不能提交另一份操作。', '离开并保留原请求');
   }, () => !!pending || busy || !!autoEditor?.isDirty(), alive);
   el.append(recovery, body);
-  /* 分组、赛程、对阵图是同一项目的三个视图，用同一条子导航切换，避免从侧栏反复进出。 */
-  const viewNav = () => h('nav.schedule-views', { 'aria-label': '赛程视图' },
-    h('a', { href: workspaceLink(cat, 'schedule', { view: 'groups' }), class: mode === 'groups' ? 'active' : '', 'aria-current': mode === 'groups' ? 'page' : null }, '分组与抽签'),
-    h('a', { href: workspaceLink(cat, 'schedule'), class: mode === 'fixtures' ? 'active' : '', 'aria-current': mode === 'fixtures' ? 'page' : null }, '比赛赛程'),
-    h('a', { href: `#/bracket?category=${cat.id}` }, '对阵图'));
-  const bracketLink = h('a.btn', { href: `#/bracket?category=${cat.id}` }, '对阵图');
 
   async function send(packet) {
     busy = true;
@@ -88,58 +83,48 @@ async function render({ el, params, signal, requestContext = captureRequestConte
       if (mode === 'groups') {
         const drawData = await client.get(`/api/categories/${cat.id}/group-draw`);
         if (!alive() || gen !== generation) return;
-        body.append(pageHeader({
-          crumbs: [{ label: '项目工作台' }, { label: categoryLabel(cat) }, { label: '分组抽签' }],
-          title: '分组抽签',
-          badges: [statusBadge('三人赛', 'info')],
-          meta: [h('span', '完成学校分组并确认后，才能建立小组赛阶段；确认前可撤销重来。')],
-          actions: [h('a.btn', { href: workspaceLink(cat, 'schedule') }, '进入赛程')],
-        }), viewNav(),
-        h('p.small.muted', '在这里完成学校分组和抽签确认。阶段、比赛及场地时间在“赛程”维护。'));
-        body.append(renderGroupDraw(cat, drawData, draw => { if (draw?.status === 'confirmed') load(); }, { client, isCurrent: alive,
-          openNotice: path => openHtml(path, {}, '小组抽签分组表', { context: requestContext, isCurrent: alive }) }));
-        if (drawData.draw?.status === 'confirmed') body.append(h('a.btn.mt', { href: workspaceLink(cat, 'schedule') }, '进入赛程'));
+        body.append(renderGroupDraw(cat, drawData, draw => { if (draw?.status === 'confirmed') load(); }, { client,
+            isCurrent: () => alive() && gen === generation, plan, readPlan: () => client.get(`/api/categories/${cat.id}/schedule`),
+            openNotice: path => openHtml(path, {}, '小组抽签分组表', { context: requestContext, isCurrent: alive }) }));
+        if (drawData.manual_result?.status === 'current' || drawData.draw?.status === 'confirmed') body.append(h('a.btn.mt', { href: workspaceLink(cat, 'schedule') }, '进入赛程'));
         return;
       }
       if (canManage && !plan?.stages.some(s => s.kind === 'round_robin')) {
         const drawData = await client.get(`/api/categories/${cat.id}/group-draw`);
         if (!alive() || gen !== generation) return;
-        if (drawData.draw?.status === 'confirmed') {
+        if (drawData.manual_result?.status === 'current' || drawData.draw?.status === 'confirmed') {
           body.append(h('div.panel', h('h3', '将确认分组用于小组赛'), h('p.muted', '建立小组赛阶段和正式成员后，按组委会赛程逐场新增比赛。'),
             h('button.btn.btn-primary', { onclick: async () => {
               try { const result = await client.post(`/api/categories/${cat.id}/schedule/stages`, { base_revision: 0,
-                definition: { purpose: 'group', name: '小组赛', draw_id: drawData.draw.id } });
+                definition: { purpose: 'group', name: '小组赛', ...(drawData.manual_result
+                  ? { manual_revision: drawData.manual_result.revision } : { draw_id: drawData.draw.id }) } });
                 if (alive()) { stageId = result.stage_id; await load(); await openPreview(result.stage_id, result.revision); }
               } catch (e) { report(e); }
             } }, '建立小组赛阶段')));
         } else body.append(h('div.panel', h('p.muted', '尚未确认学校分组。可先完成分组，再建立小组赛阶段；手工比赛仍可按组委会安排录入。'),
-          h('a.btn', { href: workspaceLink(cat, 'schedule', { view: 'groups' }) }, '前往分组')));
+          h('a.btn', { href: workspaceLink(cat, 'groups') }, '前往分组')));
       }
       const stages = plan?.stages || [];
       stageId = stages.some(s => s.id === stageId) ? stageId : stages[0]?.id || null;
       rememberPosition();
       const stage = stages.find(s => s.id === stageId);
-      body.append(pageHeader({
-        crumbs: [{ label: '项目工作台' }, { label: categoryLabel(cat) }, { label: '比赛赛程' }],
-        title: '比赛赛程',
-        badges: [statusBadge(`${stages.length} 个阶段`, 'info')],
-        meta: [h('span', '按阶段核对对阵，再安排场地和时间；比赛记录与成绩确认在各自页签完成。')],
-        actions: [
-          canManage ? h('button.btn.btn-primary', { onclick: () => {
-            if (!guardClose()) return;
-            generation++;
-            autoEditor = openAutoSchedule({ root: body, category: cat, plan, venues, initialStage: stageId, event: state.structure?.event,
-              client, previewRequest: (path, values) => api.post(path, values, { context: requestContext, signal }), isCurrent: alive,
-              onBack: () => { autoEditor = null; load(); }, onSaved: () => { autoEditor = null; sort = 'schedule'; load(); } });
-          } }, '自动编排') : null,
-          canManage ? h('button.btn', { onclick: () => openSettings() }, '设置后续赛程') : null,
-          canManage ? h('button.btn.btn-primary', { onclick: () => openAdd() }, '新增比赛') : null,
-          bracketLink,
-        ].filter(Boolean),
-      }), viewNav());
+      body.append(h('details.panel.schedule-group-display', h('summary', '分组显示'), renderGroupResult(cat, plan, schedule),
+        h('button.btn.small', { onclick: () => load() }, '刷新分组显示')));
+      body.append(h('div.schedule-heading', h('h3', '比赛赛程'),
+        canManage ? h('div.row.tight', h('button.btn.btn-primary', { onclick: () => {
+          if (!guardClose()) return;
+          generation++;
+          autoEditor = openAutoSchedule({ root: body, category: cat, plan, venues, initialStage: stageId, event: state.structure?.event,
+            client, previewRequest: (path, values) => api.post(path, values, { context: requestContext, signal }), isCurrent: alive,
+            onBack: () => { autoEditor = null; load(); }, onSaved: () => { autoEditor = null; sort = 'schedule'; load(); } });
+        } }, '自动编排'), h('button.btn', { onclick: () => openSettings() }, '设置后续赛程'),
+          h('button.btn.btn-primary', { onclick: () => openAdd() }, '新增比赛'),
+          h('button.btn', { onclick: () => download('/api/exports/schedule.csv',
+            { category_id: cat.id }, 'schedule.csv', { isCurrent: alive }).catch(report) }, '本项目赛程 CSV'),
+          h('button.btn', { onclick: () => download('/api/exports/schedule.csv',
+            { event_id: cat.event_id }, 'schedule.csv', { isCurrent: alive }).catch(report) }, '全部赛程 CSV（整届）')) : null));
       body.append(h('nav.schedule-stages', { 'aria-label': '比赛阶段' }, ...stages.map(item => h('button', {
-        class: `btn${stageId === item.id ? ' active' : ''}`, 'aria-current': stageId === item.id ? 'true' : null,
-        onclick: () => { stageId = item.id; offset = 0; listRevision = null; load(); },
+        class: `btn${stageId === item.id ? ' active' : ''}`, onclick: () => { stageId = item.id; offset = 0; listRevision = null; load(); },
       }, stageLabel(item), item.params?.schedule_meta?.state === 'draft' ? ' · 草稿' : ''))));
       const filters = h('div.schedule-filters', field('排列方式', selectInput([['round', '按轮次'], ['schedule', '按时间']], sort,
         { onchange: e => { sort = e.target.value; resetPage(); } })),
@@ -182,13 +167,6 @@ async function render({ el, params, signal, requestContext = captureRequestConte
     }
   }
   function resetPage() { offset = 0; listRevision = null; load(); }
-  /* 清空“状态/场地”列表筛选并重置分页；返回是否原本处于筛选态。
-     单独成函数是因为 openAdd 内部有同名 venue 常量（场地下拉），不能直接在此赋值。 */
-  function clearListFilters() {
-    const filtered = !!(status || venue);
-    if (filtered) { status = ''; venue = ''; offset = 0; listRevision = null; }
-    return filtered;
-  }
   function rememberPosition() {
     if (alive()) replaceViewParams({ event: cat.event_id, group: cat.group_id, category: cat.id, tab: 'schedule',
       stage: stageId || null, sort, status: status || null, venue: venue || null });
@@ -230,26 +208,18 @@ async function render({ el, params, signal, requestContext = captureRequestConte
   function guardClose() { if (pending || busy) { toast('请先核实原操作结果；原请求已保留，也可刷新页面继续核实。', 'warn'); return false; } return true; }
   async function openSettings(stage = null) {
     const definition = stage?.params.schedule_meta.definition;
-    const purpose = selectInput([['knockout', '淘汰赛（各组前两名）'], ['placement', '名次赛（各组第三或第四名）'], ['manual', '手工比赛阶段']], definition?.purpose || 'knockout');
+    const purpose = selectInput([['knockout', '淘汰赛（各组前两名）'], ['placement', '名次赛（各组同名次对阵）'], ['manual', '手工比赛阶段']], definition?.purpose || 'knockout');
     const name = textInput(definition?.name || '淘汰赛');
-    const sourceRank = selectInput([[3, '各组第三名'], [4, '各组第四名']], definition?.source_rank || 3);
-    const from = numberInput(definition?.rank_from || '', { min: 5, step: 1 }), to = numberInput(definition?.rank_to || '', { min: 5, step: 1 });
+    const sourceRank = selectInput([[1, '各组第一名'], [2, '各组第二名'], [3, '各组第三名'], [4, '各组第四名']], definition?.source_rank || 3);
+    const from = numberInput(definition?.rank_from || '', { min: 1, step: 1 }), to = numberInput(definition?.rank_to || '', { min: 1, step: 1 });
     const choices = pools.map(p => ({ p, input: h('input', { type: 'checkbox',
       checked: definition?.purpose !== 'placement' || definition.pool_ids?.includes(p.id), 'data-field': `pool-${p.id}` }) }));
-    const pairings = [];
-    for (const rank of [1, 2]) for (let i = 0; i < pools.length; i += 2) {
-      pairings.push(`${pools[i].name}第${rank}名${pools[i + 1] ? ` 对 ${pools[i + 1].name}第${rank}名` : ' · 轮空位置待核对'}`);
-    }
     const knockout = h('div.schedule-settings-summary', h('strong', '全部小组前两名晋级'),
-      h('div.schedule-settings-tags', ...pools.map(p => h('span', `${p.name}前两名`))),
-      pools.length >= 2 ? h('p.small.muted', `首轮：${pairings.join('；')}。`) : null,
-      h('p.small.muted', '胜者逐轮晋级，分别进行冠亚军赛、三四名赛，决出第1—4名。'));
+      h('div.schedule-settings-tags', ...pools.map(p => h('span', `${p.name}前两名`))));
     const groupChoices = h('fieldset.schedule-settings-groups', h('legend', '参赛小组'),
       h('div.schedule-pool-options', ...choices.map(({ p, input }) => h('label', input, p.name))));
     const placement = h('div.schedule-settings-placement', field('来源名次', sourceRank, { name: 'source_rank' }), groupChoices,
-      h('p.small.muted', '选择全部小组或成对的相邻小组，同名次先对阵。争夺的名次范围由你填写。'),
-      h('div.form-grid', field('起始名次', from, { name: 'rank_from', required: true }), field('结束名次', to, { name: 'rank_to', required: true })),
-      h('p.small.muted', '名次数量应与所选参赛学校数一致，且不能与其他阶段重叠。第1—4名由主淘汰赛决定。'));
+      h('div.form-grid', field('起始名次', from, { name: 'rank_from', required: true }), field('结束名次', to, { name: 'rank_to', required: true })));
     const manual = h('p.small.muted', '建立阶段后，按组委会赛程逐场新增比赛并安排场地和时间。');
     const warning = h('div.warn-box', { role: 'status' }, `至少需要两个已确认的正式小组。当前 ${pools.length} 个，请先在“分组”完成小组设置。`);
     let dialog, previousPurpose = purpose.value;
@@ -280,7 +250,6 @@ async function render({ el, params, signal, requestContext = captureRequestConte
           for (let i = 0; i < pools.length; i += 2) {
             if (pools[i + 1] && ids.includes(pools[i].id) !== ids.includes(pools[i + 1].id)) throw new Error('请成对选择相邻小组，例如A/B或C/D');
           }
-          if (Number(from.value) < 5) throw new Error('第1—4名由主淘汰赛决定，请从第5名起设置名次赛');
           Object.assign(value, { pool_ids: ids, source_rank: Number(sourceRank.value) }, rankRange(ids.length, Number(from.value), Number(to.value)));
         }
         const result = stage ? await client.put(`/api/schedule-stages/${stage.id}`, { base_revision: stage.params.schedule_meta.revision, definition: value })
@@ -338,23 +307,8 @@ async function render({ el, params, signal, requestContext = captureRequestConte
         home_participation: Number(home.value), away_participation: Number(away.value), round_label: round.value.trim() || '手工比赛',
         venue_id: Number(venue.value) || null, scheduled_at: when.value.replace('T', ' ') };
       const result = await client.post('/api/matches', value);
-      if (alive()) {
-        stageId = result.stage_id;
-        /* 新增场次通常为“等待前序/待记录”且未安排场地；若当前状态/场地筛选会把它隐藏，
-           先清空筛选再刷新并提示，避免“新建没成功/刷新后消失”的错觉。 */
-        const cleared = clearListFilters();
-        await load();
-        if (cleared) toast('已新增比赛，已清除筛选以显示新场次');
-        highlightMatch(result.match_id);
-      }
+      if (alive()) { stageId = result.stage_id; await load(); }
     } }] });
-  }
-  function highlightMatch(matchId) {
-    if (!matchId) return;
-    const node = body.querySelector(`.schedule-match[data-match-id="${Number(matchId)}"]`);
-    if (!node) return;
-    node.classList.add('flash');
-    node.scrollIntoView({ block: 'center' });
   }
   /* 调整场地时间：409 stale_revision 时保留输入，展示“重新读取最新安排”动作；
      重新读取后再用最新版本 + 用户原输入重开编辑框，避免用户重填。 */

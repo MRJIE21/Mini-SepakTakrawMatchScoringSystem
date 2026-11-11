@@ -68,9 +68,15 @@ def _definition(conn, category_id, raw, stage_id=None):
     definition = {'purpose': purpose, 'name': raw.get('name')}
     try:
         if purpose == 'group':
-            draw_id = integer(raw.get('draw_id'), '抽签编号')
-            confirmed_draw(conn, category_id, draw_id)
-            definition['draw_id'] = draw_id
+            if 'manual_revision' in raw:
+                from ..manual_results import require_current
+                revision = integer(raw['manual_revision'], '人工结果版本')
+                require_current(conn, category_id, revision)
+                definition['manual_revision'] = revision
+            else:
+                draw_id = integer(raw.get('draw_id'), '抽签编号')
+                confirmed_draw(conn, category_id, draw_id)
+                definition['draw_id'] = draw_id
             if db.q1(conn, """SELECT s.id FROM stages s JOIN plans p ON p.id=s.plan_id
                 WHERE p.category_id=? AND s.kind='round_robin' AND s.id<>COALESCE(?,0)""", (category_id, stage_id)):
                 raise conflict('本项目已有小组赛阶段，请先撤回并删除原阶段')
@@ -108,10 +114,11 @@ def _definition(conn, category_id, raw, stage_id=None):
                     raise bad_request('名次赛请成对选择相邻小组，例如A/B或C/D')
             for pool in pools:
                 for pid in pool['members']:
-                    part = get_or_404(conn, 'participations', pid, '小组成员')
-                    if part['category_id'] != category_id or part['status'] != 'active':
+                    part = db.q1(conn, '''SELECT * FROM participations
+                        WHERE id=? AND deleted_at IS NULL''', (pid,))
+                    if not part or part['category_id'] != category_id or part['status'] != 'active':
                         raise conflict('来源小组成员已退出或变化，请先核对报名和分组', code='source_roster_changed')
-            rank = integer(raw.get('source_rank'), '来源名次', 3, 4) if purpose == 'placement' else None
+            rank = integer(raw.get('source_rank'), '来源名次', 1, 4) if purpose == 'placement' else None
             entries, slots, pairs = group_entries(pools, [rank] if rank else [1, 2])
             definition.update(pool_ids=[p['id'] for p in pools], entries=entries,
                               bracket_slots=slots, required_pairs=pairs)
@@ -122,9 +129,9 @@ def _definition(conn, category_id, raw, stage_id=None):
         raise bad_request(str(exc)) from exc
     definition['name'] = graph['name']
     if purpose in ('knockout', 'placement'):
-        if purpose == 'placement' and graph['rank_from'] <= 4:
-            raise conflict('第1—4名由主淘汰赛决定，请调整名次赛范围', code='rank_overlap')
-        enrolled = db.q1(conn, "SELECT COUNT(*) AS n FROM participations WHERE category_id=? AND status='active'", (category_id,))['n']
+        enrolled = db.q1(conn, """SELECT COUNT(*) AS n FROM participations
+            WHERE category_id=? AND status='active' AND deleted_at IS NULL""",
+                         (category_id,))['n']
         if graph['rank_to'] > enrolled:
             raise bad_request('名次范围超出本项目有效报名学校数量')
         wanted = set(range(graph['rank_from'], graph['rank_to'] + 1))
@@ -149,9 +156,15 @@ def _preview(conn, plan, data, stage_id):
     definition, graph = _definition(conn, plan['category_id'], data['definition'], stage_id)
     basis = {'roster': roster_for(conn, plan['category_id']), 'pools': []}
     if definition['purpose'] == 'group':
-        draw = confirmed_draw(conn, plan['category_id'], definition['draw_id'])
-        basis['draw'] = {key: draw[key] for key in ('id', 'rev', 'steps_json', 'roster_json')}
-        graph['groups'] = fixed_pools(conn, plan['category_id'], {'draw_id': draw['id']})
+        if 'manual_revision' in definition:
+            from ..manual_results import require_current
+            manual = require_current(conn, plan['category_id'], definition['manual_revision'])
+            basis['manual'] = manual
+            graph['groups'] = [{'name': g['name'], 'members': [m['id'] for m in g['members']]} for g in manual['groups']]
+        else:
+            draw = confirmed_draw(conn, plan['category_id'], definition['draw_id'])
+            basis['draw'] = {key: draw[key] for key in ('id', 'rev', 'steps_json', 'roster_json')}
+            graph['groups'] = fixed_pools(conn, plan['category_id'], {'draw_id': draw['id']})
     for pool_id in definition.get('pool_ids', []):
         pool = get_or_404(conn, 'pools', pool_id, '来源小组')
         basis['pools'].append({'pool': dict(pool), 'members': db.rows_to_dicts(db.q(conn,
@@ -166,7 +179,9 @@ def get_schedule(ctx):
     category_id = int(ctx.params['category_id'])
     cat = category_context(ctx.conn, category_id)
     plan = active_plan(ctx.conn, category_id)
-    return {'category': cat, 'plan': plan_detail(ctx.conn, plan, include_matches=False, include_pools=True) if plan else None}
+    from ..manual_results import snapshot
+    return {'category': cat, 'plan': plan_detail(ctx.conn, plan, include_matches=False, include_pools=True) if plan else None,
+            'manual_result': snapshot(ctx.conn, category_id) if ctx.user['role'] in ORG else None}
 
 
 @route('POST', r'/api/categories/(?P<category_id>\d+)/schedule/stages', roles=ORG)
@@ -263,8 +278,6 @@ def _guard_retract(conn, stage):
     rows = db.q(conn, 'SELECT * FROM matches WHERE stage_id=?', (stage['id'],))
     own_ids = {m['id'] for m in rows}
     for match in rows:
-        if db.q1(conn,"SELECT id FROM result_candidates WHERE subject_kind='match' AND subject_id=? LIMIT 1",(match['id'],)):
-            raise conflict('该阶段已有候选原件，请通过复核或正式处置流程处理',code='stage_started')
         if match['result_version'] or match['status'] == 'finished' or \
                 db.q1(conn, 'SELECT id FROM score_events WHERE match_id=? LIMIT 1', (match['id'],)) or \
                 db.q1(conn, 'SELECT id FROM submissions WHERE match_id=? LIMIT 1', (match['id'],)) or \

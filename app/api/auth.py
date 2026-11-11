@@ -9,13 +9,8 @@ from ..http_server import route
 @route("POST", r"/api/login", public=True, scope="registry", transaction=False)
 def login(ctx):
     body = ctx.body or {}
-    raw_username = body.get("username")
-    raw_password = body.get("password")
-    # 字段必须是文本：数字/对象等类型若直接 .strip()/encode() 会抛异常并变成 500。
-    if not isinstance(raw_username, str) or not isinstance(raw_password, str):
-        raise bad_request("用户名和密码必须为文本")
-    username = raw_username.strip()
-    password = raw_password
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
     if not username or not password:
         raise bad_request("请填写用户名和密码")
     ip = ctx.remote_addr or ""
@@ -41,7 +36,8 @@ def login(ctx):
         token = security.issue_token(ctx.conn, fresh['id'])
         user = dict(fresh)
         security.audit(ctx.conn, user, "login", "user", user["id"])
-    return {"token": token, "user": public_user(user)}
+    return {"token": token, "user": public_user(user), "roles": security.ROLE_NAMES,
+            "capabilities": security.capabilities(user)}
 
 
 def _request_token(ctx) -> str:
@@ -71,7 +67,8 @@ def logout_all(ctx):
 
 @route("GET", r"/api/me", scope="registry")
 def me(ctx):
-    return {"user": public_user(ctx.user), "roles": security.ROLE_NAMES}
+    return {"user": public_user(ctx.user), "roles": security.ROLE_NAMES,
+            "capabilities": security.capabilities(ctx.user)}
 
 
 @route("POST", r"/api/me/password", scope="registry")

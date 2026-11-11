@@ -1,0 +1,8 @@
+{
+  "baseline": "empty-business-preserve-admin-config-audit-backups",
+  "allow_test_environment": false,
+  "allow_seed": false,
+  "maintenance": false,
+  "reset_id": "baseline-reset_20261031_234628",
+  "timezone": "Asia/Shanghai"
+}

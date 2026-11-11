@@ -91,8 +91,6 @@ class BoundedHTTPServer(HTTPServer):
     allow_reuse_address = os.name != 'nt'
 
     def __init__(self, address, handler_cls, *, limits=None, background_sync=True):
-        from .write_admission import WriteAdmission
-        self.write_admission = WriteAdmission()
         self.limits = default_limits()
         self.limits.update(limits or {})
         for key, value in self.limits.items():
@@ -101,12 +99,6 @@ class BoundedHTTPServer(HTTPServer):
         self.request_queue_size = int(self.limits["backlog"])
         self._condition = threading.Condition()
         self._pending = deque()
-        # 已发出 503 的连接：先 shutdown(SHUT_WR) 发 FIN，再由回收线程继续有界读取
-        # 客户端剩余请求数据，等对方读完响应主动关闭后 finally close（避免未读数据
-        # 触发 Windows RST，让客户端收不到规范 503）。
-        self._reject_lock = threading.Lock()
-        self._dying = []
-        self._reaper = None
         self._closing = False
         self._started = False
         self._workers = []
@@ -116,8 +108,7 @@ class BoundedHTTPServer(HTTPServer):
         self._registry_path = config.DB_PATH
         self._events_dir = config.EVENTS_DIR
         self._stats = dict(active=0, peak_active=0, pending=0, peak_pending=0,
-                           completed=0, rejected=0, expired=0,
-                           reject_503=0, reject_aborted=0)
+                           completed=0, rejected=0, expired=0)
         super().__init__(address, handler_cls)
 
     def _start_workers(self):
@@ -131,8 +122,6 @@ class BoundedHTTPServer(HTTPServer):
                 thread.start()
             self._expiry_thread = threading.Thread(target=self._expire, name="stss-http-expiry", daemon=True)
             self._expiry_thread.start()
-            self._reaper = threading.Thread(target=self._reap_rejected, name="stss-http-reap", daemon=True)
-            self._reaper.start()
         if self._background_sync:
             from .user_sync import SnapshotWorker
             self._sync = SnapshotWorker(self._registry_path, self._events_dir)
@@ -169,91 +158,13 @@ class BoundedHTTPServer(HTTPServer):
         for key, value in web_security.security_headers().items():
             header_lines.append(f"{key}: {value}\r\n".encode("utf-8"))
         reply = b"".join(header_lines) + b"\r\n" + body
-        sent = False
-        deferred = False
         try:
             request.setblocking(False)
-            # 先有界读掉已到达的请求数据：带未读数据关闭连接时 Windows 会发 RST，
-            # 客户端就收不到规范 503，只能显示“网络错误”（P2-05 的根因之一）。
-            for _ in range(32):
-                try:
-                    if not request.recv(65536):
-                        break
-                except (BlockingIOError, InterruptedError):
-                    break
-                except OSError:
-                    break
-            try:
-                request.settimeout(0.2)
-                request.sendall(reply)
-                sent = True
-            except OSError:
-                pass
-            if sent:
-                # 先发 FIN 让客户端先读到 503；随后交给回收线程等待对方关闭。
-                try:
-                    request.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
-                with self._reject_lock:
-                    reaper = self._reaper
-                    if reaper is not None and reaper.is_alive():
-                        self._dying.append((request, time.monotonic() + 0.3))
-                        deferred = True
+            request.send(reply)  # 尽力发送；绝不阻塞接入/过期调度。
         except OSError:
             pass
         finally:
-            with self._condition:
-                if sent:
-                    self._stats["reject_503"] += 1
-                else:
-                    self._stats["reject_aborted"] += 1
-            if not deferred:
-                self.shutdown_request(request)
-
-    def _reap_rejected(self):
-        """回收已发 503 的连接：继续非阻塞读取直到对端关闭或 0.3s 到期。"""
-        while True:
-            with self._reject_lock:
-                dying, self._dying = self._dying, []
-                closing = self._closing
-            if closing:
-                for sock, _deadline in dying:
-                    self._close_socket(sock)
-                return
-            if not dying:
-                time.sleep(0.02)
-                continue
-            now = time.monotonic()
-            keep = []
-            for sock, deadline in dying:
-                if deadline <= now:
-                    self._close_socket(sock)
-                    continue
-                try:
-                    sock.setblocking(False)
-                    data = sock.recv(65536)
-                except (BlockingIOError, InterruptedError):
-                    keep.append((sock, deadline))
-                    continue
-                except OSError:
-                    self._close_socket(sock)
-                    continue
-                if data:
-                    keep.append((sock, deadline))
-                else:
-                    self._close_socket(sock)   # 对端已读完并关闭
-            if keep:
-                with self._reject_lock:
-                    self._dying.extend(keep)
-                time.sleep(0.002)
-
-    @staticmethod
-    def _close_socket(sock):
-        try:
-            sock.close()
-        except OSError:
-            pass
+            self.shutdown_request(request)
 
     def _expire(self):
         while True:
@@ -318,12 +229,5 @@ class BoundedHTTPServer(HTTPServer):
             thread.join()  # 当前业务事务完成后再停止同步，不从主线程关闭 SQLite。
         if self._expiry_thread:
             self._expiry_thread.join()
-        if self._reaper:
-            self._reaper.join()
-        with self._reject_lock:
-            leftover = list(self._dying)
-            self._dying.clear()
-        for sock, _deadline in leftover:
-            self._close_socket(sock)
         if self._sync:
             self._sync.stop()

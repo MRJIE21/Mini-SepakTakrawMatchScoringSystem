@@ -15,7 +15,6 @@ const STATUS = {
   submitting: ['正在提交，请稍候', 'info'],
   failed: ['提交中断，待重试', 'danger'],
   submitted: ['服务器已确认', 'ok'],
-  received: ['已接收待复核（原件只读保留）', 'warn'],
 };
 
 async function render({ el }) {
@@ -27,8 +26,8 @@ async function render({ el }) {
   }
 
   el.append(h('div.panel',
-    h('div.panel-head', h('h2', '待核实提交')),
-    h('div.small.muted', '仅用于核实待处理的提交请求。报名、成绩和统计以后台保存的结果为准。'),
+    h('div.panel-head', h('h2', '提交重试')),
+    h('div.small.muted', '仅用于核实中断的提交请求。报名、成绩和统计以后台保存的结果为准。'),
   ));
 
   const filter = h('div.panel');
@@ -40,7 +39,7 @@ async function render({ el }) {
   const catSelect = selectInput([['', '全部项目'], ...cats.map((c) => [c.id, categoryLabel(c, { withGroup: true })])],
     '', { onchange: (e) => { ui.category = e.target.value; drawDrafts(); } });
   filter.append(h('div.row', field('按项目过滤', catSelect),
-    h('span.small.muted.self-center', '按本机记录里保存的项目归属过滤。')));
+    h('span.small.muted', { style: 'align-self:center' }, '按本机记录里保存的项目归属过滤。')));
 
   let drafts = [];
   await load();
@@ -50,8 +49,8 @@ async function render({ el }) {
     listBox.append(h('div.panel', loadingState('正在读取本机记录…')));
     const identity = getApiEventContext();
     drafts = (await localStore.all()).filter((draft) =>
-      ['match', 'individual','correction','cancel','reset_review','resolve_dispute'].includes(draft.kind)
-      && (draft.storage_conflict || draft.payload && ['submitting', 'failed', 'received'].includes(draft.status))
+      ['match', 'individual'].includes(draft.kind)
+      && (draft.storage_conflict || draft.payload && ['submitting', 'failed'].includes(draft.status))
       && draft.event_identity?.deployment_id === identity?.deployment_id
       && draft.event_identity?.event_uuid === identity?.event_uuid);
     drawDrafts();
@@ -135,11 +134,6 @@ function draftCard(draft, reload) {
     const url = URL.createObjectURL(new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' }));
     const a = h('a', { href: url, download: `记录恢复-${draft.uid || 'branch'}.json` }); a.click(); setTimeout(() => URL.revokeObjectURL(url), 4000);
   } }, '导出恢复副本'));
-  if(draft.receipt?.receipt_kind==='candidate_received') {
-    card.append(h('p.small','原包已接收，本机原件保留。正式状态请读取候选决定；此处不会再次提交。'),
-      h('button.btn.small',{onclick:()=>go('resultReview',{candidate:draft.receipt.candidate_id,category:draft.category_id})},'查看复核状态'));
-    return h('div.panel',card);
-  }
   if (draft.storage_conflict) {
     card.append(h('div.warn-box.mt', '此副本与其他页面冲突，已暂停提交；请导出并核对正式成绩和权威草稿。'));
     return h('div.panel', card);
@@ -156,17 +150,14 @@ function draftCard(draft, reload) {
       canScore() ? h('button.btn.small.btn-primary', {
         onclick: () => retryMatch(draft, card, reload),
       }, '重试提交') : null));
-  } else if(draft.kind==='individual') {
-    card.append(h('div.small', `成绩 ${draft.result_value ?? '—'} · 名次 ${draft.rank_no ?? '待确认'}`));
+  } else {
+    card.append(h('div.small', `待核实输入 · 有效 ${draft.result_value ?? '—'} · 失误 ${draft.error_count ?? '—'} · 犯规 ${draft.violation_count ?? '—'}`));
     card.append(h('div.row.tight.mt',
       canScore() ? h('button.btn.small.btn-primary', {
         onclick: async () => {
           await retryMatch(draft, card, reload);
         },
       }, '重试提交') : null));
-  } else {
-    card.append(h('p.small','更正或处置原包只按原UID核实；升级、404或超时不会自动转换内容。'),
-      h('button.btn.btn-primary',{onclick:()=>retryMatch(draft,card,reload)},'核实原更正请求'));
   }
   return h('div.panel', card);
 }
@@ -179,17 +170,16 @@ async function retryMatch(draft, card, reload) {
   draft.request_context = recordRequestContext(draft);
   if (!await localStore.put(draft)) throw new Error('此记录已被其他页面更新，请核对恢复副本');
   const payload = draft.payload;
-  const path = payload.payload_schema===3?'/api/result-candidates':draft.kind === 'individual' ? '/api/scoring/individual'
-    :draft.kind==='match'?'/api/scoring/submit':`/api/matches/${draft.match_id}/${draft.kind.replace('_','-')}`;
+  const path = draft.kind === 'individual' ? '/api/scoring/individual' : '/api/scoring/submit';
   let res;
   try {
-    const found = await api.get(`${payload.payload_schema===3?'/api/candidate-receipts/':'/api/receipts/'}${encodeURIComponent(draft.uid)}`, { context: draft.request_context });
+    const found = await api.get(`/api/receipts/${encodeURIComponent(draft.uid)}`, { context: draft.request_context });
     if (found.found) { await validateReceipt(found, payload, draft.kind, draft.match_id || draft.participation_id); res = { ok: true, result: found }; }
   } catch { /* Keep the original packet and allow an explicit same-UID replay. */ }
   res ||= await submitWithRetry(path, payload, { context: draft.request_context });
   if (res.ok) {
     if (!await localStore.finalize(draft, res.result.receipt)) throw new Error('服务器已确认，本机收据保存失败，请重试核实');
-    toast(payload.payload_schema===3?'已接收，待独立复核':'已核实原正式回执', 'ok');
+    toast('服务器已确认', 'ok');
     reload();
     return;
   }
@@ -218,4 +208,4 @@ async function showSubmissions(matchId) {
   });
 }
 
-registerView({ name: 'review', label: '待核实提交', roles: ['admin', 'organizer', 'recorder', 'viewer'], render });
+registerView({ name: 'review', label: '提交重试', roles: ['admin', 'organizer', 'recorder', 'viewer'], render });

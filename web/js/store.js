@@ -63,10 +63,8 @@ async function mutate(key, update, incoming = null, archivePrevious = false) {
         try {
           result = update(copy(req.result || null));
           if (result) {
-            if (req.result && (archivePrevious && !req.result.terminal || req.result.receipt?.receipt_kind === 'candidate_received'))
-              tx.objectStore(RECOVERY).put({ ...copy(req.result),
-                key: `${key}:branch:${nonce()}`, original_key: key,
-                review_archive: !!req.result.receipt, storage_conflict: !req.result.receipt });
+            if (archivePrevious && req.result && !req.result.terminal) tx.objectStore(RECOVERY).put({ ...copy(req.result),
+              key: `${key}:branch:${nonce()}`, original_key: key, storage_conflict: true });
             store.put(result);
           }
           else if (incoming) tx.objectStore(RECOVERY).put({ ...copy(incoming), key: `${key}:branch:${nonce()}`, original_key: key, storage_conflict: true });
@@ -81,8 +79,7 @@ async function mutate(key, update, incoming = null, archivePrevious = false) {
     if (!globalThis.indexedDB && globalThis.navigator?.locks?.request) return navigator.locks.request(`stss-v2:${key}`, { mode: 'exclusive' }, async () => {
       const result = update(lsRead(key));
       if (!result) { if (incoming) journal(incoming); return null; }
-      if (lsRead(key) && (archivePrevious && !lsRead(key).terminal || lsRead(key).receipt?.receipt_kind==='candidate_received')
-          && !journal({...lsRead(key),review_archive:!!lsRead(key).receipt}))
+      if (archivePrevious && lsRead(key) && !lsRead(key).terminal && !journal(lsRead(key)))
         throw new StorageError('storage_unavailable', '旧输入未能保留，请先导出再提交');
       localStorage.setItem(lsKey(key), JSON.stringify(result)); return result;
     });
@@ -176,8 +173,7 @@ export const localStore = {
         if (key?.startsWith('stss_v2:')) drafts.push(JSON.parse(localStorage.getItem(key)));
       } catch { /* preserve other records */ }
     }
-    return [...drafts.filter((d) => !d.terminal || d.storage_conflict || d.receipt?.receipt_kind === 'candidate_received'),
-      ...branches.map((d) => ({ ...d, key: d.original_key || d.key, storage_conflict: !d.review_archive }))]
+    return [...drafts.filter((d) => !d.terminal || d.storage_conflict), ...branches.map((d) => ({ ...d, key: d.original_key || d.key, storage_conflict: true }))]
       .filter((d) => d.key.startsWith(p) && d.kind !== 'package').map((d) => unwrap(d, p));
   },
   async remove(key, expected) {
@@ -189,31 +185,11 @@ export const localStore = {
     return !!saved;
   },
   async finalize(value, receipt) {
-    if (receipt?.receipt_kind === 'candidate_received') return this.markReceived(value,receipt);
     if (receipt?.uid !== value.uid || receipt?.status !== 'confirmed') throw new StorageError('invalid_receipt', '收据不匹配，原请求保留待核实');
     const full = (value.owner_id ? `user:${value.owner_id}:` : prefix()) + value.key;
     const saved = await mutate(full, (current) => !current ? null : { ...current, terminal: true, receipt,
       finalized_generation: value.generation, storage_conflict: current.generation !== value.generation || current.uid !== receipt.uid,
       revision: current.revision + 1 });
-    return !!saved;
-  },
-  async markReceived(value,receipt) {
-    if (receipt?.receipt_kind!=='candidate_received' || receipt.uid!==value.uid || receipt.status!=='received')
-      throw new StorageError('invalid_receipt','接收回执不匹配，原包保留');
-    const full=(value.owner_id ? `user:${value.owner_id}:` : prefix())+value.key;
-    const saved=await mutate(full,current=>!current || current.generation!==value.generation || current.uid!==receipt.uid ? null
-      : {...current,terminal:true,status:'received',receipt,submission_unknown:false,revision:current.revision+1});
-    if (saved) Object.assign(value,unwrap(saved,full.slice(0,full.length-value.key.length)));
-    return !!saved;
-  },
-  async finishReview(value,receipt) {
-    if (receipt?.receipt_kind!=='review_decision' || receipt.uid!==value.uid
-        || !['approved','returned','withdrawn'].includes(receipt.status))
-      throw new StorageError('invalid_receipt','复核回执不匹配，原决定保留');
-    const p=value.owner_id ? `user:${value.owner_id}:` : prefix(),full=p+value.key;
-    const saved=await mutate(full,current=>!current || current.generation!==value.generation || current.uid!==receipt.uid ? null
-      : {...current,terminal:true,receipt,status:receipt.status,submission_unknown:false,revision:current.revision+1});
-    if(saved)Object.assign(value,unwrap(saved,p));
     return !!saved;
   },
 };

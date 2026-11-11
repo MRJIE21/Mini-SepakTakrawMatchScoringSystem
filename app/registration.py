@@ -4,9 +4,8 @@ from .errors import conflict, invalid_fields
 
 
 def guard_change(conn, category_id):
-    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(
-            conn,'SELECT id FROM result_candidates WHERE category_id=? LIMIT 1',(category_id,)):
-        raise conflict('项目已有结果候选，报名和种子已冻结，请先核对原包与成绩',code='registration_in_use')
+    if db.q1(conn, 'SELECT k FROM settings WHERE k=?', (f'recording:individual_project:{category_id}',)):
+        raise conflict('项目已有记录任务领取，报名和种子已冻结', code='registration_in_use')
     if db.q1(conn, """SELECT s.id FROM stages s JOIN plans p ON p.id=s.plan_id WHERE p.category_id=?
         AND json_extract(s.params_json,'$.schedule_meta.state')='confirmed'
         AND json_extract(s.params_json,'$.schedule_meta.definition.purpose')<>'manual' LIMIT 1""", (category_id,)):
@@ -17,10 +16,12 @@ def guard_change(conn, category_id):
         raise conflict('项目赛程已确认，变更参赛学校、报名状态或种子须先处理赛程锁定', code='plan_locked')
     if (db.q1(conn, """SELECT m.id FROM matches m WHERE m.category_id=? AND m.status<>'void'
             AND EXISTS (SELECT 1 FROM settings s WHERE s.k='recording:match:' || m.id) LIMIT 1""", (category_id,))
-            or db.q1(conn, """SELECT p.id FROM participations p WHERE p.category_id=? AND
+            or db.q1(conn, """SELECT p.id FROM participations p WHERE p.category_id=?
+            AND p.deleted_at IS NULL AND
             EXISTS (SELECT 1 FROM settings s WHERE s.k='recording:individual:' || p.id) LIMIT 1""", (category_id,))):
         raise conflict('项目已有记录任务领取，报名和种子已冻结', code='registration_in_use')
-    if db.q1(conn, """SELECT p.id FROM participations p WHERE p.category_id=? AND
+    if db.q1(conn, """SELECT p.id FROM participations p WHERE p.category_id=?
+        AND p.deleted_at IS NULL AND
         (EXISTS (SELECT 1 FROM placements x WHERE x.participation_id=p.id) OR
          EXISTS (SELECT 1 FROM individual_results x WHERE x.participation_id=p.id) OR
          EXISTS (SELECT 1 FROM matches m WHERE m.status='finished' AND
@@ -30,12 +31,8 @@ def guard_change(conn, category_id):
 
 def guard_team_roster(conn, team_id):
     """A team's players do not change its schedule slot. Freeze at recording/results."""
-    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(conn,
-            """SELECT c.id FROM result_candidates c JOIN matches m ON m.id=c.subject_id
-            JOIN participations p ON p.id IN (m.home_actual,m.away_actual,m.home_participation,m.away_participation)
-            WHERE c.subject_kind='match' AND p.team_id=? LIMIT 1""",(team_id,)):
-        raise conflict('该校已有结果候选，阵容已冻结，请先核对原包与成绩',code='roster_in_use')
-    if db.q1(conn, """SELECT p.id FROM participations p WHERE p.team_id=? AND
+    if db.q1(conn, """SELECT p.id FROM participations p WHERE p.team_id=?
+        AND p.deleted_at IS NULL AND
         (EXISTS (SELECT 1 FROM placements x WHERE x.participation_id=p.id) OR
          EXISTS (SELECT 1 FROM matches m WHERE m.status='finished' AND
            (m.home_actual=p.id OR m.away_actual=p.id OR
@@ -44,7 +41,7 @@ def guard_team_roster(conn, team_id):
     if db.q1(conn, """SELECT m.id FROM matches m JOIN participations p ON
         (m.home_actual=p.id OR m.away_actual=p.id OR
          m.home_participation=p.id OR m.away_participation=p.id)
-        WHERE p.team_id=? AND m.status<>'void' AND
+        WHERE p.team_id=? AND p.deleted_at IS NULL AND m.status<>'void' AND
         EXISTS (SELECT 1 FROM settings s WHERE s.k='recording:match:' || m.id)
         LIMIT 1""", (team_id,)):
         raise conflict('该校场次已领取记录，阵容已冻结，请联系赛事管理员核对', code='roster_in_use')
@@ -53,6 +50,7 @@ def guard_team_roster(conn, team_id):
 def guard_athlete_identity(conn, athlete_id):
     for row in db.q(conn, """SELECT DISTINCT p.category_id,p.team_id FROM participations p
         LEFT JOIN team_members tm ON tm.team_id=p.team_id WHERE p.status='active'
+        AND p.deleted_at IS NULL
         AND (p.athlete_id=? OR tm.athlete_id=?)""", (athlete_id, athlete_id)):
         if row['team_id']:
             guard_team_roster(conn, row['team_id'])
@@ -67,7 +65,8 @@ def validate_categories(conn, category_ids):
         if not cat:
             raise invalid_fields('项目不存在', {'projects': '项目不存在'})
         school_seen = set()
-        for p in db.q(conn, "SELECT * FROM participations WHERE category_id=? AND status='active'", (cid,)):
+        for p in db.q(conn, """SELECT * FROM participations
+            WHERE category_id=? AND status='active' AND deleted_at IS NULL""", (cid,)):
             if cat['kind'] == 'team':
                 team = db.q1(conn, 'SELECT * FROM teams WHERE id=?', (p['team_id'],))
                 if not team or team['category_id'] != cid:
@@ -102,7 +101,7 @@ def validate_categories(conn, category_ids):
                     raise invalid_fields('运动员性别与项目不符', {'members': f"{a['name']}性别与项目不符", 'athlete_id': '运动员性别与项目不符'})
                 hit = db.q1(conn, """SELECT c.name FROM participations p JOIN categories c ON c.id=p.category_id
                     JOIN groups g ON g.id=c.group_id LEFT JOIN team_members tm ON tm.team_id=p.team_id
-                    WHERE g.event_id=? AND p.status='active' AND c.id<>?
+                    WHERE g.event_id=? AND p.status='active' AND p.deleted_at IS NULL AND c.id<>?
                     AND (p.athlete_id=? OR tm.athlete_id=?) LIMIT 1""", (cat['event_id'], cid, aid, aid))
                 if hit:
                     raise conflict(f"{a['name']}已参加「{hit['name']}」，不可兼项", code='athlete_already_entered')
@@ -111,6 +110,7 @@ def validate_categories(conn, category_ids):
 def athlete_categories(conn, athlete_id):
     return [r['category_id'] for r in db.q(conn, """SELECT DISTINCT p.category_id FROM participations p
         LEFT JOIN team_members tm ON tm.team_id=p.team_id WHERE p.status='active'
+        AND p.deleted_at IS NULL
         AND (p.athlete_id=? OR tm.athlete_id=?)""", (athlete_id, athlete_id))]
 
 

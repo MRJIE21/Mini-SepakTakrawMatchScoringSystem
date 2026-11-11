@@ -94,6 +94,7 @@ export function localIssues(model) {
   for (const person of model.people || []) {
     const name = String(person.name || '').trim();
     if (!name) { issues.push('人员名单中有运动员未填写姓名，请补全后再预览'); break; }
+    if ([...name].length > 50) { issues.push('姓名长度须为 1–50 个字符，请修正后再预览'); break; }
     const conflicts = (occupied.get(person.key) || [])
       .filter((cat) => person.gender && cat.gender && person.gender !== cat.gender);
     if (conflicts.length) {

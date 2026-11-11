@@ -40,8 +40,6 @@ KEY_TABLES = (
     "teams", "participations", "matches", "placements", "school_points",
     "individual_results", "submissions", "audit_logs", "request_log",
     "display_screens", "display_pair_codes", "display_live",
-    "result_candidates", "candidate_heads", "review_decisions", "review_receipts",
-    "official_versions", "review_grants", "recording_epochs", "result_disputes", "review_recusals",
 )
 
 _CHUNK = 1024 * 1024
@@ -109,43 +107,12 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
 
 
-#: 判断“当前库损坏/不可读”的错误特征；restore 遇到此类错误时允许继续恢复。
-_CORRUPTION_HINTS = (
-    "file is not a database",
-    "database disk image is malformed",
-    "not a database",
-    "unable to open database file",
-    "database is locked",
-)
-
-
-def _looks_corrupt(message: str) -> bool:
-    text = str(message or "").lower()
-    return any(hint in text for hint in _CORRUPTION_HINTS)
-
-
-#: 账号/权限真源列：只比较这些列，记账列 snapshot_revision 与 created_at 不参与。
-_USER_AUTHORITY_COLUMNS = ("id", "username", "password_hash", "salt",
-                           "display_name", "role", "active")
-
-
-def _user_authority_rows(conn: sqlite3.Connection) -> list[tuple]:
-    columns = [row[1] for row in conn.execute("PRAGMA table_info(users)")]
-    chosen = [name for name in _USER_AUTHORITY_COLUMNS if name in columns]
-    if not chosen:
-        raise RestoreError("用户表结构无法识别，不能校验账号/权限真源")
-    return [tuple(row) for row in conn.execute(
-        f"SELECT {','.join(chosen)} FROM users ORDER BY id")]
-
-
 def inspect_database(path: Path | str) -> dict:
     """检查单个数据库文件：完整性、外键、表集合、关键计数与部署标识。"""
     target = Path(path)
     result = {"integrity": "error", "foreign_keys": 0, "tables": [],
               "user_version": 0, "counts": {}, "deployment_id": None,
-              "error": None, "page_size": 0, "page_count": 0, "page_bytes": 0,
-              "file_bytes": target.stat().st_size if target.is_file() else 0,
-              "trailing_garbage_bytes": 0}
+              "error": None}
     if not target.is_file():
         result["error"] = "文件不存在"
         return result
@@ -172,18 +139,6 @@ def inspect_database(path: Path | str) -> dict:
             row = conn.execute("SELECT v FROM settings WHERE k = 'deployment_id'").fetchone()
             if row is not None:
                 result["deployment_id"] = row[0]
-        # 尾部多余字节检查：SQLite 有效数据 = page_count * page_size。
-        # 文件比有效页更大说明被追加/拼接（WAL 模式下文件可能更小，不算异常）。
-        try:
-            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
-            page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
-            result["page_size"] = page_size
-            result["page_count"] = page_count
-            result["page_bytes"] = page_size * page_count
-            trailing = result["file_bytes"] - result["page_bytes"]
-            result["trailing_garbage_bytes"] = trailing if trailing > page_size else 0
-        except sqlite3.Error:
-            pass
     except sqlite3.Error as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
@@ -332,25 +287,12 @@ def build_archive(output_dir: Path | str | None = None,
 
     entries = _source_entries(db_path, events_dir)
     files: list[dict] = []
-    warnings: list[str] = []
     try:
         for relative, role, event_id, source in entries:
             target = destination / Path(relative)
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(target.name + ".tmp")
             try:
-                # 源文件尾部多余字节不进入 SQLite 有效页，但说明文件被追加/拼接；
-                # 备份前明确告警，避免“备份/校验通过”掩盖源文件异常。
-                try:
-                    source_info = inspect_database(source)
-                except Exception:  # noqa: BLE001 - 源库不可读时由快照步骤给出明确错误
-                    source_info = {}
-                if (source_info.get("trailing_garbage_bytes") or 0) > 0:
-                    warnings.append(
-                        f"源数据库 {relative} 文件尾部存在多余字节"
-                        f"（有效页 {source_info.get('page_bytes')} 字节 / 文件 "
-                        f"{source_info.get('file_bytes')} 字节），可能被追加或损坏；"
-                        f"已按 SQLite 有效页生成备份，建议核对源文件")
                 _snapshot_database(source, temporary)
                 info = inspect_database(temporary)
                 if info["error"]:
@@ -394,6 +336,7 @@ def build_archive(output_dir: Path | str | None = None,
             "files": files,
         }
         _write_json_atomic(destination / MANIFEST_NAME, manifest)
+        warnings = []
         registry_deployment = files[0].get("deployment_id") if files else None
         for item in files[1:]:
             if item.get("deployment_id") and registry_deployment and item["deployment_id"] != registry_deployment:
@@ -494,12 +437,6 @@ def verify_archive(archive_dir: Path | str) -> dict:
 
     warnings = []
     for relative, info in infos.items():
-        # 归档文件尾部多余字节：SQLite 备份通常只含有效页；出现时提示人工核对。
-        if (info.get("trailing_garbage_bytes") or 0) > 0:
-            warnings.append(
-                f"备份数据库 {relative} 文件尾部存在多余字节"
-                f"（有效页 {info.get('page_bytes')} 字节 / 文件 {info.get('file_bytes')} 字节），"
-                f"可能来自被追加的源文件或拷贝损坏，请人工核对")
         if relative == REGISTRY_NAME:
             continue
         database_deployment = info.get("deployment_id")
@@ -555,17 +492,22 @@ def _verify_restored(manifest: dict, db_path: Path, events_dir: Path) -> dict:
             event_ids_in_archive.add(int(match.group(1)))
 
     registry_events: dict[int, str] = {}
+    archived_events = set()
     registry_tables = inspect_database(db_path)["tables"]
     if "events" in registry_tables:
         conn = _connect_readonly(db_path)
         try:
+            if "event_deletion_history" in registry_tables:
+                archived_events = {int(row[0]) for row in conn.execute("SELECT event_id FROM event_deletion_history")}
             for row in conn.execute("SELECT id, uuid FROM events ORDER BY id"):
                 registry_events[int(row[0])] = str(row[1] or "")
         finally:
             conn.close()
     for event_id in sorted(event_ids_in_archive):
-        if event_id not in registry_events:
+        if event_id not in registry_events and event_id not in archived_events:
             warnings.append(f"赛事库 event_{event_id}.db 在恢复后的 registry 中没有对应赛事记录（文件保留，未删除）")
+    for event_id in sorted(archived_events - event_ids_in_archive):
+        warnings.append(f"历史赛事 {event_id} 缺少保留报名数据库")
     for event_id in sorted(set(registry_events) - event_ids_in_archive):
         warnings.append(f"registry 中的赛事 {event_id} 没有对应赛事库文件（可能从未创建或备份时缺失）")
     for path in canonical_event_files(events_dir):
@@ -577,125 +519,6 @@ def _verify_restored(manifest: dict, db_path: Path, events_dir: Path) -> dict:
         if path.is_file() and not EVENT_DB_NAME.fullmatch(path.name):
             warnings.append(f"赛事目录存在非赛事库文件（保留，未删除）：{path.name}")
     return {"warnings": warnings, "verified": True}
-
-
-def _guard_review_increments(archive: Path, manifest: dict, db_path: Path, events_dir: Path) -> list[str]:
-    """An older archive must never erase new review facts or revoked authority.
-
-    Immutable rows must survive byte-for-byte; mutable current heads/grants and
-    ownership epochs must also survive. A pre-restore archive is already saved
-    by the caller. Recovery without these facts requires a separate reconciled
-    archive, not an override flag.
-
-    当前库缺失/损坏时不阻断恢复（损坏库已无法保全任何事实），而是返回告警，
-    由调用方写入恢复输出并提示人工核对。
-    """
-    warnings: list[str] = []
-    protected = ('result_candidates','candidate_heads','review_decisions','review_receipts',
-                 'review_grants','recording_epochs','result_disputes','review_recusals','official_versions')
-    members = {_safe_relative(e.get('path')) for e in manifest['files']}
-    has_review_facts = False
-    for relative, _role, _eid, source in _source_entries(db_path, events_dir):
-        try:
-            current = _connect_readonly(source)
-        except sqlite3.Error as exc:
-            warnings.append(
-                f"当前数据库不可读，跳过复核事实保全校验：{relative}（{type(exc).__name__}: {exc}）；"
-                f"本次恢复按有效归档执行，请人工核对恢复后的正式结果")
-            continue
-        target = None
-        try:
-            tables = {r[0] for r in current.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            incoming = _archive_member(archive,relative) if relative in members else None
-            if incoming is not None:
-                target = _connect_readonly(incoming)
-            target_tables = {r[0] for r in target.execute("SELECT name FROM sqlite_master WHERE type='table'")} if target else set()
-            for table in protected:
-                if table not in tables:
-                    continue
-                suffix = ' WHERE legacy=0' if table=='official_versions' else ''
-                rows = {tuple(r) for r in current.execute(f'SELECT * FROM {table}{suffix}')}
-                if not rows:
-                    continue
-                has_review_facts = True
-                columns = [r[1] for r in current.execute(f'PRAGMA table_info({table})')]
-                if table not in target_tables:
-                    raise RestoreError(f'禁止丢失独立复核增量：{relative}/{table}；已保全当前备份，请前向修复或提供包含全部增量的恢复归档')
-                target_columns = [r[1] for r in target.execute(f'PRAGMA table_info({table})')]
-                if columns != target_columns:
-                    raise RestoreError(f'复核恢复结构不兼容：{relative}/{table}')
-                saved = {tuple(r) for r in target.execute(f'SELECT * FROM {table}{suffix}')}
-                if not rows.issubset(saved):
-                    raise RestoreError(f'禁止丢失或覆盖复核事实/权限状态：{relative}/{table}；请保留增量并核对恢复归档')
-        except sqlite3.Error as exc:
-            warnings.append(
-                f"当前数据库读取异常，跳过复核事实保全校验：{relative}（{type(exc).__name__}: {exc}）；"
-                f"本次恢复按有效归档执行，请人工核对恢复后的正式结果")
-        finally:
-            current.close()
-            if target is not None:
-                target.close()
-    if has_review_facts:
-        warnings.extend(_guard_review_authority(db_path, _archive_member(archive, REGISTRY_NAME)))
-    return warnings
-
-
-def _guard_review_authority(current_path: Path, incoming_path: Path) -> list[str]:
-    """Keep registry revocations when restoring event review facts.
-
-    A restore may invalidate a newer login, but may never reintroduce a token
-    absent from the live registry. Diagnostics deliberately exclude values.
-
-    只比较账号/权限真源列（snapshot_revision 属于同步记账计数，每次服务启动都会
-    +1，不应被误判为权限回退）；当前 registry 缺失/损坏时返回告警而不阻断恢复。
-    """
-    warnings: list[str] = []
-    try:
-        current = _connect_readonly(current_path)
-    except sqlite3.Error as exc:
-        return [f"当前 registry 不可读，跳过账号/权限真源保全校验：{current_path}"
-                f"（{type(exc).__name__}: {exc}）；请恢复后人工核对账号与授权"]
-    try:
-        incoming = _connect_readonly(incoming_path)
-    except sqlite3.Error as exc:
-        current.close()
-        raise RestoreError(f"恢复归档 registry 不可读：{incoming_path}（{exc}）") from exc
-    try:
-        try:
-            live_users = _user_authority_rows(current)
-            saved_users = _user_authority_rows(incoming)
-            if live_users != saved_users:
-                raise RestoreError('禁止回退独立复核账号/权限真源：users；请提供保全当前授权状态的恢复归档')
-            for table, selection in (
-                ('event identity', 'SELECT id,uuid FROM events'),
-                ('event scope', "SELECT k,v FROM settings WHERE k LIKE 'access:user:%'"),
-            ):
-                live = {tuple(r) for r in current.execute(selection)}
-                saved = {tuple(r) for r in incoming.execute(selection)}
-                if live != saved:
-                    raise RestoreError(f'禁止回退独立复核账号/权限真源：{table}；请提供保全当前授权状态的恢复归档')
-            live_tokens = {tuple(r) for r in current.execute('SELECT * FROM tokens')}
-            saved_tokens = {tuple(r) for r in incoming.execute('SELECT * FROM tokens')}
-            if not saved_tokens.issubset(live_tokens):
-                raise RestoreError('禁止恢复已撤销的独立复核登录凭据；请保全当前账号权限真源')
-
-            def high_water(conn):
-                row = conn.execute('SELECT v FROM settings WHERE k=?', (clock.HIGH_WATER_KEY,)).fetchone()
-                try:
-                    return float(row[0]) if row else 0
-                except (ValueError, TypeError):
-                    raise RestoreError('复核恢复时钟真源无效，请核对恢复归档') from None
-            if high_water(incoming) < high_water(current):
-                raise RestoreError('禁止回退独立复核时钟高水位；请保全当前凭据失效边界')
-        except sqlite3.Error as exc:
-            # 当前 registry 损坏/半损坏：无法读取真源，跳过校验并告警，不阻断恢复。
-            return [f"当前 registry 读取异常，跳过账号/权限真源保全校验：{current_path}"
-                    f"（{type(exc).__name__}: {exc}）；"
-                    f"本次恢复按有效归档执行，请恢复后人工核对账号与授权"]
-    finally:
-        current.close()
-        incoming.close()
-    return warnings
 
 
 def restore_archive(archive_dir: Path | str,
@@ -733,23 +556,10 @@ def restore_archive(archive_dir: Path | str,
         if db_path.is_file():
             stamp = clock.utc_now().strftime("%Y%m%d-%H%M%S")
             snapshot_dir = _unique_directory(_backups_root(db_path) / f"pre-restore-{stamp}")
-            try:
-                snapshot = build_archive(snapshot_dir, data_dir=data_dir,
-                                         db_path=db_path, events_dir=events_dir)
-            except BackupError as exc:
-                # 灾难恢复场景：当前库已损坏时无法生成恢复前快照。
-                # 不能因此阻断“从有效归档恢复”这一唯一可用路径；明确告警并继续。
-                if not _looks_corrupt(str(exc)):
-                    raise
-                snapshot_warnings.append(
-                    f"当前数据库无法生成恢复前快照（可能已损坏）：{exc}；"
-                    f"已继续从备份恢复，本次恢复没有可回滚的恢复前快照，请人工核对结果")
-                shutil.rmtree(snapshot_dir, ignore_errors=True)
-            else:
-                pre_snapshot = snapshot["archive_dir"]
-                snapshot_warnings = list(snapshot.get("warnings") or [])
-
-        snapshot_warnings.extend(_guard_review_increments(archive, manifest, db_path, events_dir))
+            snapshot = build_archive(snapshot_dir, data_dir=data_dir,
+                                     db_path=db_path, events_dir=events_dir)
+            pre_snapshot = snapshot["archive_dir"]
+            snapshot_warnings = list(snapshot.get("warnings") or [])
 
         restored: list[str] = []
         removed_sidecars: list[str] = []

@@ -42,15 +42,15 @@ def _roster(conn, cid):
         a.name AS name,s.name AS school_name,s.short_name AS school_short
         FROM participations p JOIN athletes a ON a.id=p.athlete_id
         JOIN schools s ON s.id=a.school_id WHERE p.category_id=? AND p.status='active'
+        AND p.deleted_at IS NULL
         ORDER BY p.id''', (cid,)))
 
 
 def _locked_reason(conn, cid):
     """开赛保护：已领取记录、已有成绩或名次时不得继续抽取或确认。"""
-    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='result_candidates'") and db.q1(
-            conn,'SELECT id FROM result_candidates WHERE category_id=? LIMIT 1',(cid,)):
+    if db.q1(conn, 'SELECT k FROM settings WHERE k=?', (f'recording:individual_project:{cid}',)):
         return ORDERING_LOCK
-    if db.q1(conn, '''SELECT p.id FROM participations p WHERE p.category_id=? AND
+    if db.q1(conn, '''SELECT p.id FROM participations p WHERE p.category_id=? AND p.deleted_at IS NULL AND
         (EXISTS(SELECT 1 FROM settings s WHERE s.k='recording:individual:' || p.id)
         OR EXISTS(SELECT 1 FROM individual_results r WHERE r.participation_id=p.id)
         OR EXISTS(SELECT 1 FROM placements r WHERE r.participation_id=p.id)) LIMIT 1''', (cid,)):
@@ -154,6 +154,8 @@ def read(conn, cid):
 def create(conn, cid, user):
     """建立空顺序会话；每项目至多一份，已存在活动会话或不可抽签时明确拒绝。"""
     _category(conn, cid)
+    if db.q1(conn, 'SELECT category_id FROM manual_result_sets WHERE category_id=?', (cid,)):
+        raise conflict('已录入人工出场顺序，请通过导入显式覆盖，不能自动重新抽取', code='manual_result_final')
     if _read_session(conn, cid):
         raise conflict('本项目已有进行中的抽取过程，请继续或先撤销', code='draw_session_exists')
     locked = _locked_reason(conn, cid)

@@ -20,8 +20,7 @@ Windows 推荐双击 start.cmd。同一数据目录只允许一个服务实例�
 明确报错（含占用 PID/端口）并以非零码退出，不再静默改用备用端口；显式端口
 被占用时请按提示用 netstat -ano | findstr :端口 查看占用进程。
 
-首次启动只创建管理员账号 admin：密码取自环境变量 STSS_ADMIN_PASSWORD；
-未设置时生成随机初始密码并只在启动控制台显示一次，请登录后立即修改。
+首次启动只创建管理员账号 admin，使用固定初始密码，启动输出不显示密码。
 其他角色账号由管理员在页面中创建。
 
 后端只使用 Python 标准库，无需安装任何依赖，Python 3.10+ 即可运行。
@@ -32,7 +31,6 @@ import argparse
 import errno
 import os
 import shutil
-import sqlite3
 import sys
 import traceback
 from pathlib import Path
@@ -66,10 +64,7 @@ def reset_admin_password(password: str) -> int:
                 uid = admin['id']
                 security.set_password(conn, uid, password)
                 security.revoke_user_tokens(conn, uid)
-                # 该入口同时作为“管理员被停用/降级后”的离线兜底：恢复角色与启用状态，
-                # 否则改完密码也无法登录（update_user 已阻止停用最后一个启用管理员）。
-                conn.execute("UPDATE users SET role='admin', active=1 WHERE id=?", (uid,))
-                print("admin 密码已重设，该账号原有登录状态已失效（角色与启用状态已恢复）")
+                print("admin 密码已重设，该账号原有登录状态已失效")
             db.sync_user_to_event_databases(conn, uid)
     finally:
         conn.close()
@@ -249,6 +244,23 @@ def main() -> int:
     if args.db:
         config.DB_PATH = Path(args.db)
 
+    baseline_file = Path(__file__).resolve().parent / 'BASELINE_MODE.json'
+    if baseline_file.exists() and not args.command:
+        import json
+        policy = json.loads(baseline_file.read_text(encoding='utf-8'))
+        if policy.get('maintenance'):
+            print('Clean baseline maintenance is in progress; startup is disabled.', file=sys.stderr)
+            return 2
+        test_root = Path(__file__).resolve().parent / 'test_environment'
+        if not policy.get('allow_test_environment', False) and (
+                os.environ.get('STSS_ENV', '').lower() in ('test', 'development')
+                or config.DATA_DIR.resolve().is_relative_to(test_root)
+                or config.DB_PATH.resolve().is_relative_to(test_root)
+                or config.EVENTS_DIR.resolve().is_relative_to(test_root)
+                or args.port == 18081 or config.PORT == 18081):
+            print('Test environment startup is disabled by the clean baseline policy.', file=sys.stderr)
+            return 2
+
     if args.command == "backup":
         return _command_backup(args)
     if args.command == "verify":
@@ -265,7 +277,7 @@ def main() -> int:
         try:
             lock = instance_lock.acquire(config.DATA_DIR, port=requested_port)
         except instance_lock.InstanceLockError as exc:
-            print(f"\n{_command_label()}失败：{exc}", file=sys.stderr)
+            print(f"\n启动失败：{exc}", file=sys.stderr)
             _log_error("单实例锁冲突", exc)
             return 1
         _log_info("已获取实例锁：%s（pid=%s, port=%s）", lock.path, lock.pid, lock.port)
@@ -281,14 +293,7 @@ def main() -> int:
             print(f"删除赛事数据库目录：{events_dir}")
             shutil.rmtree(events_dir)
 
-        try:
-            db.init_db()
-        except sqlite3.DatabaseError as exc:
-            # 全局索引库损坏时给出文件名、备份目录与可操作步骤（与赛事库损坏提示对齐）。
-            raise RuntimeError(
-                f"全局索引库损坏或不可读：{config.DB_PATH}；请停服后从 "
-                f"{config.backups_dir()} 恢复备份，或移出该文件后重新启动让系统重建空索引库。"
-                f"原始错误：{exc}") from exc
+        db.init_db()
 
         if args.set_admin_password:
             return reset_admin_password(args.set_admin_password)
@@ -321,40 +326,17 @@ def _log_info(message: str, *args) -> None:
         pass
 
 
-_COMMAND_LABELS = {"backup": "备份", "verify": "校验", "restore": "恢复", "maintenance": "维护"}
-
-
-def _command_label() -> str:
-    """按当前子命令/动作返回失败提示前缀；无子命令时为“启动”。"""
-    args = sys.argv[1:]
-    for value in args:
-        if value in _COMMAND_LABELS:
-            return _COMMAND_LABELS[value]
-    if "--set-admin-password" in args:
-        return "改密"
-    if "--init-db" in args:
-        return "初始化"
-    if "--reset-db" in args:
-        return "重置数据库"
-    return "启动"
-
-
 def entrypoint() -> int:
     """双击启动失败时显示诊断；命令行/重定向执行不等待输入。"""
     _configure_logging()
-    label = _command_label()
     try:
         return main()
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
-        _log_error(f"{label}失败", exc)
-        # 已知的、带可操作提示的业务/系统错误只输出结论，不打印内部堆栈；
-        # 未预期异常保留 traceback 便于排查。
-        expected = isinstance(exc, (RuntimeError, OSError, sqlite3.DatabaseError))
-        if not expected:
-            traceback.print_exc()
-        print(f"\n{label}失败：{exc}", file=sys.stderr)
+        _log_error("启动失败", exc)
+        traceback.print_exc()
+        print(f"\n启动失败：{exc}", file=sys.stderr)
         port_busy = getattr(exc, "winerror", None) in (10013, 10048) or getattr(
             exc, "errno", None) in (errno.EACCES, errno.EADDRINUSE)
         if isinstance(exc, OSError) and port_busy:
@@ -363,8 +345,7 @@ def entrypoint() -> int:
                   file=sys.stderr)
             print(f"Windows 可运行 netstat -ano | findstr :{port} 查看占用进程，"
                   "结束占用进程或以 --port 指定其他端口后重试。", file=sys.stderr)
-        print("请保留上方错误信息以便排查。" if not expected else "请按上方提示处理后重试。",
-              file=sys.stderr)
+        print("请保留上方错误信息以便排查。", file=sys.stderr)
         if os.name == 'nt' and sys.stdin is not None and sys.stdin.isatty() and not os.environ.get('STSS_LAUNCHER'):
             try:
                 input("按回车键关闭窗口……")

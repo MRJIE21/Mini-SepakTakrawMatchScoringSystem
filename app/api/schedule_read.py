@@ -20,7 +20,8 @@ def plan_detail(conn, plan, include_matches=True, include_pools=None) -> dict:
         for m in db.q(conn, """SELECT pm.*,p.team_id,COALESCE(t.name,a.name) AS subject,
             COALESCE(NULLIF(s.short_name,''),s.name) AS school FROM pool_members pm
             JOIN pools po ON po.id=pm.pool_id JOIN stages st ON st.id=po.stage_id
-            JOIN participations p ON p.id=pm.participation_id LEFT JOIN teams t ON t.id=p.team_id
+            JOIN participations p ON p.id=pm.participation_id AND p.deleted_at IS NULL
+            LEFT JOIN teams t ON t.id=p.team_id
             LEFT JOIN athletes a ON a.id=p.athlete_id LEFT JOIN schools s ON s.id=COALESCE(t.school_id,a.school_id)
             WHERE st.plan_id=? ORDER BY pm.seed_no IS NULL,pm.seed_no,pm.id""", (plan['id'],)):
             members_by_pool[m['pool_id']].append({'participation_id': m['participation_id'],

@@ -42,7 +42,7 @@ def _inline_cell(row: int, column: int, value: str, style: int = 0) -> str:
 def _number_cell(row: int, column: int, value) -> str:
     ref = _cell_ref(row, column)
     if isinstance(value, float):
-        if value.is_integer():
+        if value.is_integer() and abs(value) <= 2**53:
             value = int(value)
         else:
             return f'<c r="{ref}"><v>{value!r}</v></c>'

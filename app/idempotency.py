@@ -47,10 +47,6 @@ def replay_or_run(conn: sqlite3.Connection, user, uid: str, payload, fn, scope: 
     if not uid:
         return fn()
 
-    if db.q1(conn,"SELECT name FROM sqlite_master WHERE type='table' AND name='review_receipts'") and db.q1(
-            conn,'SELECT uid FROM review_receipts WHERE uid=?',(uid,)):
-        raise conflict('该标识已用于成绩候选或复核决定，请核对原请求',code='request_uid_reused')
-
     row = db.q1(conn, "SELECT * FROM request_log WHERE uid = ?", (uid,))
     digest = content_hash(payload)
     if row is not None:
@@ -61,6 +57,8 @@ def replay_or_run(conn: sqlite3.Connection, user, uid: str, payload, fn, scope: 
                 code="request_uid_reused",
                 detail={"request_uid": uid},
             )
+        if row["status"] == "conflict" and row["message"] == "school_cascade_deleted":
+            raise conflict("原请求关联的学校或报名已级联删除，请重新读取", code="school_cascade_deleted")
         result = json.loads(row["result_json"] or "{}")
         result["replayed"] = True
         return result

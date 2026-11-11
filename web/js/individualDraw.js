@@ -13,6 +13,9 @@
 */
 import { api, captureRequestContext, newUid, payloadHash } from './api.js';
 import { localStore } from './store.js';
+import { drawPool } from './drawDisplayModel.js';
+import { drawFlowNavigation } from './drawDisplay.js';
+import { openResultImport } from './resultImport.js';
 import {
   h, clear, table, toast, confirmAsync, setPageLeaveGuard, setRouterBlockGuard, errorState, statusBadge,
   categoryLabel,
@@ -45,6 +48,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
   let offline = !!initialOffline;
   let cachedAt = '';
   let errorMessage = '';
+  let readFailure = '', poolAllowed = canManage;
   let notice = '';
   let busy = false;
   let lastRevealedId = null;
@@ -58,10 +62,12 @@ export async function mountIndividualDraw({ container, category, roster: initial
   let fullscreenMessage = '';
   let fullscreenButtonEl = null;
   let panelElement = null;
+  let activeSection = null;
 
   const options = () => ({ context: requestContext, signal });
   const postOptions = () => ({ context: requestContext });
-  const schoolOf = (row) => row?.school_short || row?.school_name || '学校未填';
+  const schoolOf = (row) => row?.school_name || row?.school_short || '学校未填';
+  const personOf = (row) => row?.name || row?.subject || row?.athlete_name || '姓名待补充';
   const reducedMotion = () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
   const rows = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
 
@@ -132,12 +138,12 @@ export async function mountIndividualDraw({ container, category, roster: initial
 
   /* ---------------------------------------------------------------- 派生状态 */
   const revealedRows = () => rows(session?.revealed);
-  const candidateRows = () => (session ? rows(session.candidates)
-    : (roster || []).filter((row) => !row.status || row.status === 'active'));
+  const candidateRows = () => !poolAllowed ? [] : drawPool(session ? rows(session.candidates) : (roster || []))
+    .map(row => ({ ...row, name: personOf(row) }));
   const sessionTotal = () => rows(session?.session_roster || session?.roster).length;
   const totalCount = () => {
     if (session) return sessionTotal() || (Number(session.picked || 0) + Number(session.remaining || 0));
-    return (roster || []).length || rows(official?.entries).length;
+    return roster !== null && poolAllowed ? drawPool(roster).length : rows(official?.entries).length;
   };
   const pickedCount = () => (session ? Number(session.picked || revealedRows().length || 0) : 0);
   const blockedReason = () => (session && (session.stale || session.block_reason)
@@ -150,7 +156,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
   const lockReason = () => (session ? blockedReason()
     : (official && official.can_draw === false
       ? (official.block_reason || '已有成绩或记录任务领取，不能重新抽签') : ''));
-  const canAct = () => canManage && !offline && !busy && !pending
+  const canAct = () => canManage && poolAllowed && !readFailure && !offline && !busy && !pending
     && !(!session && official?.can_draw === false);
 
   function applySession(next, { revealId = null } = {}) {
@@ -196,7 +202,10 @@ export async function mountIndividualDraw({ container, category, roster: initial
     try {
       const result = await api.get(path, options());
       if (!alive()) return;
-      official = result.draw || null;
+      if (!result.draw || result.draw.category_id !== category.id || !Array.isArray(result.draw.entries)
+          || !['none', 'current', 'stale'].includes(result.draw.status) || !Number.isSafeInteger(result.draw.revision)
+          || result.draw.revision < 0) throw new Error('正式出场顺序读取不完整或项目不一致');
+      official = result.draw;
       offline = false;
       cachedAt = new Date().toLocaleString();
       await localStore.cachePut({ key: cacheKey, data: { ...official, cached_at: cachedAt } }).catch(() => null);
@@ -211,36 +220,46 @@ export async function mountIndividualDraw({ container, category, roster: initial
   }
 
   async function refreshSession({ quiet = false } = {}) {
-    if (!canManage || offline) return;
+    if (!canManage || offline) return true;
     try {
       const result = await api.get(sessionPath, options());
       if (!alive()) return;
+      if (!Object.hasOwn(result, 'session') || result.session && (!Number.isSafeInteger(result.session.session_id)
+          || !Array.isArray(result.session.candidates) || !Array.isArray(result.session.revealed))) throw new Error('抽取进度读取不完整');
       lastSessionAt = Date.now();
       /* 有待核实原包时不覆盖 recovering，避免把未确认请求当成没发生过 */
       if (!pending) applySession(result?.session || null);
+      return true;
     } catch (error) {
       if (!alive()) return;
-      if (error.offline) { offline = true; return; }
-      /* 只读角色（403）沿用正式签表查看权限：不报错、不显示操作 */
-      if (error.status === 403 || error.status === 401) { session = null; phase = pending ? 'recovering' : 'idle'; return; }
-      if (!quiet) errorMessage = error.message;
+      if (error.offline) offline = true;
+      if (error.status === 403 || error.status === 401) {
+        session = null; roster = null; poolAllowed = false; phase = pending ? 'recovering' : 'idle';
+      }
+      readFailure = `抽取进度读取失败：${error.message}。请刷新状态后重试。`;
+      return false;
     }
   }
 
   async function loadRemote({ quiet = false } = {}) {
+    readFailure = '';
     try { await readOfficial(); }
-    catch (error) { if (alive() && !quiet) errorMessage = error.message; }
+    catch (error) { if (alive()) readFailure = `出场顺序读取失败：${error.message}。当前保留上次成功读取的内容，请重试。`; }
     if (!alive()) return;
     await refreshSession({ quiet });
+    if (canManage && poolAllowed && !offline && !session) await loadRoster(true);
   }
 
-  async function loadRoster() {
-    if (!canManage || roster) return;
+  async function loadRoster(force = false) {
+    if (!canManage || !poolAllowed || offline || roster && !force) return;
     try {
       const result = await api.get(`/api/categories/${category.id}/participations`, options());
       if (!alive()) return;
-      roster = rows(result.participations);
-    } catch { /* 候选人数只是展示；读取失败不阻塞抽签本身 */ }
+      drawPool(result.participations);
+      roster = result.participations;
+    } catch (error) {
+      if (alive()) readFailure = `抽签池读取失败：${error.message}。请刷新状态后重试。`;
+    }
   }
 
   /* ---------------------------------------------------------------- 回执校验 */
@@ -310,6 +329,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
 
   async function perform(op) {
     if (!alive() || busy) return false;
+    if (readFailure) { errorMessage = '请先刷新抽签状态并完成读取，再继续操作。'; draw(); return false; }
     if (offline) { errorMessage = '当前离线：抽取与确认已禁用，恢复联网后再继续。'; draw(); return false; }
     if (op !== 'start' && (!session || session.session_id == null)) {
       errorMessage = '抽取过程已不存在，请刷新状态后重新开始。'; draw(); return false;
@@ -549,6 +569,8 @@ export async function mountIndividualDraw({ container, category, roster: initial
   /* ---------------------------------------------------------------- 渲染 */
   function mainLabel(total, picked) {
     const next = Math.min(picked + 1, Math.max(total, 1));
+    if (readFailure) return '读取失败，请刷新状态';
+    if (!canManage) return '出场顺序显示';
     if (!total) return '当前没有有效报名，不能抽签';
     if (officialLocked() && phase === 'idle') return '正式出场顺序已确认';
     if (phase === 'starting') return '正在建立抽取过程…';
@@ -563,6 +585,8 @@ export async function mountIndividualDraw({ container, category, roster: initial
   }
 
   function liveText(total, picked) {
+    if (!canManage) return official?.status === 'stale' ? '旧出场顺序已失效，请重新核对。'
+      : rows(official?.entries).length ? `正式出场顺序已保存，共 ${official.entries.length} 位参赛人员。` : '尚未保存正式出场顺序。';
     if (phase === 'revealed' || phase === 'complete') {
       const latest = revealedRows().at(-1);
       if (latest) return `第 ${latest.draw_order} 位已揭晓：${latest.name}（${schoolOf(latest)}）；已抽 ${picked} / ${total} 人`;
@@ -577,11 +601,12 @@ export async function mountIndividualDraw({ container, category, roster: initial
       { label: '出场序号', key: 'draw_order', align: 'num' },
       { label: '学校', render: (row) => row.school_short || row.school_name },
       { label: '运动员', key: 'name' },
-    ], rows(entries));
+    ], [...rows(entries)].sort((a, b) => (a.draw_order ?? Infinity) - (b.draw_order ?? Infinity)));
   }
 
   function draw() {
     if (!alive()) return;
+    const manual = official?.source === 'manual';
     stopRoll();
     rollNameEl = null;
     rollSchoolEl = null;
@@ -603,6 +628,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
     const panel = existing;
     panelElement = panel;
     const locked = officialLocked();
+    activeSection ||= session ? 'process' : official?.entries?.length || !canManage ? 'result' : 'pool';
     panel.dataset.drawPhase = phase;
     panel.dataset.drawPicked = String(picked);
     panel.dataset.drawTotal = String(total);
@@ -610,12 +636,14 @@ export async function mountIndividualDraw({ container, category, roster: initial
     fullscreenButtonEl = null;
 
     panel.append(h('div.panel-head',
-      h('div', h('h3', locked
-          ? `正式出场顺序已确认（${total} 人 · 第 ${official.revision} 版）`
+      h('div', h('h3', manual ? `人工出场顺序（${official.entries.length} 人 · 第 ${official.revision} 版）` : locked
+          ? official.status === 'stale' ? '出场顺序已失效，请重新核对' : `正式出场顺序已确认（${total} 人 · 第 ${official.revision} 版）`
           : '个人赛出场顺序'),
         h('div.small.muted', `${categoryLabel(category, { withGroup: true })} · 共 ${total || '—'} 人`)),
       h('div.row.tight',
-        official?.entries?.length ? statusBadge(`正式签表 · 第 ${official.revision} 版`, 'ok') : statusBadge('尚未保存正式顺序', ''),
+        canManage && activeSection !== 'pool' ? h('button.btn.small', { disabled: busy || !!pending || offline,
+          onclick: () => openResultImport(category, async () => { await onRefreshClick(); await onSaved(); }, { isCurrent: alive }) }, '导入') : null,
+        official?.entries?.length ? statusBadge(`${official.status === 'stale' ? '旧签表 · 已失效' : '正式签表'} · 第 ${official.revision} 版`, official.status === 'stale' ? 'warn' : 'ok') : statusBadge('尚未保存正式顺序', ''),
         fullscreenButtonEl = h('button.btn.small', {
           disabled: busy,
           dataset: { drawFullscreen: 'true' },
@@ -623,18 +651,25 @@ export async function mountIndividualDraw({ container, category, roster: initial
           onclick: toggleFullscreen,
         }, fullscreenActive() ? '退出全屏' : '全屏显示'),
         h('button.btn.small', { disabled: busy, onclick: onRefreshClick }, '刷新状态'))));
+    const navigation = drawFlowNavigation(panel, '个人赛抽签环节', [
+      ...(poolAllowed ? [{ key: 'pool', label: '抽签池' }, { key: 'process', label: '抽签过程' }] : []),
+      { key: 'result', label: '出场顺序显示' },
+    ], activeSection, key => { activeSection = key; draw(); });
+    panel.append(navigation);
+    if (official?.source === 'manual') panel.append(h('p.small.muted', '本次为人工排序结果，排序号原值保留；本次写入行按文件行序展示，未修改的原记录随后保留。同号不判定先后，系统未做二次调整。'));
 
     /* 操作区固定在进度条正下方、所有可变内容之前：状态提示与名单只在它之后变化，
        因此从开始抽签到确认全程按钮停在同一条水平线上。 */
     panel.append(h('div.draw-progress',
       h('span.draw-progress-count', { dataset: { drawCount: String(picked) } },
-        locked ? `已确认 ${total} 人` : `已抽 ${picked} / ${total} 人`),
-      h('span.small.muted', locked
+        manual ? `已录入 ${official.entries.length} 人` : !canManage ? official?.status === 'stale' ? '旧顺序已失效' : rows(official?.entries).length ? `已保存 ${official.entries.length} 人` : '尚未保存正式顺序'
+          : locked ? `已确认 ${total} 人` : `已抽 ${picked} / ${total} 人`),
+      h('span.small.muted', manual ? `人工结果 · ${Math.max(total - official.entries.length, 0)} 人未入榜` : locked
         ? `第 ${official.revision} 版 · 已有成绩不可重抽`
-        : `未抽候选 ${Math.max(total - picked, 0)} 人`)));
+        : canManage ? `未抽候选 ${Math.max(total - picked, 0)} 人` : '只读查看正式结果')));
 
     const actions = h('div.row.tight.draw-actions.mt', { dataset: { drawActions: 'true' } });
-    if (canManage) {
+    if (canManage && !manual) {
       if (phase === 'idle' && session) {
         actions.append(h('button.btn.btn-primary', { disabled: !canAct() || candidateRows().length === 0,
           onclick: () => beginRoll() }, '开始抽签'));
@@ -645,7 +680,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
           onclick: () => startRound(),
         }, locked ? '重新抽签（已有成绩不可重抽）' : (rows(official?.entries).length ? '重新抽签' : '开始抽签')));
       } else if (phase === 'rolling') {
-        actions.append(h('button.btn.btn-primary', { disabled: busy || offline || !!pending,
+        actions.append(h('button.btn.btn-primary', { disabled: busy || offline || !!pending || !!readFailure,
           onclick: () => stopAndReveal() }, '停止并揭晓'));
       } else if (phase === 'revealed') {
         actions.append(h('button.btn.btn-primary', {
@@ -667,7 +702,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
         actions.append(h('button.btn', { disabled: true }, '抽取已禁用'));
       }
       if (session && phase !== 'picking' && phase !== 'starting' && phase !== 'confirming') {
-        actions.append(h('button.btn.btn-ghost', { disabled: busy || offline || !!pending,
+        actions.append(h('button.btn.btn-ghost', { disabled: busy || offline || !!pending || !!readFailure,
           onclick: () => askCancel() }, '放弃本次抽取'));
       }
     }
@@ -695,7 +730,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
     }
     /* 只读角色不显示锁定横幅（它们本来就没有操作按钮）；有管理权限时说明为何不能操作。
        can_draw=false 但没有正式签表（先领取/先有成绩）时也显示原因，避免按钮无故禁用。 */
-    if (canManage && !session && !offline && lockReason()) {
+    if (canManage && !manual && !session && !offline && lockReason()) {
       panel.append(h('div.warn-box.mb', { dataset: { drawLocked: 'true' } },
         locked
           ? `正式出场顺序已确认（第 ${official.revision} 版），已有成绩不可重抽。`
@@ -708,7 +743,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
         + '恢复联网后会先核实待确认请求与最新进度。'));
     }
 
-    const body = h('div.draw-body');
+    const body = h('div.draw-body', { 'data-draw-section': 'process' });
     const card = h('div.draw-main-card');
     card.append(h('div.draw-main-label', { dataset: { drawMainLabel: 'true' } }, mainLabel(total, picked)));
     if (phase === 'rolling') {
@@ -742,7 +777,8 @@ export async function mountIndividualDraw({ container, category, roster: initial
     } else if (phase === 'recovering') {
       card.append(h('div.small.muted', '结果待核实：请先用原请求核实，核实前不会继续抽取。'));
     } else {
-      card.append(h('div.small.muted', total
+      card.append(h('div.small.muted', readFailure ? '读取失败不代表没有报名或没有正式结果，请重试。' : !canManage
+        ? '此处仅展示已保存的正式出场顺序；未保存正式顺序不代表没有有效报名。' : total
         ? (locked
           ? `共 ${total} 位运动员的出场顺序已确认（第 ${official.revision} 版）。已有成绩或记录任务领取，不能重新抽签。`
           : lockReason()
@@ -753,13 +789,19 @@ export async function mountIndividualDraw({ container, category, roster: initial
     body.append(card);
 
     const lists = h('div.draw-columns');
-    lists.append(h('section.draw-card',
-      h('div.panel-head', h('h4', `未抽候选（${candidates.length}）`)),
-      candidates.length
-        ? h('ul.draw-candidates', ...candidates.map((row) => h('li',
-          h('span.draw-candidate-name', row.name || ''),
-          h('span.small.muted', `${schoolOf(row)} · 报名ID ${row.id}`))))
-        : h('p.small.muted', session ? '全部候选都已揭晓。' : '当前没有有效报名。')));
+    const poolRows = poolAllowed ? drawPool(roster || rows(session?.session_roster || session?.roster)) : [];
+    const pickedIds = new Set(revealed.map(row => row.id));
+    const poolSection = h('section.draw-card.mt', { 'data-draw-section': 'pool', 'aria-label': '个人赛抽签池' },
+      h('div.panel-head', h('h4', '抽签池'), h('span.small.muted', `有效报名 ${poolRows.length} 人`)),
+      readFailure || blockedReason() ? h('div.warn-box.mb', readFailure || blockedReason())
+        : offline ? h('div.warn-box.mb', '当前离线，显示上次读取的名单。') : null,
+      poolRows.length ? h('div.table-scroll', table([
+        { label: '选手', render: personOf },
+        { label: '学校', render: schoolOf },
+        { label: '报名编号', key: 'id' },
+        { label: '抽取状态', render: row => pickedIds.has(row.id) ? '已抽取' : '未抽取' },
+      ], poolRows, { class: 'draw-pool-table', responsive: true })) : h('p.muted', readFailure ? '抽签池读取失败，请刷新状态。' : '暂无有效报名'));
+    if (poolAllowed) panel.append(poolSection);
     lists.append(h('section.draw-card',
       h('div.panel-head', h('h4', `已抽名单（${revealed.length}）`)),
       revealed.length
@@ -772,26 +814,37 @@ export async function mountIndividualDraw({ container, category, roster: initial
         h('span.small.muted', schoolOf(row)))))
         : h('p.small.muted', '尚未揭晓：不显示完整排序，避免把名单顺序当成正式出场顺序。')));
     body.append(lists);
-    panel.append(body);
+    if (poolAllowed) {
+      if (manual) panel.append(
+        h('section.mt', { 'data-draw-section': 'process' }, h('h4', '人工结果录入'), h('p.small.muted', '结果由人工在线下确定，本次未执行系统抽签；维护结果请使用“导入”。')));
+      else panel.append(body);
+    }
 
     const live = h('div.draw-live', { 'aria-live': 'polite', 'aria-atomic': 'true' },
       h('div.draw-live-status', liveText(total, picked)),
+      readFailure ? h('div.warn-box', { role: 'alert', 'data-draw-read-error': 'true' }, readFailure) : null,
       errorMessage ? h('div.warn-box', { dataset: { drawError: 'true' } }, errorMessage) : null,
       notice ? h('div.info-box', { dataset: { drawNotice: 'true' } }, notice) : null);
     panel.append(live);
 
+    const resultSection = h('section.draw-result.mt', { 'data-draw-section': 'result', 'aria-label': '出场顺序显示' }, h('h3', '出场顺序显示'));
+    resultSection.dataset.resultStatus = readFailure ? 'read-failed' : offline ? 'cached' : official?.status || 'unknown';
+    panel.append(resultSection);
     if (rows(official?.entries).length) {
-      panel.append(h('details.draw-official.mt', {
+      resultSection.append(h('details.draw-official.mt', {
         open: phase === 'idle' && !rows(session?.revealed).length ? '' : null,
       }, h('summary', `正式签表（${rows(official.entries).length} 人 · 第 ${official.revision} 版`
         + `${official.confirmed_at ? ` · ${official.confirmed_at}` : ''}）`),
       h('div.table-scroll', orderTable(official.entries)),
       official.status === 'stale'
         ? h('div.warn-box.mt', '报名名单已变化，这份正式顺序基于旧名单；新加入的运动员尚未抽签。') : null));
-    }
-    panel.append(h('p.small.muted.mt', '出场序号只决定比赛顺序，与成绩名次分别保存。抽取过程可刷新或换设备继续。'));
+    } else if (readFailure) resultSection.append(h('p.muted', '正式出场顺序尚未读取成功，请刷新状态。'));
 
-    if (phase === 'rolling') startRoll();
+    for (const child of [...panel.children].slice([...panel.children].indexOf(navigation) + 1)) {
+      child.classList.toggle('hidden', child === poolSection ? activeSection !== 'pool'
+        : child === resultSection ? activeSection !== 'result' : activeSection !== 'process');
+    }
+    if (phase === 'rolling' && activeSection === 'process') startRoll();
   }
 
   async function onRefreshClick() {
@@ -815,7 +868,7 @@ export async function mountIndividualDraw({ container, category, roster: initial
     stopRoll();
     draw();
     if (!document.hidden && !offline && !pending && canManage) {
-      refreshSession({ quiet: true }).then(() => { if (alive()) draw(); }).catch(() => {});
+      loadRemote().then(() => { if (alive()) draw(); }).catch(() => {});
     }
   }
 
@@ -914,7 +967,6 @@ export async function mountIndividualDraw({ container, category, roster: initial
     if (cached?.data) { official = cached.data; cachedAt = cached.data.cached_at || cachedAt; }
     cachedAt = cachedAt || official?.cached_at || '上次';
   } else {
-    await loadRoster();
     await loadRemote({ quiet: true });
   }
   if (!alive()) return { update() {}, refresh: async () => {}, destroy: cleanup };

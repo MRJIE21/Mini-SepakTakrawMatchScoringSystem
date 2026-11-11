@@ -1,5 +1,18 @@
-/* 项目工作台上下文：只保存页面位置；名单、赛程和成绩由后台读取。
-   报名闭环统一收敛到工作台“报名名单”，因此这里的链接函数是唯一入口。 */
+/* 项目工作台上下文：阶段只控制页面位置，业务数据仍由后台读取。 */
+
+// 旧链接以业务页签定位；冲突时页签优先，避免旧待办丢失目的地。
+export function workspaceSection(params = {}) {
+  if (workspaceTab(params)) return workspaceTab(params) === 'registration' ? 'registration' : 'competition';
+  return params.section === 'competition' ? 'competition' : 'registration';
+}
+
+export function workspaceSectionLink(section, { event, group, category } = {}) {
+  const params = { section };
+  for (const [key, value] of Object.entries({ event, group, category })) {
+    if (value !== undefined && value !== null && value !== '') params[key] = value;
+  }
+  return `#/workspace?${new URLSearchParams(params)}`;
+}
 
 export function matchingCategory(categories, current) {
   return categories.find(c => c.kind === current.kind && c.gender === current.gender && c.name === current.name)
@@ -8,18 +21,13 @@ export function matchingCategory(categories, current) {
 }
 
 export function workspaceTab(params = {}) {
-  if (params.tab === 'preparation') return 'registration';
-  if (params.tab === 'rankings') return 'results';
-  /* 结构树重构兼容：旧 tasks/groups 收敛到概况/赛程，旧 review 由 workspace 跳转全局复核。 */
-  if (params.tab === 'tasks') return 'overview';
-  if (params.tab === 'groups') return 'schedule';
-  return params.tab === 'schedule' && params.view === 'groups' ? 'schedule' : params.tab;
+  return params.tab === 'schedule' && params.view === 'groups' ? 'groups' : params.tab;
 }
 
 export function workspaceLink(category, tab, options = {}) {
   const params = { event: category.event_id, group: category.group_id, category: category.id, tab, ...options };
   params.tab = workspaceTab(params);
-  if (params.tab !== 'schedule' || params.view === 'fixtures') delete params.view;
+  if (params.tab === 'groups' || params.tab === 'schedule' && params.view === 'fixtures') delete params.view;
   return `#/workspace?${new URLSearchParams(params)}`;
 }
 
@@ -30,12 +38,13 @@ export function groupWorkspaceLink(group, tab, options = {}) {
 }
 
 /* 学校报名详情固定落在工作台报名名单页签，取消勾选时回到同一组别的学校列表。 */
-export function workspaceSchoolLink({ eventId, groupId, categoryId = null, schoolId = null, profile = null }) {
+export function workspaceSchoolLink({ eventId, groupId, categoryId = null, schoolId = null, profile = null, schools = null }) {
   const params = { event: eventId, tab: 'registration' };
   if (groupId) params.group = groupId;
   if (categoryId) params.category = categoryId;
   if (schoolId) params.school = schoolId;
   if (profile === 'incomplete') params.profile = profile;
+  if (schools) params.schools = schools;
   return `#/workspace?${new URLSearchParams(params)}`;
 }
 

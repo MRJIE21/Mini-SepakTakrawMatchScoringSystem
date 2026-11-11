@@ -24,6 +24,7 @@ LIVE_TTL_SECONDS = 120
 LAST_SEEN_WRITE_SECONDS = 5
 ONLINE_WINDOW_SECONDS = 15
 SLOT_COUNT = 8
+DEFAULT_POLL_MS = 250
 MAX_LABEL_LENGTH = 40
 MAX_ANNOUNCEMENT_TITLE = 80
 MAX_ANNOUNCEMENT_BODY = 500
@@ -260,7 +261,7 @@ def claim_pair(conn: sqlite3.Connection, code: str, event_id: int, name: str,
 def _default_config() -> dict:
     return {"layout": 8, "mode": "score", "slots": [None] * SLOT_COUNT,
             "visible_slots": list(range(SLOT_COUNT)),
-            "announcement_title": "", "announcement_body": "", "poll_ms": 500,
+            "announcement_title": "", "announcement_body": "", "poll_ms": DEFAULT_POLL_MS,
             "revision": 0, "updated_at": "", "updated_by": None}
 
 
@@ -327,7 +328,7 @@ def _normalise_visible(value, layout: int) -> list:
     return visible
 
 
-def _normalise_poll_ms(value, fallback: int = 500) -> int:
+def _normalise_poll_ms(value) -> int:
     try:
         poll_ms = int(value)
     except (TypeError, ValueError):
@@ -352,9 +353,9 @@ def get_config(conn: sqlite3.Connection) -> dict:
         out["visible_slots"] = []
     out["slots"] = (out["slots"] + [None] * SLOT_COUNT)[:SLOT_COUNT]
     try:
-        out["poll_ms"] = _normalise_poll_ms(out.get("poll_ms", 500))
+        out["poll_ms"] = _normalise_poll_ms(out.get("poll_ms", DEFAULT_POLL_MS))
     except ApiError:
-        out["poll_ms"] = 500
+        out["poll_ms"] = DEFAULT_POLL_MS
     return out
 
 
@@ -377,7 +378,7 @@ def publish_config(conn: sqlite3.Connection, user_id: int | None, payload: dict)
     if len(title) > MAX_ANNOUNCEMENT_TITLE or len(body) > MAX_ANNOUNCEMENT_BODY:
         raise bad_request("公告内容过长")
     current = get_config(conn)
-    poll_ms = _normalise_poll_ms(payload.get("poll_ms", current.get("poll_ms", 500)))
+    poll_ms = _normalise_poll_ms(payload.get("poll_ms", current["poll_ms"]))
     revision = int(current.get("revision") or 0) + 1
     now = _now()
     values = {
@@ -422,10 +423,7 @@ def sync_live(conn: sqlite3.Connection, match_id: int, payload: dict) -> dict:
     existing = db.q1(conn, "SELECT * FROM display_live WHERE match_id = ?", (match_id,))
     event_seq = _int(payload.get("event_seq"), "事件序号")
     draft_uid = str(payload.get("draft_uid") or "").strip()
-    stream_epoch = _int(payload.get('stream_epoch',0),'直播流版本')
-    if existing is not None and stream_epoch < int(existing['stream_epoch']):
-        raise conflict('直播流已过期',code='stale_snapshot')
-    if existing is not None and stream_epoch == int(existing['stream_epoch']):
+    if existing is not None:
         if event_seq < int(existing["event_seq"]):
             raise conflict("快照已过期，旧记录不能覆盖新比分", code="stale_snapshot")
         if event_seq == int(existing["event_seq"]) and draft_uid and existing["draft_uid"] \
@@ -447,7 +445,6 @@ def sync_live(conn: sqlite3.Connection, match_id: int, payload: dict) -> dict:
         "lineup_hash": str(payload.get("lineup_hash") or "")[:64],
         "recorder_id": payload.get("recorder_id"),
         "draft_uid": draft_uid[:80],
-        "stream_epoch": stream_epoch,
         "updated_at": _now(),
         "expires_at": _after(LIVE_TTL_SECONDS),
         "expires_at_epoch": int(clock.utc_epoch()) + LIVE_TTL_SECONDS,
@@ -458,12 +455,12 @@ def sync_live(conn: sqlite3.Connection, match_id: int, payload: dict) -> dict:
         db.run(conn,
                "UPDATE display_live SET revision=?, event_seq=?, status=?, current_set=?, home_points=?, "
                "away_points=?, home_sets=?, away_sets=?, sets_json=?, lineup_hash=?, recorder_id=?, "
-               "draft_uid=?, updated_at=?, expires_at=?, expires_at_epoch=?,stream_epoch=? WHERE match_id=?",
+               "draft_uid=?, updated_at=?, expires_at=?, expires_at_epoch=? WHERE match_id=?",
                (values["revision"], values["event_seq"], values["status"], values["current_set"],
                 values["home_points"], values["away_points"], values["home_sets"], values["away_sets"],
                 values["sets_json"], values["lineup_hash"], values["recorder_id"],
                 values["draft_uid"], values["updated_at"], values["expires_at"],
-                values["expires_at_epoch"], values['stream_epoch'], match_id))
+                values["expires_at_epoch"], match_id))
     return live_row(conn, match_id)
 
 

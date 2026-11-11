@@ -29,12 +29,6 @@ ROUTES: list[tuple[str, str, object, tuple]] = []
 logger = logging.getLogger('stss.http')
 
 MAX_BODY = 4 * 1024 * 1024
-# 请求行（含方法+URI+协议版本）单行长度上限；与请求头 32KB 总预算相互独立。
-MAX_REQUEST_LINE = 65536
-# 声明 body 超过 MAX_BODY 时，最多再读取丢弃这么多字节再回 413：
-# 既让仍在发送的客户端收到可解析响应（避免关闭连接时 RST），又不无限读取。
-MAX_BODY_DISCARD = MAX_BODY + 1024 * 1024
-OVERSIZE_DISCARD_TIMEOUT = 2.0
 
 
 class Response:
@@ -140,20 +134,16 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         self.request_version, self.command, self.requestline = "HTTP/1.1", None, ""
         try:
-            self.raw_requestline = self._read_request_line()
+            self.raw_requestline = self.rfile.readline(65537)
+            if len(self.raw_requestline) > 65536:
+                raise ApiError(414, "uri_too_long", "请求路径过长")
             if not self.raw_requestline:
                 return
             if not self.parse_request():
                 return
             handler = getattr(self, "do_" + self.command, None)
             if handler is None:
-                # 标准库没有该方法的处理器：若同一路径存在其它方法的路由则回 405
-                # + Allow（如 PATCH /api/me），完全未知的方法仍保持 501 语义。
-                response = self._unknown_method_response()
-                if response is None:
-                    self.send_error(501, "Unsupported method")
-                else:
-                    self._send(response)
+                self.send_error(501, "Unsupported method")
                 return
             handler()
         except TimeoutError:
@@ -190,48 +180,6 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         finally:
             db.close_thread_connections()
-
-    # ---------------------------------------------------------------- 传输层语义
-    def _read_request_line(self):
-        """读请求行：单行长度独立判定 414，不计入请求头 32KB 总预算（P3-08）。"""
-        remaining = max(0.001, self.rfile.deadline - time.monotonic())
-        self.rfile.set_phase(remaining)          # max_bytes=None：单行由独立上限约束
-        line = self.rfile.readline(MAX_REQUEST_LINE + 1)
-        if len(line) > MAX_REQUEST_LINE:
-            raise ApiError(414, "uri_too_long", "请求路径过长")
-        remaining = max(0.001, self.rfile.deadline - time.monotonic())
-        self.rfile.set_phase(remaining, self.limits["max_headers"])
-        return line
-
-    def _allowed_methods(self, path):
-        """同一路径注册的所有 HTTP 方法（用于 405 的 Allow 响应头）。"""
-        methods = []
-        for method, pattern, _func, _roles, _public, _scope in ROUTES:
-            if method not in methods and pattern.match(path):
-                methods.append(method)
-        order = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-        return sorted(methods, key=lambda m: (order.index(m) if m in order else len(order), m))
-
-    def _method_not_allowed(self, method, path):
-        allowed = self._allowed_methods(path)
-        if not allowed:
-            return None
-        body = json.dumps({"ok": False, "code": "method_not_allowed",
-                           "message": f"接口不支持 {method} 方法",
-                           "outcome": self.business_outcome},
-                          ensure_ascii=False).encode("utf-8")
-        return Response(body, 405, "application/json; charset=utf-8",
-                        {"Allow": ", ".join(allowed)})
-
-    def _unknown_method_response(self):
-        """未实现的 HTTP 方法：路径有其它方法路由时返回 405，否则返回 None（501）。"""
-        raw_path = getattr(self, "path", "")
-        if not raw_path:
-            return None
-        path = unquote(urlparse(raw_path).path)
-        if not path.startswith("/api/"):
-            return None
-        return self._method_not_allowed(self.command or "", path)
 
     # ---------------------------------------------------------------- 入口
     def do_GET(self):
@@ -315,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
             db.close_thread_connections()
         self._send(response)
 
-    def _declared_length(self):
+    def _body_length(self):
         if self.headers.get("Transfer-Encoding"):
             raise ApiError(400, "unsupported_transfer_encoding", "请使用 Content-Length 提交 JSON")
         values = self.headers.get_all("Content-Length", [])
@@ -324,41 +272,13 @@ class Handler(BaseHTTPRequestHandler):
         raw_length = values[0] if values else "0"
         if not re.fullmatch(r"\d+", raw_length):
             raise ApiError(400, "bad_content_length", "Content-Length 格式错误")
-        return int(raw_length)
-
-    def _body_length(self):
-        length = self._declared_length()
+        length = int(raw_length)
         if length > MAX_BODY:
             raise ApiError(413, "too_large", "提交内容过大")
         return length
 
-    def _discard_oversize_body(self, length):
-        """有界丢弃超限请求体：最多读 MAX_BODY+1MB，带 15s/2s 期限与 0.5s 空闲超时。
-
-        直接关闭仍在发送 body 的连接会让 Windows 发 RST，客户端收不到 413 JSON；
-        先读掉已声明的数据再响应即可让对方拿到可解析的 413，同时用上限和期限
-        防止慢速攻击无限占用工作线程（P3-07）。
-        """
-        remaining = min(length, MAX_BODY_DISCARD)
-        previous_idle = self.rfile.idle_timeout
-        try:
-            self.rfile.set_phase(min(self.limits["body_timeout"], OVERSIZE_DISCARD_TIMEOUT))
-            self.rfile.idle_timeout = min(previous_idle, 0.5)
-            while remaining > 0:
-                chunk = self.rfile.read(min(65536, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-        except (TimeoutError, OSError):
-            pass
-        finally:
-            self.rfile.idle_timeout = previous_idle
-
     def _read_body(self) -> dict:
-        length = self._declared_length()
-        if length > MAX_BODY:
-            self._discard_oversize_body(length)
-            raise ApiError(413, "too_large", "提交内容过大")
+        length = self._body_length()
         if length <= 0:
             return {}
         self.rfile.set_phase(self.limits["body_timeout"])
@@ -381,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_api(self, method: str, path: str, parsed) -> Response:
         if method == "POST" and (path in ("/api/scoring/submit", "/api/scoring/individual") or
                                  re.fullmatch(r"/api/matches/\d+/(correction|correct|cancel|reset-review)", path)) \
-                and self.headers.get("X-Client-Protocol") not in ("2", "3"):
+                and self.headers.get("X-Client-Protocol") != "2":
             raise ApiError(426, "client_upgrade_required", "请保存或导出记录后升级记录页面再提交")
         registry_conn = db.get_conn()
         query = parse_qs(parsed.query)
@@ -428,33 +348,22 @@ class Handler(BaseHTTPRequestHandler):
             conn = registry_conn
             raw_event_id = ""
             if scope == "event":
-                # 事件作用域路由必须显式携带赛事标识：缺头时此前会静默使用 registry 连接，
-                # 导致写入落到索引库、事件库与页面都看不到（保存成功但刷新后“消失”）。
                 raw_event_id = self.headers.get("X-Event-ID") or ""
-                if not raw_event_id:
-                    raise ApiError(400, "missing_event_id", "请先选择赛事（请求缺少 X-Event-ID）")
-                try:
-                    event_id = int(raw_event_id)
-                except ValueError as exc:
-                    raise ApiError(400, "bad_event_id", "X-Event-ID 必须是赛事编号") from exc
-                path_event = re.match(r"/api/events/(\d+)", path)
-                if path_event and int(path_event.group(1)) != event_id:
-                    raise ApiError(409, "event_identity_mismatch", "请求路径赛事与 X-Event-ID 不一致")
-                try:
-                    conn = db.get_event_conn(event_id)
-                except (ValueError, FileNotFoundError) as exc:
-                    raise ApiError(404, "event_database_not_found", "当前赛事数据库不存在") from exc
-                event = db.q1(conn, "SELECT id, uuid FROM events WHERE id = ?", (event_id,))
-                if event is None:
-                    raise ApiError(409, "event_identity_mismatch", "请求赛事与目标数据库不一致")
-                event_uuid = self.headers.get("X-Event-UUID") or ""
-                if event_uuid and event_uuid != event["uuid"]:
-                    raise ApiError(409, "event_identity_mismatch", "请求携带的赛事身份与目标数据库不一致")
-                deployment_id = self.headers.get("X-Deployment-ID") or ""
-                local_deployment = db.q1(conn, "SELECT v FROM settings WHERE k = 'deployment_id'")
-                if deployment_id and (local_deployment is None or deployment_id != local_deployment["v"]):
-                    raise ApiError(409, "deployment_identity_mismatch", "请求来自其他部署或数据集，不能直接提交")
-                raw_event_id = str(event_id)
+                if raw_event_id:
+                    try:
+                        conn = db.get_event_conn(int(raw_event_id))
+                    except (ValueError, FileNotFoundError) as exc:
+                        raise ApiError(404, "event_database_not_found", "当前赛事数据库不存在") from exc
+                    event = db.q1(conn, "SELECT id, uuid FROM events WHERE id = ?", (int(raw_event_id),))
+                    if event is None:
+                        raise ApiError(409, "event_identity_mismatch", "请求赛事与目标数据库不一致")
+                    event_uuid = self.headers.get("X-Event-UUID") or ""
+                    if event_uuid and event_uuid != event["uuid"]:
+                        raise ApiError(409, "event_identity_mismatch", "请求携带的赛事身份与目标数据库不一致")
+                    deployment_id = self.headers.get("X-Deployment-ID") or ""
+                    local_deployment = db.q1(conn, "SELECT v FROM settings WHERE k = 'deployment_id'")
+                    if deployment_id and (local_deployment is None or deployment_id != local_deployment["v"]):
+                        raise ApiError(409, "deployment_identity_mismatch", "请求来自其他部署或数据集，不能直接提交")
             body = self._read_body() if method in ("POST", "PUT", "DELETE") else {}
             frozen_submission = path.startswith("/api/scoring/") or bool(
                 re.fullmatch(r"/api/matches/\d+/(correction|correct|cancel|reset-review)", path))
@@ -482,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             if not public:
                 access.authorize(ctx, scope)
             def materialize():
+                from . import event_settings
+                event_settings.guard(ctx)
                 result = func(ctx)
                 if not public:
                     result = access.filter_result(ctx, result)
@@ -491,45 +402,18 @@ class Handler(BaseHTTPRequestHandler):
                     return json_response({"ok": True, **result})
                 return json_response({"ok": True, "data": result})
 
-            replay_reader = getattr(func, 'http_readonly_replay', None)
-            if method == 'POST' and replay_reader is not None:
-                # Reading a committed immutable receipt is not a new decision.
-                # Keep it off the write queue; the reader repeats all current
-                # authority and exact-content checks and cannot materialize.
-                with db.read_tx(conn):
-                    replay_result = replay_reader(ctx)
-                    if replay_result is not None:
-                        replay_result = access.filter_result(ctx, replay_result)
-                        self.business_outcome = 'committed'
-                        return json_response({'ok': True, **replay_result})
             if method in ("POST", "PUT", "DELETE") and getattr(func, "http_transaction", True):
                 # 赛事创建/元数据更新原来会写第二个库，不能仅凭索引库回滚断言无提交。
                 cross_database = scope == "registry" and path.startswith("/api/events")
                 try:
-                    # Registry is the account/token authority, event users are FK/display snapshots.
-                    # All HTTP writes take locks in this order. No network IO is performed inside.
-                    with self.server.write_admission.enter(registry_conn), db.tx(registry_conn):
-                        if not public:
-                            fresh_user = security.user_for_token(registry_conn, token)
-                            if fresh_user is None or fresh_user['id'] != user['id']:
-                                raise ApiError(401, 'unauthorized', '登录或账号权限已失效')
-                            if roles is not None and roles != () and fresh_user['role'] not in roles:
-                                raise ApiError(403, 'forbidden', '当前角色没有该操作权限')
-                            ctx.user = fresh_user
-                            access.authorize(ctx, scope)
-                        with db.tx(conn):
-                            self.business_outcome = "unknown"
-                            if user and conn is not registry_conn:
-                                db.ensure_user_snapshot(conn, ctx.user)
-                            from . import result_impacts
-                            result_impacts.guard_request(ctx)
-                            response = materialize()
-                        # Event COMMIT is the business linearization point. A subsequent
-                        # registry-fence failure must not be reported as an event rollback.
-                        if conn is not registry_conn:
-                            self.business_outcome = 'committed'
+                    from . import event_settings
+                    with event_settings.write_guard(ctx), db.tx(conn):
+                        self.business_outcome = "unknown"
+                        if user and conn is not registry_conn:
+                            db.ensure_user_snapshot(conn, user)
+                        response = materialize()
                 except BaseException as exc:
-                    if self.business_outcome != 'committed' and not cross_database and getattr(exc, "transaction_rolled_back", False):
+                    if not cross_database and getattr(exc, "transaction_rolled_back", False):
                         self.business_outcome = "not_committed"
                     raise
                 self.business_outcome = "committed"
@@ -540,14 +424,12 @@ class Handler(BaseHTTPRequestHandler):
                     return materialize()
             if method != "GET":
                 self.business_outcome = "unknown"
-            response = materialize()
+            from . import event_settings
+            with event_settings.write_guard(ctx):
+                response = materialize()
             if method != "GET":
                 self.business_outcome = "committed"
                 self._invalidate_event_stats(raw_event_id)
-            return response
-        # 方法不匹配但路径存在：返回 405 + Allow；完全不存在的路径仍 404（P3-09）。
-        response = self._method_not_allowed(method, path)
-        if response is not None:
             return response
         raise ApiError(404, "not_found", f"接口不存在：{method} {path}")
 
@@ -711,7 +593,7 @@ def serve(host: str | None = None, port: int | None = None):
     init_event_databases()
     conn = db.connect()
     try:
-        initial_password = security.ensure_default_users(conn)
+        security.ensure_default_users(conn)
     finally:
         conn.close()
     bind_host = host or config.HOST
@@ -732,13 +614,8 @@ def serve(host: str | None = None, port: int | None = None):
         print(f"  访问地址：http://{bind_host}:{bind_port}/")
     print(f"  全局索引库：{config.DB_PATH}")
     print(f"  赛事数据库目录：{config.EVENTS_DIR}")
-    if initial_password:
-        print(f"  管理员账号：admin　初始密码：{initial_password}")
-        print("  该密码只在本行显示一次，请登录后立即在“账号管理”中修改；"
-              "其他角色账号请由管理员按需创建（系统不再内置固定密码账号）。")
-    else:
-        print("  管理员账号：admin（密码由 STSS_ADMIN_PASSWORD 指定或此前已设置）")
-        print("  忘记密码时用 python run.py --set-admin-password 新密码 重设。")
+    print("  管理员账号：admin（使用已配置的登录密码）")
+    print("  忘记密码时用 python run.py --set-admin-password 新密码 重设。")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -749,4 +626,4 @@ def serve(host: str | None = None, port: int | None = None):
 
 def load_routes():
     """导入所有接口模块以注册路由。"""
-    from .api import auth, catalog, scheduling, schedule, auto_schedule, individual_draw, matches, scoring, standings, exports, admin, imports, school_registration, school_import, group_draw, display, result_review  # noqa: F401
+    from .api import registration_history, auth, catalog, scheduling, schedule, auto_schedule, individual_draw, matches, scoring, standings, exports, admin, imports, school_registration, school_import, group_draw, display, result_import  # noqa: F401

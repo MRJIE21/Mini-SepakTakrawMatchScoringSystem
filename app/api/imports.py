@@ -42,10 +42,6 @@ def import_template(ctx):
 def _parse(text: str, cat: dict) -> list[dict]:
     if not isinstance(text, str) or not text.strip():
         raise bad_request("请上传 CSV 文件或粘贴含表头的报名表")
-    # 与学校报名表导入（app/school_import.py）保持同一口径：超过 2 MB 先给可执行的拆分提示，
-    # 避免大字段先把 csv 模块的 131072 字段上限错误抛给现场人员。
-    if len(text.encode("utf-8")) > 2 * 1024 * 1024:
-        raise bad_request("报名表超过 2 MB，请拆分")
     text = text.lstrip("\ufeff")
     delimiter = "\t" if "\t" in text.splitlines()[0] else ","
     try:
@@ -158,7 +154,8 @@ def _enroll_item(conn, user, cat: dict, rows: list[dict]) -> dict:
         athlete = _athlete(conn, school, rows[0], cat)
         body["athlete"] = athlete
         if athlete.get("athlete_id"):
-            existing = db.q1(conn, "SELECT * FROM participations WHERE category_id = ? AND athlete_id = ?",
+            existing = db.q1(conn, """SELECT * FROM participations
+                WHERE category_id = ? AND athlete_id = ? AND deleted_at IS NULL""",
                              (cat["id"], athlete["athlete_id"]))
             if existing:
                 if existing["status"] != "active":
@@ -198,7 +195,8 @@ def _enroll_item(conn, user, cat: dict, rows: list[dict]) -> dict:
             if incoming != expected or incoming_captain != catalog.team_captain_id(conn, team["id"]):
                 raise conflict("该学校已有项目名单，队员、号码或队长不同，请在报名名单中核对修改")
             body["team_id"] = team["id"]
-            existing = db.q1(conn, "SELECT * FROM participations WHERE category_id = ? AND team_id = ?",
+            existing = db.q1(conn, """SELECT * FROM participations
+                WHERE category_id = ? AND team_id = ? AND deleted_at IS NULL""",
                              (cat["id"], team["id"]))
             if existing:
                 if existing["status"] != "active":

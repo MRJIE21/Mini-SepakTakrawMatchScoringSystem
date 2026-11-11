@@ -8,8 +8,16 @@
    - 危险操作收进“更多”菜单，列表以浏览为主（§6.1、Q13）；
    - 所有保存都走统一编辑器：失败保留输入并定位错误，成功后只局部刷新（Q05、Q08）。 */
 import { api } from '../api.js';
+import { normalizePersonName } from '../personEditor.js';
+import { openEnrollmentImport } from '../enrollmentImport.js';
 import { athletePicker } from '../athletePicker.js';
 import { registerView, state, loadStructure, go } from '../main.js';
+import { hasCapability } from '../permissions.js';
+import {
+  REGISTRATION_DELETE_CAPABILITY,
+  registrationDeletePayload, registrationDeleteConfirmation,
+  registrationDeleteSuccess, registrationDeleteFailure,
+} from '../registrationDelete.js';
 import {
   h, field, textInput, selectInput, searchSelect, integerInput, textarea, table, toast,
   formDialog, confirmAsync, clear, statusBadge, moreMenu, emptyState, filteredEmptyState,
@@ -20,6 +28,8 @@ const GENDER = { male: '男子', female: '女子' };
 const KIND = { team: '三人赛', individual: '个人赛' };
 const canWrite = () => ['admin', 'organizer'].includes(state.user.role);
 const isAdmin = () => state.user.role === 'admin';
+const canDeleteRegistration = () => hasCapability(
+  state.capabilities, REGISTRATION_DELETE_CAPABILITY);
 
 function newUid(prefix = 'req') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -141,12 +151,12 @@ async function renderSchoolPanel(box, group) {
 }
 
 async function removeSchool(school, reload) {
-  /* 删除档案要显示影响范围（§8.6）；有参赛引用时服务端会拒绝并说明原因 */
+  /* 删除学校同时级联清除报名及关联数据，确认框显示影响范围。 */
   let detail = null;
   try { detail = await api.get(`/api/schools/${school.id}/detail`); } catch { /* 拿不到就只给通用说明 */ }
   const impact = detail
-    ? `将删除该校档案：${detail.athletes.length} 名运动员、${detail.teams.length} 个三人赛项目名单。\n已进入参赛名单的学校不能被删除。`
-    : '将删除该校档案及其运动员、项目名单。';
+    ? `将删除该校档案：${detail.athletes.length} 名运动员、${detail.teams.length} 个三人赛项目名单，以及全部报名记录和关联场次、成绩及抽签名单。受影响项目名次需重新确认。此操作不可撤销。`
+    : '将删除该校档案及其运动员、项目名单、全部报名记录和关联场次、成绩及抽签名单。受影响项目名次需重新确认。此操作不可撤销。';
   if (!await confirmAsync('删除学校', `${school.name}\n${impact}`, '确认删除')) return;
   await api.del(`/api/schools/${school.id}`);
   toast('已删除学校档案', 'ok');
@@ -346,7 +356,7 @@ function individualSection(d) {
 
 /* ------------------------------------------------------------------ 运动员编辑 */
 function openAthleteEditor({ school, group, athlete, onSaved }) {
-  const name = textInput(athlete ? athlete.name : '', { placeholder: '姓名' });
+  const name = textInput(athlete ? athlete.name : '', { placeholder: '姓名', 'aria-label': '姓名' });
   const gender = selectInput([['', '未填'], ['male', '男子'], ['female', '女子']],
     athlete ? athlete.gender : '');
   const jersey = textInput(athlete ? athlete.jersey_no : '', { placeholder: '常用号码' });
@@ -355,12 +365,12 @@ function openAthleteEditor({ school, group, athlete, onSaved }) {
 
   const save = async () => {
     const payload = {
-      name: name.value.trim(), gender: gender.value,
+      name: normalizePersonName(name.value), gender: gender.value,
       jersey_no: jersey.value.trim(), note: note.value,
     };
     if (athlete) {
       await api.put(`/api/athletes/${athlete.id}`, { ...payload, base_rev: athlete.rev });
-      toast('已保存运动员档案，尚未报名', 'ok');
+      toast('保存成功', 'ok');
     } else {
       const res = await api.post(`/api/schools/${school.id}/athletes`, payload);
       /* 同名只作候选提示，不自动合并（§8.2） */
@@ -370,7 +380,8 @@ function openAthleteEditor({ school, group, athlete, onSaved }) {
         toast('已保存运动员档案，尚未报名', 'ok');
       }
     }
-    onSaved();
+    try { await onSaved(); }
+    catch (error) { toast(`保存成功，页面刷新失败：${error.message}`, 'error'); }
     return payload;
   };
 
@@ -399,7 +410,7 @@ function openAthleteEditor({ school, group, athlete, onSaved }) {
     width: 'min(520px, 94vw)',
     sections: [{
       body: h('div.form-grid',
-        field('姓名', name, { required: true, name: 'name' }),
+        field('姓名', name, { required: true, name: 'name', hint: '去除首尾空格后须为 1–50 个字符' }),
         field('性别', gender, { name: 'gender', hint: '未知性别不会被自动改写，请按需补齐' }),
         field('常用号码', jersey, { name: 'jersey_no', hint: '具体项目的报名号码可在项目名单中调整' }),
         field('备注', note, { name: 'note' }),
@@ -412,7 +423,7 @@ function openAthleteEditor({ school, group, athlete, onSaved }) {
 /* checkbox 需要暴露内部 input 给“沿用性别”逻辑读取 */
 function checkboxLike(label) {
   const input = h('input', { type: 'checkbox' });
-  const wrap = h('label.row.tight', null, input, h('span', label));
+  const wrap = h('label.row.tight', { style: 'align-items:center' }, input, h('span', label));
   wrap.input = input;
   return wrap;
 }
@@ -466,7 +477,7 @@ async function openTeamEditor({ group, school, category, team, onSaved }) {
       const box = h('input', { type: 'checkbox', checked: entry.checked, 'aria-label': `选择 ${a.name}` });
       /* 本队报名号码：预填常用号码，修改不回写运动员档案（§6.2） */
       const jersey = textInput(entry.jersey, {
-        class: 'jersey-input', placeholder: '号码', 'aria-label': `${a.name} 本队号码`,
+        style: 'width:78px', placeholder: '号码', 'aria-label': `${a.name} 本队号码`,
         oninput: (e) => { entry.jersey = e.target.value; },
       });
       box.onchange = () => {
@@ -503,7 +514,7 @@ async function openTeamEditor({ group, school, category, team, onSaved }) {
         checked: captainId === a.id, 'aria-label': `队长 ${a.name}`,
       });
       radio.onchange = () => { captainId = Number(radio.value); drawCaptain(); };
-      captainBox.append(h('label.row.tight', null, radio, h('span', a.name)));
+      captainBox.append(h('label.row.tight', { style: 'align-items:center' }, radio, h('span', a.name)));
     }
     if (captainId === null) {
       captainBox.append(h('div.warn-box.mt', '尚未指定队长。可以先保存，开赛前补齐。'));
@@ -606,6 +617,12 @@ async function renderParticipationPanel(box, group) {
 export function rosterView(cat, rows, reload, remembered = null, onState = null) {
   const ui = remembered || { q: '', status: 'all', profile: 'all' };
   const wrap = h('div');
+  const deleteAllowed = canDeleteRegistration();
+  const selected = ui.deleteSelected instanceof Set ? ui.deleteSelected : new Set();
+  ui.deleteSelected = selected;
+  const available = new Set(rows.map((row) => row.id));
+  for (const id of selected) if (!available.has(id)) selected.delete(id);
+  let deleting = false;
   const search = textInput('', {
     type: 'search', placeholder: '搜索学校或运动员', 'aria-label': '搜索报名名单',
     oninput: (e) => { ui.q = e.target.value; onState?.(ui); draw(); },
@@ -619,6 +636,61 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
   profileSel.value = ui.profile || 'all';
   const stats = h('div.stat-grid.mb');
   const list = h('div');
+  const deleteFeedback = h('div.registration-delete-feedback.hidden', {
+    role: 'status', 'aria-live': 'polite', hidden: true,
+  });
+  const batchDelete = deleteAllowed ? h('button.btn.btn-danger.touch', {
+    type: 'button', disabled: true, onclick: () => removeRecords(
+      rows.filter((row) => selected.has(row.id))),
+  }, '批量删除') : null;
+
+  function reportDelete(message, error = true) {
+    deleteFeedback.hidden = false;
+    deleteFeedback.className = `registration-delete-feedback ${error ? 'warn-box' : 'info-box'}`;
+    deleteFeedback.textContent = message;
+    deleteFeedback.setAttribute('role', error ? 'alert' : 'status');
+  }
+
+  function updateBatchAction() {
+    if (!batchDelete) return;
+    batchDelete.textContent = selected.size ? `批量删除（${selected.size}）` : '批量删除';
+    batchDelete.disabled = deleting || selected.size === 0 || !!cat.registration_locked_reason;
+  }
+
+  async function removeRecords(records) {
+    if (deleting || !records.length) return;
+    let payload;
+    try { payload = registrationDeletePayload(cat.id, records); }
+    catch (error) { reportDelete(error.message); return; }
+    const ok = await confirmAsync(records.length === 1 ? '删除报名记录' : '批量删除报名记录',
+      registrationDeleteConfirmation(cat, records), records.length === 1 ? '确认删除' : `确认删除 ${records.length} 条`,
+      { danger: true, initialFocus: 'cancel' });
+    if (!ok) return;
+    deleting = true;
+    draw();
+    try {
+      const result = records.length === 1
+        ? await api.del(`/api/participations/${records[0].id}`, payload)
+        : await api.post('/api/participations/batch-delete', payload);
+      for (const record of records) selected.delete(record.id);
+      const message = registrationDeleteSuccess(result);
+      toast(message, 'ok');
+      await reload();
+    } catch (error) {
+      deleting = false;
+      if (error.outcome_unknown) {
+        const message = '删除结果尚未确认，系统未自动重试；正在重新读取报名名单，请按后台现状核对。';
+        reportDelete(message);
+        toast(message, 'error');
+        await reload();
+        return;
+      }
+      const message = registrationDeleteFailure(error, records.length);
+      reportDelete(message);
+      toast(message.split('\n')[0], 'error');
+      draw();
+    }
+  }
 
   function visible() {
     const kw = ui.q.trim().toLowerCase();
@@ -641,6 +713,7 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
     );
     clear(list);
     const shown = visible();
+    updateBatchAction();
     if (!rows.length) {
       list.append(emptyState({
         text: cat.kind === 'team' ? '还没有学校报名' : '还没有运动员报名',
@@ -659,7 +732,28 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
       }));
       return;
     }
+    const allShownSelected = shown.length > 0 && shown.every((row) => selected.has(row.id));
+    const someShownSelected = shown.some((row) => selected.has(row.id));
+    const selectAll = deleteAllowed ? h('input', {
+      type: 'checkbox', checked: allShownSelected, disabled: deleting || !!cat.registration_locked_reason,
+      'aria-label': '选择当前显示的报名记录', onchange: (event) => {
+        for (const row of shown) {
+          if (event.target.checked) selected.add(row.id); else selected.delete(row.id);
+        }
+        draw();
+      },
+    }) : null;
+    if (selectAll) selectAll.indeterminate = !allShownSelected && someShownSelected;
     list.append(h('div.table-scroll.roster-scroll', table([
+      deleteAllowed ? {
+        label: selectAll, cellClass: 'roster-select', render: (r) => h('input', {
+          type: 'checkbox', checked: selected.has(r.id), disabled: deleting || !!cat.registration_locked_reason,
+          'aria-label': `选择报名 ${r.display}`, onchange: (event) => {
+            if (event.target.checked) selected.add(r.id); else selected.delete(r.id);
+            draw();
+          },
+        }),
+      } : null,
       { label: cat.kind === 'team' ? '参赛学校' : '学校', cellClass: 'roster-school',
         render: (r) => h('b', r.school_short || r.school_name) },
       { label: '种子序号', render: (r) => seedCell(r, cat, reload), align: 'center', cellClass: 'roster-seed' },
@@ -695,8 +789,11 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
             } : null,
             { label: r.status === 'active' ? '退出报名' : '恢复报名', disabled: !!cat.registration_locked_reason,
               onClick: () => toggleStatus(r, reload) },
-            { label: '移除报名', danger: true, onClick: () => removeParticipation(r, reload) },
-          ]) : null),
+          ]) : null,
+          deleteAllowed ? h('button.btn.small.btn-danger', {
+            type: 'button', disabled: deleting || !!cat.registration_locked_reason,
+            onclick: () => removeRecords([r]), 'aria-label': `删除报名 ${r.display}`,
+          }, '删除') : null),
       },
     ].filter(Boolean), shown, { class: 'roster-table', responsive: true })));
   }
@@ -707,7 +804,12 @@ export function rosterView(cat, rows, reload, remembered = null, onState = null)
       canWrite() ? h('button.btn.btn-primary', { disabled: !!cat.registration_locked_reason,
         onclick: () => openEnrollEditor(cat, reload) },
         cat.kind === 'team' ? '添加参赛学校' : '添加参赛运动员') : null,
+      canWrite() ? h('button.btn.touch', { disabled: !!cat.registration_locked_reason,
+        onclick: () => openEnrollmentImport(cat, reload) },
+        '批量导入报名') : null,
+      batchDelete,
     ),
+    deleteFeedback,
     list,
     h('div.small.muted.mt', cat.registration_locked_reason
       ? `报名与种子只读：${cat.registration_locked_reason}。人员资料仍可在学校报名工作台维护。`
@@ -776,16 +878,6 @@ async function toggleStatus(r, reload) {
   await api.put(`/api/participations/${r.id}`,
     { status: withdrawing ? 'withdrawn' : 'active', base_rev: r.rev });
   toast(withdrawing ? '已标记退出' : '已恢复报名', 'ok');
-  reload();
-}
-
-async function removeParticipation(r, reload) {
-  const ok = await confirmAsync('移除报名',
-    `${r.display}\n只删除尚未被比赛、名次或成绩引用的报名记录；学校与人员档案保留。\n已有关联时会被拒绝并说明原因。`,
-    '确认移除');
-  if (!ok) return;
-  await api.del(`/api/participations/${r.id}`);
-  toast('已移除报名记录', 'ok');
   reload();
 }
 
@@ -1045,7 +1137,7 @@ function createTeamEnrollmentForm({ cat, school }) {
         type: 'checkbox', checked: chosen.has(row.key), 'aria-label': `选择 ${row.name}`,
       });
       const jersey = textInput(jerseyOf(row), {
-        class: 'jersey-input', placeholder: '号码', 'aria-label': `${row.name} 本队号码`,
+        style: 'width:78px', placeholder: '号码', 'aria-label': `${row.name} 本队号码`,
       });
       box.onchange = () => {
         if (box.checked) {
@@ -1079,7 +1171,7 @@ function createTeamEnrollmentForm({ cat, school }) {
   function buildNewAthleteRow() {
     const name = textInput('', { placeholder: '姓名' });
     const gender = selectInput([[cat.gender, GENDER[cat.gender]]], cat.gender);
-    const jersey = textInput('', { placeholder: '号码', class: 'jersey-input' });
+    const jersey = textInput('', { placeholder: '号码', style: 'width:82px' });
     const note = textInput('', { placeholder: '班级、学号等区分信息' });
     const confirmed = h('input', { type: 'checkbox' });
     const review = h('div.same-name-review.hidden');
@@ -1090,7 +1182,7 @@ function createTeamEnrollmentForm({ cat, school }) {
       for (const p of same) review.append(h('div.same-name-person', `${p.name} · ${GENDER[p.gender] || '性别未填'} · ${p.note || '备注未填'}`));
       if (same.length) review.append(h('label.row.tight', confirmed, '已核对全校同名人员，确认新增的是另一人'));
     };
-    const add = h('button.btn.small.self-end', null, '加入名单');
+    const add = h('button.btn.small', { style: 'align-self:flex-end' }, '加入名单');
     add.onclick = () => {
       const value = name.value.trim();
       if (!value) { toast('请填写姓名', 'error'); name.focus(); return; }
@@ -1123,7 +1215,7 @@ function createTeamEnrollmentForm({ cat, school }) {
         'aria-label': `队长 ${row.name}`,
       });
       radio.onchange = () => { captainKey = row.key; drawCaptain(); };
-      captainBox.append(h('label.row.tight', null, radio,
+      captainBox.append(h('label.row.tight', { style: 'align-items:center' }, radio,
         h('span', row.name)));
     }
     if (captainKey === null) {

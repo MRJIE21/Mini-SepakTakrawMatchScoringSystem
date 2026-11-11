@@ -16,7 +16,7 @@ def install(conn):
         'schools': ('name', 'short_name'),
         'teams': ('name', 'school_id'),
         'athletes': ('name', 'school_id'),
-        'participations': ('team_id', 'athlete_id', 'category_id', 'status'),
+        'participations': ('team_id', 'athlete_id', 'category_id', 'status', 'deleted_at'),
         'venues': ('name',),
         'plans': ('category_id',),
     }

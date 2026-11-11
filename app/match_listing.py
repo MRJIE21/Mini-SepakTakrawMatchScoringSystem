@@ -61,9 +61,11 @@ def list_page(ctx, queue=False):
         LEFT JOIN venues v ON v.id=m.venue_id LEFT JOIN stages st ON st.id=m.stage_id'''
     if ctx.arg('q'):
         joins += ''' LEFT JOIN participations hp ON hp.id=COALESCE(m.home_actual,m.home_participation)
+                AND hp.deleted_at IS NULL
             LEFT JOIN teams ht ON ht.id=hp.team_id LEFT JOIN athletes ha ON ha.id=hp.athlete_id
             LEFT JOIN schools hs ON hs.id=COALESCE(ht.school_id,ha.school_id)
             LEFT JOIN participations ap ON ap.id=COALESCE(m.away_actual,m.away_participation)
+                AND ap.deleted_at IS NULL
             LEFT JOIN teams at ON at.id=ap.team_id LEFT JOIN athletes aa ON aa.id=ap.athlete_id
             LEFT JOIN schools ass ON ass.id=COALESCE(at.school_id,aa.school_id)'''
         search = '%' + ctx.arg('q').strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'

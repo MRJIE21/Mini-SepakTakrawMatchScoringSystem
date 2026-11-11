@@ -1,11 +1,16 @@
 @echo off
 setlocal
 chcp 65001 >nul
-rem 重定向输出到文件时也强制 UTF-8，避免按系统 locale(GBK) 落盘导致日志乱码
-set "PYTHONUTF8=1"
-set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0"
 set "STSS_LAUNCHER=1"
+set "STSS_DATA_DIR=%~dp0data"
+set "STSS_DB=%~dp0data\registry.db"
+set "STSS_EVENTS_DIR=%~dp0data\events"
+set "STSS_BACKUPS_DIR=%~dp0data\backups"
+set "STSS_LOG_DIR=%~dp0data\logs"
+set "STSS_LOCK_FILE=%~dp0data\stss.instance.lock"
+set "STSS_HOST=0.0.0.0"
+set "STSS_PORT=8003"
 
 python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
 if not errorlevel 1 goto use_python

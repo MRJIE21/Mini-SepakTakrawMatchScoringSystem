@@ -1,3 +1,4 @@
+import './originReset.js';
 /* 稳定打印页：/print.html?type=category-notice|school-notice&...&order=asc|desc
 
    安全边界：URL 只带业务参数，登录令牌与赛事上下文从同源 localStorage 读取，
@@ -10,7 +11,7 @@ const TYPES = {
 };
 const params = new URLSearchParams(window.location.search);
 const type = (params.get('type') || '').trim();
-const order = params.get('order') === 'desc' ? 'desc' : 'asc';
+const order = params.get('order') === 'asc' ? 'asc' : 'desc';
 const eventId = (params.get('event') || localStorage.getItem('stss_event') || '').trim();
 const categoryId = (params.get('category_id') || '').trim();
 const groupId = (params.get('group_id') || '').trim();
@@ -122,8 +123,7 @@ async function run() {
     return;
   }
   const html = await response.text();
-  /* 用服务端渲染的完整成绩单替换当前页面，地址栏保持为可刷新的 /print.html?...。
-     打印/另存为 PDF 入口由服务端打印模板自带的工具栏提供（button onclick="window.print()"）。 */
+  /* 用服务端渲染的完整成绩单替换当前页面，地址栏保持为可刷新的 /print.html?...。 */
   document.open();
   document.write(html);
   document.close();

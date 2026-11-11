@@ -1,6 +1,6 @@
 import { api, getToken, captureRequestContext } from './api.js';
 import { h, field, numberInput, selectInput, confirmAsync } from './ui.js';
-import { RULE_PRESETS, normalizeRules, normalizeSet, rulesSummary, setSummary, sameRules } from './teamRules.js';
+import { RULE_PRESETS, normalizeRules, normalizeSet, rulesSummary, sameRules } from './teamRules.js';
 
 export function validateEventRules(data, eventId) {
   if (!data || data.event_id !== eventId || data.rules_scope !== 'event'
@@ -48,13 +48,12 @@ export function createRulesEditor(eventRules, hooks) {
   const stateLabel = h('span.team-rules-state', '已保存');
   const overview = h('div.team-rules-overview', h('b', '当前规则'), summary);
   const editor = h('div.team-rules-body',
-    h('section.team-rules-section', h('div.team-rules-section-head', h('h4', '比赛局制'), h('p', '先赢过半局即获胜')),
-      h('div.team-rules-grid', field('几局几胜', maximum), customWrap)),
+    overview, preview, message, error,
+    h('section.team-rules-section', h('div.team-rules-section-head', h('h4', '比赛局制')),
+      h('div.team-rules-grid', h('div.field', maximum), customWrap)),
     ordinary.root,
-    h('section.team-rules-section', h('div.team-rules-inherit', h('div', h('h4', '决胜局'),
-      h('p.small.muted', '最后可能的一局；一局制的唯一一局使用此设置。')),
-      h('label.team-rules-inherit-control', inherit, '沿用普通局')), deciding.root),
-    overview, preview, message, error);
+    h('section.team-rules-section', h('div.team-rules-inherit', h('div', h('h4', '决胜局')),
+      h('label.team-rules-inherit-control', inherit, '沿用普通局')), deciding.root));
   const save = h('button.btn.btn-primary', { onclick: saveRules }, '保存规则');
   const cancel = h('button.btn', { onclick: async () => {
     if (feedback.blocked) return;
@@ -62,36 +61,22 @@ export function createRulesEditor(eventRules, hooks) {
     if (!isCurrent()) return;
     fill(baseline.rules); feedback.clear(); maximum.focus();
   } }, '取消修改规则');
-  const refresh = h('button.btn', { onclick: async () => {
-    if (feedback.blocked) return;
-    try {
-      const fresh = await read(); if (!isCurrent()) return;
-      baseline = fresh; hooks.onMetadata?.(fresh); draw();
-      message.textContent = fresh.rules_state === 'legacy_mixed' ? '后台规则尚未统一。本次草稿已保留，请核对原有差异后保存。'
-        : `后台规则：${rulesSummary(fresh.rules)}。本次输入已保留，请核对后保存；取消将采用后台规则。`;
-    } catch (e) { if (isCurrent()) fail(e); }
-  } }, '核对后台规则');
-  editor.append(h('div.team-rules-footer',
-    h('p.small.muted', '修改后仅影响尚未开始的比赛。保存前会显示适用范围。'),
-    h('div.team-rules-actions', refresh, cancel, save)),
-    h('details.team-rules-help', h('summary', '规则说明与参考'),
-      h('p.small.muted', h('a', { href: 'https://www.sepaktakraw.ca/regu-sepak-takraw', target: '_blank', rel: 'noopener noreferrer' }, '15 分固定加赛规则参考'), ' · 仅设置计分口径，请按实际赛事规程选择。')));
-  refresh.classList.add('team-rules-refresh'); cancel.classList.add('team-rules-cancel'); save.classList.add('team-rules-save');
+  editor.append(h('div.team-rules-footer', h('div.team-rules-actions', cancel, save)));
+  cancel.classList.add('team-rules-cancel'); save.classList.add('team-rules-save');
   root.append(stateLabel, editor);
   const feedback = hooks.feedbackFactory(editor, isCurrent);
-  const disabled = [save, cancel, refresh, ...controls];
+  const disabled = [save, cancel, ...controls];
   function fail(e) { error.textContent = e.message; error.classList.remove('hidden'); }
-  function revealInvalidParameters() {
-    try { ordinary.value(); } catch { ordinary.details.open = true; }
-    if (!inherit.checked) { try { deciding.value(); } catch { deciding.details.open = true; } }
-  }
   function readValue() {
     return normalizeRules({ schema_version: 1, max_sets: maximum.value === 'custom' ? Number(custom.value) : Number(maximum.value),
       regular: ordinary.value(), deciding: inherit.checked ? null : deciding.value() });
   }
   function draw() {
     customWrap.classList.toggle('hidden', maximum.value !== 'custom');
-    deciding.root.classList.toggle('hidden', inherit.checked);
+    deciding.root.disabled = inherit.checked;
+    if (inherit.checked) {
+      try { deciding.fill(ordinary.value()); } catch { /* Keep the last valid inherited parameters. */ }
+    }
     ordinary.draw(); deciding.draw();
     const dirty = hasEdits(editor);
     const mixed = baseline.rules_state === 'legacy_mixed';
@@ -103,7 +88,6 @@ export function createRulesEditor(eventRules, hooks) {
     try { preview.textContent = `本次修改：${rulesSummary(readValue())}`; error.classList.add('hidden'); }
     catch (e) {
       preview.hidden = false; preview.textContent = '请填写有效规则参数'; fail(e);
-      revealInvalidParameters();
     }
   }
   function fill(rules) {
@@ -119,7 +103,7 @@ export function createRulesEditor(eventRules, hooks) {
   async function saveRules() {
     if (feedback.blocked || !isCurrent()) return;
     let desired; try { desired = readValue(); } catch (e) {
-      fail(e); revealInvalidParameters(); error.tabIndex = -1; error.focus(); return;
+      fail(e); error.tabIndex = -1; error.focus(); return;
     }
     await mutate(async () => {
       disabled.forEach(control => { control.disabled = true; });
@@ -168,26 +152,28 @@ export function createRulesEditor(eventRules, hooks) {
     const capEnabled = track(h('input', { type: 'checkbox', checked: true, 'aria-label': `${label}启用封顶` }));
     const cap = track(numberInput(15, { min: 2, max: 999, step: 1, 'aria-label': `${label}封顶分` }));
     const extension = track(numberInput(17, { min: 3, max: 999, step: 1, 'aria-label': `${label}固定加赛分` }));
-    const capField = field('封顶分', cap);
-    const capWrap = h('div', h('label.row.tight', capEnabled, '启用封顶'), capField);
+    cap.id = `team-rules-${eventId}-${showHeading ? 'regular' : 'deciding'}-cap`;
+    const capField = h('fieldset.team-rules-cap-value', cap);
+    const capWrap = h('div.field.team-rules-cap',
+      h('div.team-rules-cap-head', h('label', { for: cap.id }, '封顶分'),
+        h('label.team-rules-cap-toggle', capEnabled, '启用封顶')), capField);
     const extensionWrap = field('固定加赛分', extension);
-    const hint = h('p.small.muted');
     const quickButtons = [
       [0, '15 分直接获胜'], [2, '15 分 · 14 平后到 17'], ['custom', '自定义参数'],
     ].map(([key, text]) => {
       const button = h('button.btn.team-rules-preset', { type: 'button', onclick: () => {
-        if (key === 'custom') { preset.value = 'custom'; details.open = true; preset.focus(); }
-        else { setValues(RULE_PRESETS[key][1]); details.open = false; }
+        if (key === 'custom') { preset.value = 'custom'; preset.focus(); }
+        else { setValues(RULE_PRESETS[key][1]); }
         root.dispatchEvent(new Event('input', { bubbles: true }));
       } }, text);
       controls.push(button);
       return { key, button };
     });
-    const details = h('details.team-rules-details', h('summary', '查看和调整详细参数'),
+    const details = h('div.team-rules-details',
       h('div.team-rules-grid', field('常用规则', preset), field('获胜方式', mode), field('目标分', target), capWrap, extensionWrap));
-    const section = h(showHeading ? 'section.team-rules-section' : 'div.team-rules-deciding',
-      showHeading ? h('div.team-rules-section-head', h('h4', label), h('p', '选择常用规则，或展开自定义参数')) : null,
-      h('div.team-rules-presets', ...quickButtons.map(item => item.button)), hint, details);
+    const section = h(showHeading ? 'section.team-rules-section' : 'fieldset.team-rules-deciding',
+      showHeading ? h('div.team-rules-section-head', h('h4', label)) : null,
+      h('div.team-rules-presets', ...quickButtons.map(item => item.button)), details);
     function value() {
       return normalizeSet(mode.value === 'fixed_deuce' ? { mode: 'fixed_deuce', target_points: Number(target.value), deuce_points: Number(extension.value) }
         : { mode: 'target', target_points: Number(target.value), win_by: mode.value === 'two' ? 2 : 1, point_cap: capEnabled.checked ? Number(cap.value) : null });
@@ -202,10 +188,10 @@ export function createRulesEditor(eventRules, hooks) {
     }
     preset.addEventListener('change', () => { if (preset.value !== 'custom') setValues(RULE_PRESETS[Number(preset.value)][1]); draw(); });
     for (const control of [mode, target, capEnabled, cap, extension]) control.addEventListener('input', () => { preset.value = 'custom'; draw(); });
-    return { root: section, details, value, fill: rule => { setValues(rule, true); details.open = preset.value === 'custom'; }, draw: () => {
-      capWrap.classList.toggle('hidden', mode.value === 'fixed_deuce'); capField.classList.toggle('hidden', !capEnabled.checked);
+    return { root: section, details, value, fill: rule => { setValues(rule, true); }, draw: () => {
+      capWrap.classList.toggle('hidden', mode.value === 'fixed_deuce');
+      capField.disabled = !capEnabled.checked;
       extensionWrap.classList.toggle('hidden', mode.value !== 'fixed_deuce');
-      try { hint.textContent = setSummary(value()) + '。'; } catch { hint.textContent = '请填写有效规则参数。'; }
       for (const { key, button } of quickButtons) {
         const selected = key === 'custom' ? !['0', '2'].includes(preset.value) : String(key) === preset.value;
         button.setAttribute('aria-pressed', String(selected));
@@ -214,7 +200,6 @@ export function createRulesEditor(eventRules, hooks) {
   }
   root.addEventListener('input', draw);
   for (const control of [maximum, custom, inherit]) control.addEventListener('input', () => {
-    if (control === inherit && !inherit.checked) deciding.details.open = true;
     draw();
   });
   fill(baseline.rules);

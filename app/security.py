@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
 import threading
 import time
@@ -27,6 +26,27 @@ ROLE_NAMES = {
     "viewer": "成绩查看者",
     "display_operator": "大屏操作员",
 }
+
+# 固定能力是角色之上的服务端授权边界。当前版本只开放给管理员；
+# 后续如增加授权管理，必须另行设计权限与审计流程。
+REGISTRATION_DELETE = "registration.delete"
+ROLE_CAPABILITIES = {
+    "admin": (REGISTRATION_DELETE,),
+    "organizer": (),
+    "recorder": (),
+    "viewer": (),
+    "display_operator": (),
+}
+
+
+def capabilities(user_or_role) -> list[str]:
+    role = (user_or_role.get("role") if isinstance(user_or_role, dict)
+            else str(user_or_role or ""))
+    return list(ROLE_CAPABILITIES.get(role, ()))
+
+
+def has_capability(user_or_role, capability: str) -> bool:
+    return capability in capabilities(user_or_role)
 
 # 登录失败限流：进程内内存实现，阈值可通过 config/env 调整；重启清零。
 _LOGIN_LOCK = threading.Lock()
@@ -84,18 +104,15 @@ def clear_login_failures(ip: str, username: str) -> None:
         _LOGIN_LOCKS.pop(f'user|{ip}|{username.strip().lower()}', None)
 
 
-def ensure_default_users(conn) -> str | None:
-    """首次启动只建立管理员账号。
+# Single source for the administrator bootstrap credential; never log or return it.
+ADMIN_INITIAL_PASSWORD = "123456"
 
-    不再内置固定密码：未显式设置 STSS_ADMIN_PASSWORD 时生成随机初始口令，
-    仅在启动控制台显示一次，必须登录后立即修改。
-    """
+
+def ensure_default_users(conn) -> None:
+    """首次启动只建立管理员账号，使用固定初始密码，不返回口令。"""
     if db.q1(conn, "SELECT id FROM users LIMIT 1"):
-        return None
-    configured = os.environ.get("STSS_ADMIN_PASSWORD")
-    password = configured or secrets.token_urlsafe(9)
-    create_user(conn, "admin", password, "admin", "赛事管理员")
-    return None if configured else password
+        return
+    create_user(conn, "admin", ADMIN_INITIAL_PASSWORD, "admin", "赛事管理员")
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
